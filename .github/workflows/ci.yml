@@ -48,7 +48,8 @@ jobs:
             docs/decisions/ADR-007-formal-syntax-and-indentation-grammar.md \
             docs/decisions/ADR-008-structured-concurrency-and-zero-gil.md \
             docs/decisions/ADR-009-typed-intermediate-representation-architecture.md \
-            docs/decisions/ADR-010-compiler-self-hosting-bootstrap-pipeline.md; do
+            docs/decisions/ADR-010-compiler-self-hosting-bootstrap-pipeline.md \
+            docs/decisions/OWNER-APPROVAL-2026-11-24.md; do
             if [ ! -f "$doc" ]; then
               echo "Error: Required documentation $doc is missing"
               exit 1
@@ -115,3 +116,9 @@ jobs:
         run: |
           cd compiler/poc
           go test -v ./...
+
+      - name: Verify Canonical Frontend CLI Parse
+        run: |
+          cd compiler/poc
+          go run ./cmd/wonc parse ../../examples/zlib_compression.won
+          go run ./cmd/wonc parse ../../tests/language-spec/valid/types/struct_and_enum.won

@@ -63,6 +63,21 @@ func New(report *diagnostic.Report, bindings map[string]*bindgen.BindingMeta) *C
 
 // CheckProgram 检查整个 AST 程序
 func (c *Checker) CheckProgram(prog *ast.Program) {
+	for _, decl := range prog.Decls {
+		switch decl.(type) {
+		case *ast.ImportDecl, *ast.FunctionDecl:
+			// 已支持
+		default:
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-SEM-010",
+				Severity:    "error",
+				Message:     fmt.Sprintf("顶层声明 %T 已通过规范语法解析，但完整语义检查尚未在当前阶段实现", decl),
+				File:        decl.GetSpan().File,
+				Span:        decl.GetSpan(),
+				Explanation: "Phase 1B 里程碑仅负责缩进前端解析，结构体/枚举/特质/泛型等语义分析将在 Phase 2 实现。",
+			})
+		}
+	}
 	for _, fn := range prog.Functions {
 		c.checkFunction(fn)
 	}
@@ -135,15 +150,15 @@ func (c *Checker) checkStatement(stmt ast.Stmt, scope *Scope) {
 				Message:     fmt.Sprintf("不能给不可变变量 '%s' 赋值", s.Target),
 				File:        s.Span.File,
 				Span:        s.Span,
-				Explanation: fmt.Sprintf("变量 '%s' 通过 'let' 声明为只读。WON 默认所有绑定不可变，若需修改请声明为 'let mut'。", s.Target),
+				Explanation: fmt.Sprintf("变量 '%s' 通过 'let' 声明为只读。WON 默认所有绑定不可变，若需修改请使用 'var' 声明。", s.Target),
 				Fixes: []diagnostic.Fix{
 					{
-						Description: fmt.Sprintf("将变量 '%s' 声明修改为可变 ('let mut')", s.Target),
+						Description: fmt.Sprintf("将变量 '%s' 声明修改为可变 ('var')", s.Target),
 						Edits: []diagnostic.Edit{
 							{
 								Start:       v.LetTokenSpan.Start.Byte,
 								End:         v.LetTokenSpan.End.Byte,
-								Replacement: "let mut",
+								Replacement: "var",
 							},
 						},
 					},
@@ -173,6 +188,16 @@ func (c *Checker) checkStatement(stmt ast.Stmt, scope *Scope) {
 
 	case *ast.ExprStmt:
 		c.checkExpression(s.Expr, scope)
+
+	default:
+		c.report.AddDiagnostic(diagnostic.Diagnostic{
+			Code:        "WON-SEM-010",
+			Severity:    "error",
+			Message:     fmt.Sprintf("语句 %T 已通过规范语法解析，但完整语义检查尚未在当前阶段实现", stmt),
+			File:        stmt.GetSpan().File,
+			Span:        stmt.GetSpan(),
+			Explanation: "Phase 1B 仅实现了词法与语法前端及 Phase 0 核心校验，控制流扩充语义分析将在后续阶段实现。",
+		})
 	}
 }
 
@@ -211,15 +236,15 @@ func (c *Checker) checkExpression(expr ast.Expr, scope *Scope) {
 						Message:     fmt.Sprintf("无法对不可变变量 '%s' 进行可变借用 (&mut)", ident.Name),
 						File:        e.Span.File,
 						Span:        e.Span,
-						Explanation: fmt.Sprintf("变量 '%s' 使用 'let' 声明为不可变。向需要修改内容的函数传递 &mut 引用要求其定义带有 'mut' 标记。", ident.Name),
+						Explanation: fmt.Sprintf("变量 '%s' 使用 'let' 声明为不可变。向需要修改内容的函数传递 &mut 引用要求使用 'var' 声明。", ident.Name),
 						Fixes: []diagnostic.Fix{
 							{
-								Description: fmt.Sprintf("将变量 '%s' 声明修改为可变 ('let mut')", ident.Name),
+								Description: fmt.Sprintf("将变量 '%s' 声明修改为可变 ('var')", ident.Name),
 								Edits: []diagnostic.Edit{
 									{
 										Start:       v.LetTokenSpan.Start.Byte,
 										End:         v.LetTokenSpan.End.Byte,
-										Replacement: "let mut",
+										Replacement: "var",
 									},
 								},
 							},
@@ -338,7 +363,7 @@ func (c *Checker) checkExpression(expr ast.Expr, scope *Scope) {
 				Message:     fmt.Sprintf("调用外部 C 库函数 '%s::%s' 必须在显式 unsafe 代码块内", e.Namespace, e.Function),
 				File:        e.Span.File,
 				Span:        e.Span,
-				Explanation: "所有未经编译器证明内存安全的底层 C FFI 函数必须被包裹在 unsafe { ... } 中，确保审计边界清晰。",
+				Explanation: "所有未经编译器证明内存安全的底层 C FFI 函数必须被包裹在 'unsafe:' 块中，确保审计边界清晰。",
 			})
 		}
 
@@ -357,15 +382,15 @@ func (c *Checker) checkExpression(expr ast.Expr, scope *Scope) {
 						Message:     fmt.Sprintf("无法对不可变变量 '%s' 调用可变指针方法 (as_mut_ptr)", ident.Name),
 						File:        e.Span.File,
 						Span:        e.Span,
-						Explanation: fmt.Sprintf("变量 '%s' 使用 'let' 声明为不可变。获取可变原生指针 (*mut) 要求其定义带有 'mut' 标记。", ident.Name),
+						Explanation: fmt.Sprintf("变量 '%s' 使用 'let' 声明为不可变。获取可变原生指针 (*mut) 要求使用 'var' 声明。", ident.Name),
 						Fixes: []diagnostic.Fix{
 							{
-								Description: fmt.Sprintf("将变量 '%s' 声明修改为可变 ('let mut')", ident.Name),
+								Description: fmt.Sprintf("将变量 '%s' 声明修改为可变 ('var')", ident.Name),
 								Edits: []diagnostic.Edit{
 									{
 										Start:       v.LetTokenSpan.Start.Byte,
 										End:         v.LetTokenSpan.End.Byte,
-										Replacement: "let mut",
+										Replacement: "var",
 									},
 								},
 							},
@@ -380,6 +405,16 @@ func (c *Checker) checkExpression(expr ast.Expr, scope *Scope) {
 		c.inUnsafe = true
 		c.checkBlock(e.Block, scope)
 		c.inUnsafe = prev
+
+	default:
+		c.report.AddDiagnostic(diagnostic.Diagnostic{
+			Code:        "WON-SEM-010",
+			Severity:    "error",
+			Message:     fmt.Sprintf("表达式 %T 已通过规范语法解析，但完整语义检查尚未在当前阶段实现", expr),
+			File:        expr.GetSpan().File,
+			Span:        expr.GetSpan(),
+			Explanation: "Phase 1B 仅实现了词法与语法前端及 Phase 0 核心校验，进阶类型与借用分析将在后续阶段实现。",
+		})
 	}
 }
 

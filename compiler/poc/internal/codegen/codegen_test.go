@@ -17,31 +17,27 @@ func TestCodegenStrictISOC11Compliance(t *testing.T) {
 	src := `
 #import <zlib.h>
 
-fn main() -> i32 {
-    let msg = "WON C11 Verification";
-    let input_bytes = msg.as_bytes();
-    let input_len: u64 = 20;
+fn main() -> i32:
+    let msg = "WON C11 Verification"
+    let input_bytes = msg.as_bytes()
+    let input_len: u64 = 20
 
-    let max_bound = unsafe {
+    let max_bound = unsafe:
         zlib::compressBound(input_len)
-    };
 
-    let mut buf: [u8; 128] = [0; 128];
-    let mut buf_len: u64 = 128;
+    var buf: [u8; 128] = [0; 128]
+    var buf_len: u64 = 128
 
-    let status = unsafe {
+    let status = unsafe:
         zlib::compress(buf.as_mut_ptr(), &mut buf_len, input_bytes.as_ptr(), input_len)
-    };
 
-    let is_eq = unsafe {
+    let is_eq = unsafe:
         bytes_equal(input_bytes.as_ptr(), buf.as_ptr(), 5)
-    };
 
-    println("Status: ", status);
-    println("Bound: ", max_bound);
-    println("Equal: ", is_eq);
-    return 0;
-}
+    println("Status: ", status)
+    println("Bound: ", max_bound)
+    println("Equal: ", is_eq)
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_c11.won", src, report)
@@ -110,19 +106,21 @@ fn main() -> i32 {
 func TestCodegenUnsupportedNestedUnsafeRejected(t *testing.T) {
 	// 在嵌套表达式中包含多语句 unsafe 块应报错，而不是静默生成 0
 	src := `
-fn main() -> i32 {
-    let x = 1 + unsafe {
-        let a = 10;
-        let b = 20;
+fn main() -> i32:
+    let x = 1 + unsafe:
+        let a = 10
+        let b = 20
         a + b
-    };
-    return x;
-}
+    return x
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_nested_unsafe.won", src, report)
 	p := parser.New(lex, report, "test_nested_unsafe.won")
 	prog := p.ParseProgram()
+
+	if report.HasErrors() {
+		t.Fatalf("解析失败: %s", report.String())
+	}
 
 	gen := New(prog, nil)
 	cCode, err := gen.Generate()

@@ -1,0 +1,8 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Function Declaration Grammar (Malformed Signature)
+## Spec Reference: docs/language-spec/syntax-and-grammar.md#4-formal-ebnf-grammar
+## Expected Diagnostic: WON-SYN-005: Function declaration missing parameter parentheses or valid identifier.
+
+fn 123invalid():
+    return

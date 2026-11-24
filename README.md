@@ -87,11 +87,11 @@ The initial backend generates standard C code, harnessing decades of mature opti
 ## 4. Current Development Status
 
 > [!NOTE]
-> **WON is in Phase 1 (Language Foundations). Phase 0B/0B.2 is completed and verified; Phase 1A/1A.1 formal specification is delivered.**
+> **WON is in Phase 1 (Language Foundations). Phase 0B/0B.2, Phase 1A/1A.1 specifications, and Phase 1B Canonical Frontend (Lexer & Parser) are implemented and verified.**
 >
-> A functioning bootstrap compiler (`wonc0` under `compiler/poc/`) validates the Phase 0B proof of concept (C header ingestion, strict ISO C11 code generation with `-Werror`, and autonomous AI coding-agent repair).
+> The bootstrap compiler (`wonc0` under `compiler/poc/`) now implements the canonical Python-inspired indentation lexer (`INDENT`/`DEDENT`/`NEWLINE` off-side rule), recursive-descent/Pratt parser (Draft 0.1 EBNF), C header ingestion, strict ISO C11 code generation with `-Werror`, and autonomous AI coding-agent repair (`let` -> `var`).
 >
-> **Phase 1A/1A.1 Formal Language Specification Suite** is published under [`docs/language-spec/`](docs/language-spec/README.md), establishing the formal EBNF grammar, type system, ownership-lite memory model, structured concurrency, error handling, Typed Intermediate Representation (TIR), sidecar C binding contracts, and the 4-stage self-hosting roadmap. See the [Phase 1A.1 Semantic Closure Log](docs/language-spec/phase-1a.1-semantic-closure.md) for full audit traceability.
+> *Note on Scope Boundary*: Phase 1B delivers lexical analysis and AST parsing for the canonical Draft 0.1 grammar while preserving Phase 0 C FFI / zlib execution. Complete type checking, ownership/borrow analysis, concurrency runtime, and TIR passes remain `SPECIFIED` for Phase 2/3.
 >
 > *Note on Static Linking*: Standalone static binary generation remains classified as `BLOCKED (Environment)` on this host due to missing system development archives (`libc.a`, `libz.a`). Dynamic native builds link against `/lib64/libz.so.1` and pass 100% of functional gates.
 
@@ -100,6 +100,9 @@ The initial backend generates standard C code, harnessing decades of mature opti
 ```bash
 # Build the bootstrap compiler
 cd compiler/poc && go build -o bin/wonc ./cmd/wonc
+
+# Parse canonical WON syntax (lexical + AST only)
+./bin/wonc parse tests/language-spec/valid/types/struct_and_enum.won
 
 # Check syntax and semantics (with terminal or JSON output)
 ./bin/wonc check examples/zlib_compression.won
@@ -118,12 +121,12 @@ cd compiler/poc && go build -o bin/wonc ./cmd/wonc
 | Subsystem / Feature | Current Status | Specification Reference |
 | :--- | :--- | :--- |
 | Repository Architecture & Governance | `IMPLEMENTED` | [AGENTS.md](AGENTS.md), [GOVERNANCE.md](GOVERNANCE.md) |
-| Architecture Decision Records (ADRs) | `IMPLEMENTED` | [docs/decisions/](docs/decisions/) |
+| Architecture Decision Records (ADRs 001–010) | `ACCEPTED` | [docs/decisions/](docs/decisions/) |
 | Language Specification (Draft 0.1) | `SPECIFIED` | [docs/language-spec/](docs/language-spec/README.md) |
-| Syntax & Formal Grammar (EBNF) | `SPECIFIED` | [docs/language-spec/syntax-and-grammar.md](docs/language-spec/syntax-and-grammar.md) |
-| Primitive & Composite Type System | `SPECIFIED` | [docs/language-spec/type-system.md](docs/language-spec/type-system.md) |
-| Ownership-Lite Memory Model | `SPECIFIED` | [docs/language-spec/ownership-and-memory.md](docs/language-spec/ownership-and-memory.md) |
-| Structured Concurrency & Zero-GIL | `SPECIFIED` | [docs/language-spec/concurrency-model.md](docs/language-spec/concurrency-model.md) |
+| Canonical Lexer & Parser (Indentation EBNF) | `IMPLEMENTED` (Frontend) | [docs/language-spec/syntax-and-grammar.md](docs/language-spec/syntax-and-grammar.md) |
+| Primitive & Composite Type System | `SPECIFIED` (Parsed; Semantics Phase 2) | [docs/language-spec/type-system.md](docs/language-spec/type-system.md) |
+| Ownership-Lite Memory Model | `SPECIFIED` (Parsed; Semantics Phase 2) | [docs/language-spec/ownership-and-memory.md](docs/language-spec/ownership-and-memory.md) |
+| Structured Concurrency & Zero-GIL | `SPECIFIED` (Parsed; Runtime Phase 3) | [docs/language-spec/concurrency-model.md](docs/language-spec/concurrency-model.md) |
 | Self-Hosting & Bootstrap Pipeline | `SPECIFIED` | [docs/language-spec/self-hosting-and-bootstrap.md](docs/language-spec/self-hosting-and-bootstrap.md) |
 | Typed Intermediate Rep (TIR) | `SPECIFIED` | [docs/language-spec/compiler-and-ir-requirements.md](docs/language-spec/compiler-and-ir-requirements.md) |
 | Initial C Codegen Strategy (ISO C11) | `IMPLEMENTED` | [ADR-001](docs/decisions/ADR-001-c-codegen-backend.md) |

@@ -1,0 +1,9 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: String Interpolation Grammar (Unclosed Delimiter)
+## Spec Reference: docs/language-spec/syntax-and-grammar.md#4-formal-ebnf-grammar
+## Expected Diagnostic: WON-SYN-007: Unclosed string interpolation delimiter '{'.
+
+fn main():
+    let x = 42
+    let s = "Value: {x"

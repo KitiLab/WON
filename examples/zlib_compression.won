@@ -1,78 +1,69 @@
 #import <zlib.h>
 
-fn main() -> i32 {
-    let message = "WON Phase 0B Proof of Concept: Native C Interop with zlib";
-    let input_bytes = message.as_bytes();
-    let input_len: u64 = 57;
+fn main() -> i32:
+    let message = "WON Phase 0B Proof of Concept: Native C Interop with zlib"
+    let input_bytes = message.as_bytes()
+    let input_len: u64 = 57
 
-    // 1. 调用 compressBound 获取充足的压缩缓冲区上限容量并做边界防护
-    let max_bound = unsafe {
+    # 1. 调用 compressBound 获取充足的压缩缓冲区上限容量并做边界防护
+    let max_bound = unsafe:
         zlib::compressBound(input_len)
-    };
 
-    if max_bound > 256 {
-        println("Buffer capacity too small for max_bound: ", max_bound);
-        return 1;
-    }
+    if max_bound > 256:
+        println("Buffer capacity too small for max_bound: ", max_bound)
+        return 1
 
-    let mut compressed_buf: [u8; 256] = [0; 256];
-    let mut compressed_len: u64 = 256;
+    var compressed_buf: [u8; 256] = [0; 256]
+    var compressed_len: u64 = 256
 
-    // 2. 调用 zlib::compress 进行真实数据压缩
-    let compress_status = unsafe {
+    # 2. 调用 zlib::compress 进行真实数据压缩
+    let compress_status = unsafe:
         zlib::compress(
             compressed_buf.as_mut_ptr(),
             &mut compressed_len,
             input_bytes.as_ptr(),
             input_len
         )
-    };
 
-    if compress_status != 0 {
-        println("Compression failed with status: ", compress_status);
-        return 1;
-    }
+    if compress_status != 0:
+        println("Compression failed with status: ", compress_status)
+        return 1
 
-    println("Original size: ", input_len);
-    println("CompressBound upper limit: ", max_bound);
-    println("Actual compressed size: ", compressed_len);
+    println("Original size: ", input_len)
+    println("CompressBound upper limit: ", max_bound)
+    println("Actual compressed size: ", compressed_len)
 
-    // 3. 分配解压缓冲区并调用 zlib::uncompress 解压
-    let mut decompressed_buf: [u8; 256] = [0; 256];
-    let mut decompressed_len: u64 = 256;
+    # 3. 分配解压缓冲区并调用 zlib::uncompress 解压
+    var decompressed_buf: [u8; 256] = [0; 256]
+    var decompressed_len: u64 = 256
 
-    let uncompress_status = unsafe {
+    let uncompress_status = unsafe:
         zlib::uncompress(
             decompressed_buf.as_mut_ptr(),
             &mut decompressed_len,
             compressed_buf.as_ptr(),
             compressed_len
         )
-    };
 
-    if uncompress_status != 0 {
-        println("Decompression failed with status: ", uncompress_status);
-        return 2;
-    }
+    if uncompress_status != 0:
+        println("Decompression failed with status: ", uncompress_status)
+        return 2
 
-    // 4. 验证解压长度与原始内容完全一致
-    if decompressed_len != input_len {
-        println("Length mismatch! Decompressed: ", decompressed_len);
-        return 3;
-    }
+    # 4. 验证解压长度与原始内容完全一致
+    if decompressed_len != input_len:
+        println("Length mismatch! Decompressed: ", decompressed_len)
+        return 3
 
-    // 5. 严格逐字节比较原始输入与解压后内容
-    let is_equal = unsafe {
+    # 5. 严格逐字节比较原始输入与解压后内容
+    let is_equal = unsafe:
         bytes_equal(input_bytes.as_ptr(), decompressed_buf.as_ptr(), input_len)
-    };
-    if is_equal == 0 {
-        println("Byte-for-byte content mismatch!");
-        return 4;
-    }
 
-    println("Decompressed size matches exactly: ", decompressed_len);
-    println("Byte-for-byte verification: PASS");
-    println("Zlib round-trip verification: PASS");
+    if is_equal == 0:
+        println("Byte-for-byte content mismatch!")
+        return 4
 
-    return 0;
-}
+    println("Decompressed size matches exactly: ", decompressed_len)
+    println("Byte-for-byte verification: PASS")
+    println("Zlib round-trip verification: PASS")
+
+    return 0

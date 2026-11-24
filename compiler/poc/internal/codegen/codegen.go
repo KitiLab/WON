@@ -138,7 +138,11 @@ func (g *Generator) genStatement(stmt ast.Stmt) error {
 		if err != nil {
 			return err
 		}
-		g.writeLine(fmt.Sprintf("%s = %s;", s.Target, valStr))
+		op := s.Op
+		if op == "" {
+			op = "="
+		}
+		g.writeLine(fmt.Sprintf("%s %s %s;", s.Target, op, valStr))
 		return nil
 	case *ast.IfStmt:
 		condStr, err := g.genExpr(s.Cond)
@@ -334,6 +338,9 @@ func (g *Generator) genExpr(expr ast.Expr) (string, error) {
 
 	switch e := expr.(type) {
 	case *ast.IntegerLiteral:
+		if e.Suffix != "" {
+			return fmt.Sprintf("%d", e.Value), nil
+		}
 		return e.Raw, nil
 	case *ast.StringLiteral:
 		return fmt.Sprintf("%q", e.Value), nil

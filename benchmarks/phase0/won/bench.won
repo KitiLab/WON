@@ -1,68 +1,58 @@
 #import <payload_loader.h>
 #import <zlib.h>
 
-fn main() -> i32 {
-    let input_len: u64 = 1048576;
-    let mut input_buf: [u8; 1048576] = [0; 1048576];
+fn main() -> i32:
+    let input_len: u64 = 1048576
+    var input_buf: [u8; 1048576] = [0; 1048576]
 
-    // 1. 加载 1MB 测试载荷到内存中（不计入循环计时）
-    unsafe {
+    # 1. 加载 1MB 测试载荷到内存中（不计入循环计时）
+    unsafe:
         payload::load_benchmark_payload(
             "benchmarks/phase0/payloads/payload_1mb.txt",
             input_buf.as_mut_ptr(),
             input_len
-        );
-    }
+        )
 
-    let mut comp_buf: [u8; 1052672] = [0; 1052672];
-    let mut decomp_buf: [u8; 1048576] = [0; 1048576];
+    var comp_buf: [u8; 1052672] = [0; 1052672]
+    var decomp_buf: [u8; 1048576] = [0; 1048576]
 
-    let mut iter: i32 = 0;
-    let max_iter: i32 = 50;
+    var iter: i32 = 0
+    let max_iter: i32 = 50
 
-    // 2. 执行 50 次完整压缩与解压缩基准测试循环
-    while (iter < max_iter) {
-        let mut comp_len: u64 = 1052672;
-        let c_status = unsafe {
+    # 2. 执行 50 次完整压缩与解压缩基准测试循环
+    while iter < max_iter:
+        var comp_len: u64 = 1052672
+        let c_status = unsafe:
             zlib::compress(
                 comp_buf.as_mut_ptr(),
                 &mut comp_len,
                 input_buf.as_ptr(),
                 input_len
             )
-        };
-        if (c_status != 0) {
-            return 1;
-        }
+        if c_status != 0:
+            return 1
 
-        let mut decomp_len: u64 = 1048576;
-        let d_status = unsafe {
+        var decomp_len: u64 = 1048576
+        let d_status = unsafe:
             zlib::uncompress(
                 decomp_buf.as_mut_ptr(),
                 &mut decomp_len,
                 comp_buf.as_ptr(),
                 comp_len
             )
-        };
-        if (d_status != 0) {
-            return 2;
-        }
+        if d_status != 0:
+            return 2
 
-        if (decomp_len != input_len) {
-            return 3;
-        }
+        if decomp_len != input_len:
+            return 3
 
-        // 验证解压数据与原始输入逐字节严格相等
-        let is_eq = unsafe {
+        # 验证解压数据与原始输入逐字节严格相等
+        let is_eq = unsafe:
             bytes_equal(input_buf.as_ptr(), decomp_buf.as_ptr(), input_len)
-        };
-        if is_eq == 0 {
-            return 4;
-        }
+        if is_eq == 0:
+            return 4
 
-        iter = iter + 1;
-    }
+        iter = iter + 1
 
-    println("WON benchmark success! Iterations: ", max_iter);
-    return 0;
-}
+    println("WON benchmark success! Iterations: ", max_iter)
+    return 0

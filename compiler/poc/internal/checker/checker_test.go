@@ -41,11 +41,10 @@ func getMockZlibBindings() map[string]*bindgen.BindingMeta {
 
 func TestCheckerMutabilityAndUnsafe(t *testing.T) {
 	srcMutErr := `
-fn main() -> i32 {
-    let x = 10;
-    x = 20;
-    return 0;
-}
+fn main() -> i32:
+    let x = 10
+    x = 20
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_mut.won", srcMutErr, report)
@@ -70,10 +69,9 @@ fn main() -> i32 {
 
 func TestCheckerForeignCallOutsideUnsafe(t *testing.T) {
 	srcUnsafeErr := `
-fn main() -> i32 {
-    let ver = zlib::zlibVersion();
-    return 0;
-}
+fn main() -> i32:
+    let ver = zlib::zlibVersion()
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_unsafe.won", srcUnsafeErr, report)
@@ -101,12 +99,10 @@ fn main() -> i32 {
 
 func TestCheckerUnknownNamespace(t *testing.T) {
 	src := `
-fn main() -> i32 {
-    let s = unsafe {
+fn main() -> i32:
+    let s = unsafe:
         unknown_lib::foo(1)
-    };
-    return 0;
-}
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_ns.won", src, report)
@@ -127,12 +123,10 @@ fn main() -> i32 {
 
 func TestCheckerUnknownSymbol(t *testing.T) {
 	src := `
-fn main() -> i32 {
-    let s = unsafe {
+fn main() -> i32:
+    let s = unsafe:
         zlib::non_existent_function(1)
-    };
-    return 0;
-}
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_sym.won", src, report)
@@ -153,12 +147,10 @@ fn main() -> i32 {
 
 func TestCheckerArgumentCountMismatch(t *testing.T) {
 	src := `
-fn main() -> i32 {
-    let s = unsafe {
+fn main() -> i32:
+    let s = unsafe:
         zlib::compress(1, 2)
-    };
-    return 0;
-}
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_args.won", src, report)
@@ -179,10 +171,9 @@ fn main() -> i32 {
 
 func TestCheckerBytesEqualArity(t *testing.T) {
 	src := `
-fn main() -> i32 {
-    let eq = bytes_equal(1, 2);
-    return 0;
-}
+fn main() -> i32:
+    let eq = bytes_equal(1, 2)
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_bytes_eq.won", src, report)
@@ -203,13 +194,11 @@ fn main() -> i32 {
 
 func TestCheckerStringWhereMutablePointerRequired(t *testing.T) {
 	src := `
-fn main() -> i32 {
-    let mut len: u64 = 10;
-    let s = unsafe {
+fn main() -> i32:
+    var len: u64 = 10
+    let s = unsafe:
         zlib::compress("dest_string", &mut len, "src".as_ptr(), 3)
-    };
-    return 0;
-}
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_str_err.won", src, report)
@@ -237,13 +226,11 @@ fn main() -> i32 {
 
 func TestCheckerIntegerWherePointerRequired(t *testing.T) {
 	src := `
-fn main() -> i32 {
-    let mut len: u64 = 10;
-    let s = unsafe {
+fn main() -> i32:
+    var len: u64 = 10
+    let s = unsafe:
         zlib::compress(12345, &mut len, "src".as_ptr(), 3)
-    };
-    return 0;
-}
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_int_err.won", src, report)
@@ -271,14 +258,12 @@ fn main() -> i32 {
 
 func TestCheckerImmutablePointerWhereMutablePointerRequired(t *testing.T) {
 	src := `
-fn main() -> i32 {
-    let buf = "immutable_buffer";
-    let mut len: u64 = 10;
-    let s = unsafe {
+fn main() -> i32:
+    let buf = "immutable_buffer"
+    var len: u64 = 10
+    let s = unsafe:
         zlib::compress(buf.as_ptr(), &mut len, "src".as_ptr(), 3)
-    };
-    return 0;
-}
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_immut_ptr_err.won", src, report)
@@ -306,7 +291,6 @@ fn main() -> i32 {
 
 func TestCheckerUnsupportedZlibFunctionType(t *testing.T) {
 	mockBindings := getMockZlibBindings()
-	// 注入一个 Phase 0B 原型尚未支持的函数
 	mockBindings["zlib"].Functions["deflateInit_"] = bindgen.FunctionSig{
 		Name:       "deflateInit_",
 		QualType:   "int (void *, int, const char *, int)",
@@ -315,12 +299,10 @@ func TestCheckerUnsupportedZlibFunctionType(t *testing.T) {
 	}
 
 	src := `
-fn main() -> i32 {
-    let s = unsafe {
+fn main() -> i32:
+    let s = unsafe:
         zlib::deflateInit_(0, 0, "1.2.3", 0)
-    };
-    return 0;
-}
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_unsupported_fn.won", src, report)
@@ -361,13 +343,11 @@ func TestCheckerVoidFunctionAssignment(t *testing.T) {
 	}
 
 	src := `
-fn main() -> i32 {
-    let mut buf: [u8; 10] = [0; 10];
-    let res = unsafe {
+fn main() -> i32:
+    var buf: [u8; 10] = [0; 10]
+    let res = unsafe:
         payload::load_benchmark_payload("test.txt", buf.as_mut_ptr(), 10)
-    };
-    return 0;
-}
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_void_err.won", src, report)
@@ -395,24 +375,21 @@ fn main() -> i32 {
 
 func TestCheckerValidZlibCallsPass(t *testing.T) {
 	src := `
-fn main() -> i32 {
-    let msg = "Hello";
-    let input_bytes = msg.as_bytes();
-    let input_len: u64 = 5;
+fn main() -> i32:
+    let msg = "Hello"
+    let input_bytes = msg.as_bytes()
+    let input_len: u64 = 5
 
-    let max_bound = unsafe {
+    let max_bound = unsafe:
         zlib::compressBound(input_len)
-    };
 
-    let mut comp_buf: [u8; 64] = [0; 64];
-    let mut comp_len: u64 = 64;
+    var comp_buf: [u8; 64] = [0; 64]
+    var comp_len: u64 = 64
 
-    let status = unsafe {
+    let status = unsafe:
         zlib::compress(comp_buf.as_mut_ptr(), &mut comp_len, input_bytes.as_ptr(), input_len)
-    };
 
-    return 0;
-}
+    return 0
 `
 	report := diagnostic.NewReport()
 	lex := lexer.New("test_valid.won", src, report)

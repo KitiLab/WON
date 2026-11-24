@@ -1,0 +1,8 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Range Expression Grammar (Chained / Malformed Range)
+## Spec Reference: docs/language-spec/syntax-and-grammar.md#4-formal-ebnf-grammar
+## Expected Diagnostic: WON-SYN-009: Invalid chained or missing bound in range expression.
+
+fn main():
+    let r = 0..10..20

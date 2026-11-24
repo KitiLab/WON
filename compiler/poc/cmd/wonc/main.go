@@ -36,6 +36,9 @@ func main() {
 	case "version":
 		fmt.Printf("wonc version %s (%s)\nTarget ABI: Linux x86_64\nOwner: KitiLab\n", Version, Milestone)
 
+	case "parse":
+		runParse(os.Args[2:])
+
 	case "check":
 		runCheck(os.Args[2:])
 
@@ -53,12 +56,48 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Println("WON Phase 0B 编译器工具链 (wonc)")
+	fmt.Println("WON Phase 1B 编译器工具链 (wonc)")
 	fmt.Println("用法:")
 	fmt.Println("  wonc version                     查看编译器版本与目标架构")
+	fmt.Println("  wonc parse [--format=json] <file> 仅执行规范词法分析与语法解析")
 	fmt.Println("  wonc check [--format=json] <file> 语法与语义检查")
 	fmt.Println("  wonc bindings [zlib]             从系统 C 头文件生成绑定")
 	fmt.Println("  wonc build [--static] [--lto] [-o out] <file> 编译为原生机器码可执行文件")
+}
+
+func runParse(args []string) {
+	fs := flag.NewFlagSet("parse", flag.ExitOnError)
+	format := fs.String("format", "text", "输出格式: text | json")
+	_ = fs.Parse(args)
+
+	files := fs.Args()
+	if len(files) == 0 {
+		fmt.Fprintln(os.Stderr, "错误: 请指定输入的 .won 源码文件")
+		os.Exit(1)
+	}
+
+	srcFile := files[0]
+	content, err := os.ReadFile(srcFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "无法读取文件 %s: %v\n", srcFile, err)
+		os.Exit(1)
+	}
+
+	report := diagnostic.NewReport()
+	lex := lexer.New(srcFile, string(content), report)
+	p := parser.New(lex, report, srcFile)
+	_ = p.ParseProgram()
+
+	if *format == "json" {
+		jsonStr, _ := report.ToJSON()
+		fmt.Println(jsonStr)
+	} else {
+		fmt.Print(report.String())
+	}
+
+	if report.HasErrors() {
+		os.Exit(1)
+	}
 }
 
 // resolveBindings 遍历程序中的 #import 声明并加载对应的 C 库绑定元数据

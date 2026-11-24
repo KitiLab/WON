@@ -1,0 +1,10 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Syntax Indentation (Inconsistent Dedentation)
+## Spec Reference: docs/language-spec/syntax-and-grammar.md#32-indentation-tokens-the-off-side-rule
+## Expected Diagnostic: WON-SYN-003: Dedentation column does not match any enclosing indentation level.
+
+fn main():
+    if true:
+        let x = 1
+      let y = 2

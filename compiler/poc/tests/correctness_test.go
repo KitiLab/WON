@@ -20,35 +20,29 @@ func TestEdgeCasesZlibCompression(t *testing.T) {
 		src := `
 #import <zlib.h>
 
-fn main() -> i32 {
-    let msg = "";
-    let input_bytes = msg.as_bytes();
-    let input_len: u64 = 0;
+fn main() -> i32:
+    let msg = ""
+    let input_bytes = msg.as_bytes()
+    let input_len: u64 = 0
 
-    let mut comp_buf: [u8; 64] = [0; 64];
-    let mut comp_len: u64 = 64;
+    var comp_buf: [u8; 64] = [0; 64]
+    var comp_len: u64 = 64
 
-    let c_status = unsafe {
+    let c_status = unsafe:
         zlib::compress(comp_buf.as_mut_ptr(), &mut comp_len, input_bytes.as_ptr(), input_len)
-    };
-    if c_status != 0 {
-        return 1;
-    }
+    if c_status != 0:
+        return 1
 
-    let mut decomp_buf: [u8; 64] = [0; 64];
-    let mut decomp_len: u64 = 64;
-    let d_status = unsafe {
+    var decomp_buf: [u8; 64] = [0; 64]
+    var decomp_len: u64 = 64
+    let d_status = unsafe:
         zlib::uncompress(decomp_buf.as_mut_ptr(), &mut decomp_len, comp_buf.as_ptr(), comp_len)
-    };
-    if d_status != 0 {
-        return 2;
-    }
-    if decomp_len != 0 {
-        return 3;
-    }
-    println("Empty payload round-trip: PASS");
-    return 0;
-}
+    if d_status != 0:
+        return 2
+    if decomp_len != 0:
+        return 3
+    println("Empty payload round-trip: PASS")
+    return 0
 `
 		if err := os.WriteFile(wonFile, []byte(src), 0644); err != nil {
 			t.Fatalf("写入失败: %v", err)
@@ -73,41 +67,33 @@ fn main() -> i32 {
 		src := `
 #import <zlib.h>
 
-fn main() -> i32 {
-    let msg = "Hello, WON Systems Programming!";
-    let input_bytes = msg.as_bytes();
-    let input_len: u64 = 31;
+fn main() -> i32:
+    let msg = "Hello, WON Systems Programming!"
+    let input_bytes = msg.as_bytes()
+    let input_len: u64 = 31
 
-    let mut comp_buf: [u8; 128] = [0; 128];
-    let mut comp_len: u64 = 128;
+    var comp_buf: [u8; 128] = [0; 128]
+    var comp_len: u64 = 128
 
-    let c_status = unsafe {
+    let c_status = unsafe:
         zlib::compress(comp_buf.as_mut_ptr(), &mut comp_len, input_bytes.as_ptr(), input_len)
-    };
-    if c_status != 0 {
-        return 1;
-    }
+    if c_status != 0:
+        return 1
 
-    let mut decomp_buf: [u8; 128] = [0; 128];
-    let mut decomp_len: u64 = 128;
-    let d_status = unsafe {
+    var decomp_buf: [u8; 128] = [0; 128]
+    var decomp_len: u64 = 128
+    let d_status = unsafe:
         zlib::uncompress(decomp_buf.as_mut_ptr(), &mut decomp_len, comp_buf.as_ptr(), comp_len)
-    };
-    if d_status != 0 {
-        return 2;
-    }
-    if decomp_len != input_len {
-        return 3;
-    }
-    let is_eq = unsafe {
+    if d_status != 0:
+        return 2
+    if decomp_len != input_len:
+        return 3
+    let is_eq = unsafe:
         bytes_equal(input_bytes.as_ptr(), decomp_buf.as_ptr(), input_len)
-    };
-    if is_eq == 0 {
-        return 4;
-    }
-    println("Normal payload round-trip: PASS");
-    return 0;
-}
+    if is_eq == 0:
+        return 4
+    println("Normal payload round-trip: PASS")
+    return 0
 `
 		if err := os.WriteFile(wonFile, []byte(src), 0644); err != nil {
 			t.Fatalf("写入失败: %v", err)
@@ -129,45 +115,36 @@ fn main() -> i32 {
 	t.Run("EmbeddedNulBytes", func(t *testing.T) {
 		wonFile := filepath.Join(tmpDir, "nul_bytes.won")
 		binFile := filepath.Join(tmpDir, "nul_bytes_bin")
-		// "WON\0Binary\0Nul\0Payload" 长度为 23 字节
 		src := `
 #import <zlib.h>
 
-fn main() -> i32 {
-    let msg = "WON\0Binary\0Nul\0Payload";
-    let input_bytes = msg.as_bytes();
-    let input_len: u64 = 23;
+fn main() -> i32:
+    let msg = "WON\0Binary\0Nul\0Payload"
+    let input_bytes = msg.as_bytes()
+    let input_len: u64 = 23
 
-    let mut comp_buf: [u8; 128] = [0; 128];
-    let mut comp_len: u64 = 128;
+    var comp_buf: [u8; 128] = [0; 128]
+    var comp_len: u64 = 128
 
-    let c_status = unsafe {
+    let c_status = unsafe:
         zlib::compress(comp_buf.as_mut_ptr(), &mut comp_len, input_bytes.as_ptr(), input_len)
-    };
-    if c_status != 0 {
-        return 1;
-    }
+    if c_status != 0:
+        return 1
 
-    let mut decomp_buf: [u8; 128] = [0; 128];
-    let mut decomp_len: u64 = 128;
-    let d_status = unsafe {
+    var decomp_buf: [u8; 128] = [0; 128]
+    var decomp_len: u64 = 128
+    let d_status = unsafe:
         zlib::uncompress(decomp_buf.as_mut_ptr(), &mut decomp_len, comp_buf.as_ptr(), comp_len)
-    };
-    if d_status != 0 {
-        return 2;
-    }
-    if decomp_len != input_len {
-        return 3;
-    }
-    let is_eq = unsafe {
+    if d_status != 0:
+        return 2
+    if decomp_len != input_len:
+        return 3
+    let is_eq = unsafe:
         bytes_equal(input_bytes.as_ptr(), decomp_buf.as_ptr(), input_len)
-    };
-    if is_eq == 0 {
-        return 4;
-    }
-    println("Embedded NUL bytes round-trip: PASS");
-    return 0;
-}
+    if is_eq == 0:
+        return 4
+    println("Embedded NUL bytes round-trip: PASS")
+    return 0
 `
 		if err := os.WriteFile(wonFile, []byte(src), 0644); err != nil {
 			t.Fatalf("写入失败: %v", err)
@@ -189,45 +166,36 @@ fn main() -> i32 {
 	t.Run("NonASCIIPayload", func(t *testing.T) {
 		wonFile := filepath.Join(tmpDir, "non_ascii.won")
 		binFile := filepath.Join(tmpDir, "non_ascii_bin")
-		// "WON编程语言：极速编译·原生交互！" UTF-8 编码精确为 47 字节
 		src := `
 #import <zlib.h>
 
-fn main() -> i32 {
-    let msg = "WON编程语言：极速编译·原生交互！";
-    let input_bytes = msg.as_bytes();
-    let input_len: u64 = 47;
+fn main() -> i32:
+    let msg = "WON编程语言：极速编译·原生交互！"
+    let input_bytes = msg.as_bytes()
+    let input_len: u64 = 47
 
-    let mut comp_buf: [u8; 128] = [0; 128];
-    let mut comp_len: u64 = 128;
+    var comp_buf: [u8; 128] = [0; 128]
+    var comp_len: u64 = 128
 
-    let c_status = unsafe {
+    let c_status = unsafe:
         zlib::compress(comp_buf.as_mut_ptr(), &mut comp_len, input_bytes.as_ptr(), input_len)
-    };
-    if c_status != 0 {
-        return 1;
-    }
+    if c_status != 0:
+        return 1
 
-    let mut decomp_buf: [u8; 128] = [0; 128];
-    let mut decomp_len: u64 = 128;
-    let d_status = unsafe {
+    var decomp_buf: [u8; 128] = [0; 128]
+    var decomp_len: u64 = 128
+    let d_status = unsafe:
         zlib::uncompress(decomp_buf.as_mut_ptr(), &mut decomp_len, comp_buf.as_ptr(), comp_len)
-    };
-    if d_status != 0 {
-        return 2;
-    }
-    if decomp_len != input_len {
-        return 3;
-    }
-    let is_eq = unsafe {
+    if d_status != 0:
+        return 2
+    if decomp_len != input_len:
+        return 3
+    let is_eq = unsafe:
         bytes_equal(input_bytes.as_ptr(), decomp_buf.as_ptr(), input_len)
-    };
-    if is_eq == 0 {
-        return 4;
-    }
-    println("Non-ASCII UTF-8 payload round-trip: PASS");
-    return 0;
-}
+    if is_eq == 0:
+        return 4
+    println("Non-ASCII UTF-8 payload round-trip: PASS")
+    return 0
 `
 		if err := os.WriteFile(wonFile, []byte(src), 0644); err != nil {
 			t.Fatalf("写入失败: %v", err)
@@ -252,40 +220,32 @@ fn main() -> i32 {
 		src := `
 #import <zlib.h>
 
-fn main() -> i32 {
-    let mut input_buf: [u8; 4096] = [65; 4096];
-    let input_len: u64 = 4096;
+fn main() -> i32:
+    var input_buf: [u8; 4096] = [65; 4096]
+    let input_len: u64 = 4096
 
-    let mut comp_buf: [u8; 4200] = [0; 4200];
-    let mut comp_len: u64 = 4200;
+    var comp_buf: [u8; 4200] = [0; 4200]
+    var comp_len: u64 = 4200
 
-    let c_status = unsafe {
+    let c_status = unsafe:
         zlib::compress(comp_buf.as_mut_ptr(), &mut comp_len, input_buf.as_ptr(), input_len)
-    };
-    if c_status != 0 {
-        return 1;
-    }
+    if c_status != 0:
+        return 1
 
-    let mut decomp_buf: [u8; 4096] = [0; 4096];
-    let mut decomp_len: u64 = 4096;
-    let d_status = unsafe {
+    var decomp_buf: [u8; 4096] = [0; 4096]
+    var decomp_len: u64 = 4096
+    let d_status = unsafe:
         zlib::uncompress(decomp_buf.as_mut_ptr(), &mut decomp_len, comp_buf.as_ptr(), comp_len)
-    };
-    if d_status != 0 {
-        return 2;
-    }
-    if decomp_len != input_len {
-        return 3;
-    }
-    let is_eq = unsafe {
+    if d_status != 0:
+        return 2
+    if decomp_len != input_len:
+        return 3
+    let is_eq = unsafe:
         bytes_equal(input_buf.as_ptr(), decomp_buf.as_ptr(), input_len)
-    };
-    if is_eq == 0 {
-        return 4;
-    }
-    println("Larger 4KB payload round-trip: PASS");
-    return 0;
-}
+    if is_eq == 0:
+        return 4
+    println("Larger 4KB payload round-trip: PASS")
+    return 0
 `
 		if err := os.WriteFile(wonFile, []byte(src), 0644); err != nil {
 			t.Fatalf("写入失败: %v", err)
@@ -310,37 +270,32 @@ fn main() -> i32 {
 		src := `
 #import <zlib.h>
 
-fn main() -> i32 {
-    let msg = "WON Testing Buffer Capacity Constraint Under Zlib";
-    let input_bytes = msg.as_bytes();
-    let input_len: u64 = 50;
+fn main() -> i32:
+    let msg = "WON Testing Buffer Capacity Constraint Under Zlib"
+    let input_bytes = msg.as_bytes()
+    let input_len: u64 = 50
 
-    let mut comp_buf: [u8; 128] = [0; 128];
-    let mut comp_len: u64 = 128;
+    var comp_buf: [u8; 128] = [0; 128]
+    var comp_len: u64 = 128
 
-    let c_status = unsafe {
+    let c_status = unsafe:
         zlib::compress(comp_buf.as_mut_ptr(), &mut comp_len, input_bytes.as_ptr(), input_len)
-    };
-    if c_status != 0 {
-        return 1;
-    }
+    if c_status != 0:
+        return 1
 
-    // 故意分配极小的解压缓冲区 (仅 10 字节)，不足以容纳 50 字节解压产物
-    let mut small_decomp_buf: [u8; 10] = [0; 10];
-    let mut small_decomp_len: u64 = 10;
-    let d_status = unsafe {
+    # 故意分配极小的解压缓冲区 (仅 10 字节)，不足以容纳 50 字节解压产物
+    var small_decomp_buf: [u8; 10] = [0; 10]
+    var small_decomp_len: u64 = 10
+    let d_status = unsafe:
         zlib::uncompress(small_decomp_buf.as_mut_ptr(), &mut small_decomp_len, comp_buf.as_ptr(), comp_len)
-    };
 
-    // zlib 应安全返回 Z_BUF_ERROR (-5)，绝不能崩溃或越界写入
-    if d_status != 0 {
-        println("Insufficient capacity safely rejected with status: ", d_status);
-        return 0;
-    }
+    # zlib 应安全返回 Z_BUF_ERROR (-5)，绝不能崩溃或越界写入
+    if d_status != 0:
+        println("Insufficient capacity safely rejected with status: ", d_status)
+        return 0
 
-    println("Error: Insufficient capacity unexpectedly succeeded!");
-    return 2;
-}
+    println("Error: Insufficient capacity unexpectedly succeeded!")
+    return 2
 `
 		if err := os.WriteFile(wonFile, []byte(src), 0644); err != nil {
 			t.Fatalf("写入失败: %v", err)
@@ -365,25 +320,22 @@ fn main() -> i32 {
 		src := `
 #import <zlib.h>
 
-fn main() -> i32 {
-    let mut bad_buf: [u8; 16] = [0; 16];
-    let bad_len: u64 = 16;
+fn main() -> i32:
+    var bad_buf: [u8; 16] = [0; 16]
+    let bad_len: u64 = 16
 
-    let mut decomp_buf: [u8; 64] = [0; 64];
-    let mut decomp_len: u64 = 64;
+    var decomp_buf: [u8; 64] = [0; 64]
+    var decomp_len: u64 = 64
 
-    let status = unsafe {
+    let status = unsafe:
         zlib::uncompress(decomp_buf.as_mut_ptr(), &mut decomp_len, bad_buf.as_mut_ptr(), bad_len)
-    };
 
-    if status != 0 {
-        println("Corrupted payload safely rejected with status: ", status);
-        return 0;
-    }
+    if status != 0:
+        println("Corrupted payload safely rejected with status: ", status)
+        return 0
 
-    println("Error: Corrupted payload was unexpectedly accepted");
-    return 1;
-}
+    println("Error: Corrupted payload was unexpectedly accepted")
+    return 1
 `
 		if err := os.WriteFile(wonFile, []byte(src), 0644); err != nil {
 			t.Fatalf("写入失败: %v", err)

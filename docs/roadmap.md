@@ -39,9 +39,10 @@ Foundation    Slice        & AST    Compiler     & AI CLI    & Fuzzing   Launch 
   - *Objective*: Remediate formal grammar gaps, establish mathematical soundness models for reference provenance ($\text{Prov}(e)$), formalize 3-tier string model, integer overflow semantics, declarative C sidecar contracts (`.wonbind`), and provide 100% EBNF traceability across all 20 canonical examples.
   - *Deliverables*: Comprehensive closure log ([docs/language-spec/phase-1a.1-semantic-closure.md](language-spec/phase-1a.1-semantic-closure.md)), updated specification files, and verified traceability matrix.
   - *Status*: `SPECIFIED` (Completed & Reconciled).
-- **Sub-phase 1B (Parser & Foundations Implementation)**:
-  - *Objective*: Implement the formal indentation-based lexer (`INDENT`/`DEDENT` off-side rule), recursive-descent parser, and span-mapped AST data structures in the bootstrap compiler.
-  - *Deliverables*: Upgraded `wonc0` lexer/parser, syntax test suite verifying valid and invalid fixtures in `tests/language-spec/`.
+- **Sub-phase 1B (Canonical Lexer & Parser Implementation)**:
+  - *Objective*: Implement the formal indentation-based lexer (`INDENT`/`DEDENT` off-side rule), recursive-descent/Pratt parser, and span-mapped AST data structures in the bootstrap compiler (`wonc0`).
+  - *Deliverables*: Upgraded `wonc0` lexer/parser, canonical AST, migrated examples/benchmarks/repair tests, and automated syntax test suites verifying valid/invalid fixtures in `tests/language-spec/` and all 20 canonical examples.
+  - *Status*: `IMPLEMENTED` (Canonical Frontend Verified; Semantic & TIR Passes Remain Phase 2).
 
 ---
 

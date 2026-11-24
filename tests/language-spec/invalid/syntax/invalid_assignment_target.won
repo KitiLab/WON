@@ -1,0 +1,8 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Assignment Grammar (Invalid L-Value)
+## Spec Reference: docs/language-spec/syntax-and-grammar.md#4-formal-ebnf-grammar
+## Expected Diagnostic: WON-SYN-009: Invalid assignment target (cannot assign to rvalue expression).
+
+fn main():
+    1 + 2 = 3

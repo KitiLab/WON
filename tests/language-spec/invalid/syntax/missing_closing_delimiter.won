@@ -1,0 +1,8 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Delimiter Balance (Missing Closing Parenthesis)
+## Spec Reference: docs/language-spec/syntax-and-grammar.md#31-source-encoding-and-whitespace
+## Expected Diagnostic: WON-SYN-007: Unclosed delimiter ')'.
+
+fn main():
+    let sum = add(1, 2

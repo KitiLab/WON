@@ -1,0 +1,8 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Generics Grammar (Malformed Empty Generic Arguments)
+## Spec Reference: docs/language-spec/syntax-and-grammar.md#4-formal-ebnf-grammar
+## Expected Diagnostic: WON-SYN-005: Generic arguments list cannot be empty.
+
+fn main():
+    let v = Vec[]()

@@ -1,8 +1,9 @@
-// Package token 定义了 WON 语言词法单元类型与结构
+// Package token 定义了 WON 语言标准词法单元类型与结构
 package token
 
 import (
 	"fmt"
+
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
 )
 
@@ -12,29 +13,77 @@ type Kind int
 const (
 	EOF Kind = iota
 	ILLEGAL
+	NEWLINE
+	INDENT
+	DEDENT
 
-	// 字面量
+	// 字面量与标识符
 	IDENT
 	INT
+	FLOAT
+	CHAR
+	BYTE
 	STRING
+	RAW_STRING
+	INTERP_STRING
+
+	// 预处理指令
+	CIMPORT // #import <header.h> 或 #import "header.h"
 
 	// 关键字
-	FN
-	LET
-	MUT
-	IF
+	AND
+	AS
+	BREAK
+	CONTINUE
+	ELIF
 	ELSE
-	WHILE
-	RETURN
-	UNSAFE
+	ENUM
+	FALSE
+	FN
+	FOR
+	FROM
+	IF
+	IMPL
 	IMPORT
+	IN
+	LET
+	MATCH
+	MOD
+	MUT
+	NOT_KW
+	OR
+	PUB
+	REF
+	RETURN
+	SCOPE
+	SELF
+	SELF_TYPE
+	SPAWN
+	STRUCT
+	TRAIT
+	TRUE
+	TYPE
+	UNSAFE
+	VAR
+	WHILE
 
-	// 运算符与分隔符
+	// 算术与位运算符号
 	PLUS       // +
 	MINUS      // -
 	STAR       // *
 	SLASH      // /
+	PERCENT    // %
 	ASSIGN     // =
+	PLUSEQ     // +=
+	MINUSEQ    // -=
+	STAREQ     // *=
+	SLASHEQ    // /=
+	PERCENTEQ  // %=
+	AMPEQ      // &=
+	PIPEEQ     // |=
+	CARETEQ    // ^=
+	LSHIFTEQ   // <<=
+	RSHIFTEQ   // >>=
 	EQ         // ==
 	NOTEQ      // !=
 	LT         // <
@@ -42,62 +91,129 @@ const (
 	GT         // >
 	GTEQ       // >=
 	NOT        // !
+	TILDE      // ~
 	AMP        // &
+	PIPE       // |
+	CARET      // ^
+	LSHIFT     // <<
+	RSHIFT     // >>
+	DOTDOT     // ..
+	DOTDOTEQ   // ..=
 	COLONCOLON // ::
 	COLON      // :
 	SEMICOLON  // ;
 	COMMA      // ,
 	DOT        // .
 	RARROW     // ->
-	LPAREN     // (
-	RPAREN     // )
-	LBRACE     // {
-	RBRACE     // }
-	LBRACKET   // [
-	RBRACKET   // ]
+	FATARROW   // =>
+	QUESTION   // ?
 	HASH       // #
+
+	// 界定符
+	LPAREN   // (
+	RPAREN   // )
+	LBRACE   // {
+	RBRACE   // }
+	LBRACKET // [
+	RBRACKET // ]
 )
 
 var kindNames = map[Kind]string{
-	EOF:        "EOF",
-	ILLEGAL:    "ILLEGAL",
-	IDENT:      "IDENT",
-	INT:        "INT",
-	STRING:     "STRING",
-	FN:         "fn",
-	LET:        "let",
-	MUT:        "mut",
-	IF:         "if",
-	ELSE:       "else",
-	RETURN:     "return",
-	UNSAFE:     "unsafe",
-	IMPORT:     "import",
-	PLUS:       "+",
-	MINUS:      "-",
-	STAR:       "*",
-	SLASH:      "/",
-	ASSIGN:     "=",
-	EQ:         "==",
-	NOTEQ:      "!=",
-	LT:         "<",
-	LTEQ:       "<=",
-	GT:         ">",
-	GTEQ:       ">=",
-	NOT:        "!",
-	AMP:        "&",
-	COLONCOLON: "::",
-	COLON:      ":",
-	SEMICOLON:  ";",
-	COMMA:      ",",
-	DOT:        ".",
-	RARROW:     "->",
-	LPAREN:     "(",
-	RPAREN:     ")",
-	LBRACE:     "{",
-	RBRACE:     "}",
-	LBRACKET:   "[",
-	RBRACKET:   "]",
-	HASH:       "#",
+	EOF:           "EOF",
+	ILLEGAL:       "ILLEGAL",
+	NEWLINE:       "NEWLINE",
+	INDENT:        "INDENT",
+	DEDENT:        "DEDENT",
+	IDENT:         "IDENT",
+	INT:           "INT",
+	FLOAT:         "FLOAT",
+	CHAR:          "CHAR",
+	BYTE:          "BYTE",
+	STRING:        "STRING",
+	RAW_STRING:    "RAW_STRING",
+	INTERP_STRING: "INTERP_STRING",
+	CIMPORT:       "#import",
+	AND:           "and",
+	AS:            "as",
+	BREAK:         "break",
+	CONTINUE:      "continue",
+	ELIF:          "elif",
+	ELSE:          "else",
+	ENUM:          "enum",
+	FALSE:         "false",
+	FN:            "fn",
+	FOR:           "for",
+	FROM:          "from",
+	IF:            "if",
+	IMPL:          "impl",
+	IMPORT:        "import",
+	IN:            "in",
+	LET:           "let",
+	MATCH:         "match",
+	MOD:           "mod",
+	MUT:           "mut",
+	NOT_KW:        "not",
+	OR:            "or",
+	PUB:           "pub",
+	REF:           "ref",
+	RETURN:        "return",
+	SCOPE:         "scope",
+	SELF:          "self",
+	SELF_TYPE:     "Self",
+	SPAWN:         "spawn",
+	STRUCT:        "struct",
+	TRAIT:         "trait",
+	TRUE:          "true",
+	TYPE:          "type",
+	UNSAFE:        "unsafe",
+	VAR:           "var",
+	WHILE:         "while",
+	PLUS:          "+",
+	MINUS:         "-",
+	STAR:          "*",
+	SLASH:         "/",
+	PERCENT:       "%",
+	ASSIGN:        "=",
+	PLUSEQ:        "+=",
+	MINUSEQ:       "-=",
+	STAREQ:        "*=",
+	SLASHEQ:       "/=",
+	PERCENTEQ:     "%=",
+	AMPEQ:         "&=",
+	PIPEEQ:        "|=",
+	CARETEQ:       "^=",
+	LSHIFTEQ:      "<<=",
+	RSHIFTEQ:      ">>=",
+	EQ:            "==",
+	NOTEQ:         "!=",
+	LT:            "<",
+	LTEQ:          "<=",
+	GT:            ">",
+	GTEQ:          ">=",
+	NOT:           "!",
+	TILDE:         "~",
+	AMP:           "&",
+	PIPE:          "|",
+	CARET:         "^",
+	LSHIFT:        "<<",
+	RSHIFT:        ">>",
+	DOTDOT:        "..",
+	DOTDOTEQ:      "..=",
+	COLONCOLON:    "::",
+	COLON:         ":",
+	SEMICOLON:     ";",
+	COMMA:         ",",
+	DOT:           ".",
+	RARROW:        "->",
+	FATARROW:      "=>",
+	QUESTION:      "?",
+	HASH:          "#",
+	LPAREN:        "(",
+	RPAREN:        ")",
+	LBRACE:        "{",
+	RBRACE:        "}",
+	LBRACKET:      "[",
+	RBRACKET:      "]",
 }
 
 // String 返回词法类型的字面名称
@@ -108,17 +224,42 @@ func (k Kind) String() string {
 	return fmt.Sprintf("Token(%d)", k)
 }
 
-// Keywords 关键字映射表
+// Keywords 规范关键字映射表
 var Keywords = map[string]Kind{
-	"fn":     FN,
-	"let":    LET,
-	"mut":    MUT,
-	"if":     IF,
-	"else":   ELSE,
-	"while":  WHILE,
-	"return": RETURN,
-	"unsafe": UNSAFE,
-	"import": IMPORT,
+	"and":      AND,
+	"as":       AS,
+	"break":    BREAK,
+	"continue": CONTINUE,
+	"elif":     ELIF,
+	"else":     ELSE,
+	"enum":     ENUM,
+	"false":    FALSE,
+	"fn":       FN,
+	"for":      FOR,
+	"if":       IF,
+	"impl":     IMPL,
+	"import":   IMPORT,
+	"in":       IN,
+	"let":      LET,
+	"match":    MATCH,
+	"mod":      MOD,
+	"mut":      MUT,
+	"not":      NOT_KW,
+	"or":       OR,
+	"pub":      PUB,
+	"ref":      REF,
+	"return":   RETURN,
+	"scope":    SCOPE,
+	"self":     SELF,
+	"Self":     SELF_TYPE,
+	"spawn":    SPAWN,
+	"struct":   STRUCT,
+	"trait":    TRAIT,
+	"true":     TRUE,
+	"type":     TYPE,
+	"unsafe":   UNSAFE,
+	"var":      VAR,
+	"while":    WHILE,
 }
 
 // LookupIdent 识别标识符是否属于保留关键字

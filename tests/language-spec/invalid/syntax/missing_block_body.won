@@ -1,0 +1,9 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Syntax Block Introducer (Missing Body)
+## Spec Reference: docs/language-spec/syntax-and-grammar.md#32-indentation-tokens-the-off-side-rule
+## Expected Diagnostic: WON-SYN-004: Function signature colon must be followed by an indented block body.
+
+fn missing_body():
+fn next_fn():
+    return
