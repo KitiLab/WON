@@ -12,7 +12,7 @@
 The primary performance objective of WON is **native parity with optimized C**:
 - **Ahead-of-Time Compilation**: Source files compile directly to native machine code via optimized backends.
 - **Zero GC Pauses**: Memory reclamation is 100% deterministic, executed via RAII stack drops and explicit deallocations without runtime pauses.
-- **Zero Global Interpreter Lock (Zero-GIL)**: Concurrent tasks execute across all available CPU cores with native OS threading.
+- **Zero Global Interpreter Lock (Zero-GIL)**: The runtime contains no global interpreter lock, permitting true parallel execution of independent tasks across native OS threads.
 - **Predictable Mechanical Sympathy**: Cache-conscious memory layouts, contiguous array allocations, and zero hidden boxing.
 
 ---

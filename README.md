@@ -36,7 +36,7 @@ WON is **not** a wrapper around an existing runtime. It is designed from first p
 
 ### B. Ownership-Lite Memory Safety
 - **Core Model**: Compile-time move and borrow semantics without Rust-style lifetime annotations (`'a`).
-- **Safety Boundaries**: Thread safety enforced in safe code; explicit `unsafe { ... }` blocks for raw pointer manipulation and low-level FFI.
+- **Safety Boundaries**: Thread safety enforced in safe code; explicit `unsafe:` blocks for raw pointer manipulation and low-level FFI.
 - **Explicit Shared Ownership**: Ergonomic shared types for dynamic graph topologies without hidden runtime tracing.
 
 ### C. Universal C Interoperability

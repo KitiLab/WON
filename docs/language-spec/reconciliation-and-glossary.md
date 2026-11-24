@@ -101,27 +101,33 @@ To ensure the language specification suite is completely cohesive, rigorous, and
 | **Structured Concurrency**| Concurrency paradigm where concurrent tasks are strictly nested inside lexical scopes, ensuring no task outlives its parent. |
 | **TIR** | Typed Intermediate Representation: a language-independent, control-flow-graph-based intermediate language used for optimization and code generation. |
 | **Unsized Type (DST)**| A Dynamically Sized Type whose byte size is known only at runtime through accompanying metadata (e.g., `str`, `[T]`). |
-| **Zero-GIL** | Multi-threaded execution environment operating without a Global Interpreter Lock, fully utilizing all available CPU hardware cores. |
+| **Zero-GIL** | Multi-threaded execution environment operating without a Global Interpreter Lock, permitting parallel execution of independent tasks. (Actual CPU utilization depends on workload characteristics, OS scheduling, hardware availability, and program architecture). |
 
 ---
 
 ## 3. Design Decision Register & Owner Approval Matrix
 
-The table below summarizes the formal architectural decisions proposed in Phase 1A. All items marked as requiring owner approval await review from KitiLab leadership prior to Phase 1B implementation:
+Governance in the WON project strictly distinguishes between three distinct architectural tiers:
+1. **Accepted High-Level Architectural Foundations (ADR-001 through ADR-006)**: Foundational principles formally approved by KitiLab project leadership during Phase 0.
+2. **Phase 1 Detailed Specifications**: Elaborations (such as reference provenance analysis $\text{Prov}(e)$, the 3-tier string model, and sidecar `.wonbind` contracts) that flesh out the accepted foundations. These are `SPECIFIED` / `UNDER INVESTIGATION` until implemented and verified in the compiler.
+3. **Proposed Architectural Decision Records (ADR-007 through ADR-010)**: Major architectural proposals introduced in Phase 1A that await formal KitiLab owner review and approval prior to Phase 1B implementation.
 
-| Topic / Decision | Recommendation | Architectural Rationale | Status | Owner Approval Required? |
-| :--- | :--- | :--- | :--- | :---: |
-| **Syntax & Block Scoping** (ADR-007) | Option A: Indentation-based blocks with `:`, `let`/`var` | Maximizes visual clarity, delivers Python-like ergonomics, eliminates delimiter noise. | `PROPOSED` | **YES** |
-| **Whitespace Rules** (ADR-007) | Strictly 4 spaces; tabs forbidden (`WON-SYN-001`) | Eliminates ambiguity; ensures 100% deterministic indentation tokenization. | `PROPOSED` | **YES** |
-| **Mutability Vocabulary** | `let` (immutable) and `var` (mutable) | Replaces verbose `let mut`; clear cognitive distinction for developers and AI agents. | `PROPOSED` | **YES** |
-| **Integer Types** | Fixed-width `i8`..`i128`, `u8`..`u128`, `Int = i64` | Guarantees predictable machine representation and eliminates platform width bugs. | `PROPOSED` | **YES** |
-| **Ownership-Lite Engine** (ADR-003) | Scope-bounded region inference, elision rules, no `'a` | Complete memory safety without polluting APIs with viral lifetime annotations. | `PROPOSED` | **YES** |
-| **Concurrency Model** (ADR-008) | Structured concurrency (`scope`/`spawn`), Zero-GIL, `Send`/`Sync` | Eliminates thread leaks; enables stack borrowing into child tasks; safe multi-core execution. | `PROPOSED` | **YES** |
-| **Error Handling** | `Result[T, E]`, `Option[T]`, `?` operator | Predictable control flow; zero hidden exceptions; deterministic RAII destruction. | `PROPOSED` | **YES** |
-| **C FFI Ingestion** (ADR-006) | Direct `#import <header.h>`, composite dependency caching | True "Any C library" zero-friction interop with instant incremental compilation. | `ACCEPTED` (0B.2) | Done |
-| **FFI Safety Boundary** | Mandatory `unsafe:` block for foreign C calls | Explicit, auditable safety boundary; prevents foreign memory corruption in safe code. | `ACCEPTED` (0B.2) | Done |
-| **Intermediate Rep** (ADR-009) | Basic-block CFG Typed Intermediate Rep (TIR) | Decouples language frontend from backends; enables LLVM/QBE addition and optimization. | `PROPOSED` | **YES** |
-| **Self-Hosting Roadmap** (ADR-010) | 4-stage bootstrap; retain Go until 10 criteria met | Dogfoods WON for systems development; achieves permanent toolchain independence. | `PROPOSED` | **YES** |
-| **C Codegen Backend** (ADR-001) | Initial C11 emission; retain GCC/Clang during Stage 1 | Allows Go retirement before GCC/Clang retirement; harnesses mature native optimizers. | `ACCEPTED` (0A) | Done |
-| **Process Sandboxing** | Linux Landlock/seccomp, macOS Seatbelt | Defense-in-depth: protects host system against untrusted or vulnerable native C code. | `PROPOSED` | **YES** |
-| **Language Editions** | 3-year edition cycles (`2026`, `2029`) in `won.toml` | Permits syntax evolution without breaking ecosystem backwards compatibility. | `PROPOSED` | **YES** |
+### Canonical Architectural Decision Records (ADR-001 through ADR-010)
+
+| ADR ID | Canonical Title | Scope | Recommendation / Summary | Existing Status | Owner Approval Required? |
+| :--- | :--- | :--- | :--- | :--- | :---: |
+| **ADR-001** | C Code-Generation Backend | Backend | Emit ISO C11 initially; evaluate LLVM/QBE in Phase 5 | `ACCEPTED` (Phase 0A) | Done |
+| **ADR-002** | Compiler Implementation Language — Go Bootstrap | Frontend | Go 1.22+ for initial bootstrap prototype (`wonc0`) | `ACCEPTED` (Scoped to Phase 0B) | Done |
+| **ADR-003** | Ownership-Lite Memory Model | Type System | Memory safety without explicit lifetime parameters (`'a`) | `ACCEPTED` (Core Direction) | Detailed borrowing passes: `PROPOSED` |
+| **ADR-004** | AI-Independent Compiler Query Interface | Diagnostics | Neutral JSON-RPC and CLI diagnostic stream without vendor lock-in | `ACCEPTED` (Phase 0A) | Done |
+| **ADR-005** | Public Benchmark Methodology and Integrity Rules | Governance | Fair, transparent, reproducible benchmarks against native baselines | `ACCEPTED` (Phase 0A) | Done |
+| **ADR-006** | C Header Parsing Strategy | Toolchain | Direct `#import <header.h>`, libclang AST discovery and caching | `ACCEPTED` (Phase 0B.2) | Done |
+| **ADR-007** | Formal Syntax and Indentation-Based Grammar | Grammar | Python-inspired indentation blocks (`:`), 4-space indent, `let`/`var` | `PROPOSED` | **YES** |
+| **ADR-008** | Structured Concurrency and Zero-GIL | Runtime | Lexical nursery scopes (`scope`/`spawn`), work-stealing, parallel tasks | `PROPOSED` | **YES** |
+| **ADR-009** | Typed Intermediate Representation (TIR) Architecture | Compiler | Basic-block CFG TIR with `ComputeAddress`, multi-backend abstraction | `PROPOSED` | **YES** |
+| **ADR-010** | Compiler Self-Hosting and Bootstrap Pipeline | Toolchain | 4-stage bootstrap pipeline, Go retirement criteria | `PROPOSED` | **YES** |
+
+> [!IMPORTANT]
+> **ADR-003 Note**: ADR-003 accepts the ownership-lite architecture as an overarching project direction. It does **not** signify that every detailed borrowing pass or provenance algorithm proposed during Phase 1 has already been approved, implemented, or proven sound. Specific borrow-checker passes remain `SPECIFIED` / `UNDER INVESTIGATION` pending implementation in Phase 2.
+>
+> **Proposals Gate**: ADR-007 through ADR-010 remain strictly **`PROPOSED`** until KitiLab owner review. Including a feature in a specification document does not constitute architectural acceptance.

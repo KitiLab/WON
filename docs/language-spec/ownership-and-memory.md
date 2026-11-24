@@ -13,8 +13,10 @@ Systems languages face a stark historical dichotomy:
 - **Tracing Garbage Collection (Go, Java)**: Eliminates memory bugs at the cost of non-deterministic GC pauses, hidden runtime bloat, and poor low-level C FFI ergonomics.
 - **Explicit Lifetime Annotations (Rust)**: Achieves deterministic safety, but infects everyday APIs with complex lifetime syntax (`'a`, `'b: 'a`), steepening the learning curve and creating frictional hurdles for automated AI coding agents.
 
-WON establishes a third path: **Ownership-Lite**.
-> **Ownership-Lite Invariant**: Complete compile-time memory safety and deterministic destruction with zero garbage collection, **without requiring developers or AI agents to annotate named lifetime parameters (`'a`) in application source code.**
+WON establishes a third path: **Ownership-Lite** (formalized as an architectural foundation in ADR-003).
+> **Ownership-Lite Vision & Design Objective**: To deliver compile-time memory safety and deterministic destruction with zero garbage collection, **without requiring developers or AI agents to annotate named lifetime parameters (`'a`) in application source code.**
+>
+> *Note on Status*: While the high-level architecture of ownership-lite is an `ACCEPTED` project foundation (ADR-003), the specific static borrow-checking algorithm and reference provenance rules detailed in this document are currently **`SPECIFIED` / `UNDER INVESTIGATION`** awaiting full compiler pass implementation and empirical validation in Phase 2.
 
 ---
 
@@ -70,17 +72,25 @@ Rather than transferring ownership, values can be temporarily accessed via refer
 - A mutable reference grants exclusive read and write access to the target value.
 - **The Core Aliasing Invariant**:
   $$\text{At any point in time, a value may have either: } (\text{Any number of } \&T) \;\text{ XOR }\; (\text{Exactly one } \&\text{mut } T)$$
-- This rule mathematically guarantees the elimination of data races, iterator invalidation, and dangling pointer aliasing at compile time.
+- In a conforming and fully verified compiler, this invariant is designed to eliminate data races, iterator invalidation, and dangling pointer aliasing at compile time. Note that while this invariant is formally specified here as a language rule, its static enforcement in the toolchain remains a compiler implementation objective to be verified in Phase 2.
 
 ---
 
 ## 4. The Lifetime-Free Enforcement Engine
 
-> **Status**: `PROPOSED` / `UNDER INVESTIGATION` (Formal Soundness Model)
+> **Status**: `PROPOSED` / `UNDER INVESTIGATION` (Formal Soundness Model & Borrow Analysis)
 
 Rust achieves soundness by requiring developers to explicitly name and link lifetime parameters across function signatures (`fn longest<'a>(x: &'a str, y: &'a str) -> &'a str`).
 
-WON eliminates explicit `'a` lifetime annotations from application and systems APIs by employing **Reference Provenance Tracking**, **Scope-Bounded Region Inference**, and **Strict Multi-Reference Rejection**:
+WON specifies an alternative approach: eliminating explicit `'a` lifetime annotations from application and systems APIs by employing **Reference Provenance Tracking**, **Scope-Bounded Region Inference**, and **Strict Multi-Reference Rejection**.
+
+> [!NOTE]
+> **Soundness Obligations Under Investigation**:  
+> A formal specification and proposed algorithm do not by themselves constitute a formal proof of implementation soundness. The following technical verification obligations remain `UNDER INVESTIGATION` for Phase 2:
+> 1. *CFG Completeness*: Formalizing provenance set transformations across complex control flow graphs with loops, early breaks, and join points.
+> 2. *Re-borrowing Semantics*: Validating non-escape guarantees during nested field re-borrowing and method receiver chains.
+> 3. *Empirical Expressiveness*: Verifying that conservative multi-reference return rejection (`WON-MEM-002`) does not unduly restrict idiomatic systems programming patterns.
+> 4. *Pass Implementation*: Building, testing, and verifying the 6-phase borrow checker within the Typed Intermediate Representation (TIR) pipeline.
 
 ### 4.1 Lexical Scope Bounding
 References in local variables are tracked via lexical intervals. A reference `&x` is bounded strictly by the scope of the owner `x`. A reference **MUST NOT** escape the scope of the referenced value.

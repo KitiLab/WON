@@ -16,7 +16,7 @@ Phase 1A established the initial comprehensive draft of the WON programming lang
 
 **Phase 1A.1** was commissioned as a dedicated **specification-only remediation milestone** to achieve mathematical and architectural closure across the entire specification suite without altering the Phase 0 bootstrap compiler (`wonc0` under `compiler/poc/`).
 
-This document records the complete defect inventory, root cause analyses, formal remediations, mathematical soundness proofs, and governance reconciliations executed to bring the WON language specification to a production-grade, internally consistent baseline ready for Phase 1B implementation.
+This document records the complete defect inventory, root cause analyses, formal remediations, formal soundness models & provenance specifications, and governance reconciliations executed to bring the WON language specification to a production-grade, internally consistent baseline ready for Phase 1B implementation.
 
 ---
 
@@ -69,8 +69,8 @@ To provide memory safety without forcing developers or AI agents to annotate nam
 - **Re-borrowing**:
   $$\text{Prov}(\&*r) = \text{Prov}(r)$$
 
-#### 3.1.2 Single-Reference Elision Soundness Theorem
-**Theorem**: *For any function $f(p: \&T) \to \&U$, eliding lifetime annotations is mathematically sound if and only if the return expression's provenance is statically verified to derive solely from $p$ or global static memory.*
+#### 3.1.2 Single-Reference Elision Formulation
+**Specified Invariant**: *For any function $f(p: \&T) \to \&U$, eliding lifetime annotations is structurally sound if the return expression's provenance is statically verified to derive solely from $p$ or global static memory.*
 
 $$\text{Prov}(r_{\text{ret}}) \subseteq \{\text{Param}(p)\} \cup \{\text{static}\}$$
 
@@ -259,20 +259,20 @@ Every canonical example in [`docs/language-spec/syntax-and-grammar.md`](syntax-a
 
 In accordance with `AGENTS.md` rules, AI agents do not invent language features or approve architectural decisions independently.
 
-The table below records the formal governance status of all Phase 1 design decisions:
+The table below records the formal governance status of all canonical Architectural Decision Records (ADR-001 through ADR-010):
 
-| ADR ID | Title | Scope | Recommendation | Governance Status |
+| ADR ID | Canonical Title | Scope | Recommendation / Summary | Existing Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **ADR-001** | C Code Generation Strategy | Backend | Emit ISO C11 initially; LLVM in Phase 5 | `ACCEPTED` (Phase 0A) |
-| **ADR-002** | Go Bootstrap Implementation | Frontend | Go 1.24+ for bootstrap compiler | `ACCEPTED` (Phase 0A) |
-| **ADR-003** | Ownership-Lite Memory Model | Type System | Provenance tracking, no lifetime annotations | `PROPOSED` (Awaiting Owner Review) |
-| **ADR-004** | Structured Concurrency Architecture | Concurrency | Nursery scopes, cooperative cancellation | `PROPOSED` (Awaiting Owner Review) |
-| **ADR-005** | Direct C Header Import Pipeline | Toolchain | Direct `#import <h.h>`, Clang AST extraction | `ACCEPTED` (Phase 0B.2) |
-| **ADR-006** | AI-Native JSON Diagnostic Stream | Diagnostics | Structured JSON error reporting | `ACCEPTED` (Phase 0B.2) |
-| **ADR-007** | Indentation Syntax & Block Scoping | Grammar | Python-inspired `:`, 4-space indent, `let`/`var` | `PROPOSED` (Awaiting Owner Review) |
-| **ADR-008** | Structured Concurrency & Zero-GIL | Runtime | Work-stealing scheduler, thread-pool isolation | `PROPOSED` (Awaiting Owner Review) |
-| **ADR-009** | Typed Intermediate Representation | Compiler | CFG Basic-Block TIR with `ComputeAddress` | `PROPOSED` (Awaiting Owner Review) |
-| **ADR-010** | Four-Stage Self-Hosting Roadmap | Toolchain | 4-stage pipeline, Go retirement gate | `PROPOSED` (Awaiting Owner Review) |
+| **ADR-001** | C Code-Generation Backend | Backend | Emit ISO C11 initially; evaluate LLVM/QBE in Phase 5 | `ACCEPTED` (Phase 0A) |
+| **ADR-002** | Compiler Implementation Language — Go Bootstrap | Frontend | Go 1.22+ for initial bootstrap prototype (`wonc0`) | `ACCEPTED` (Scoped to Phase 0B) |
+| **ADR-003** | Ownership-Lite Memory Model | Type System | Memory safety without explicit lifetime parameters (`'a`) | `ACCEPTED` (Core Direction; passes `PROPOSED`) |
+| **ADR-004** | AI-Independent Compiler Query Interface | Diagnostics | Neutral JSON-RPC and CLI diagnostic stream without vendor lock-in | `ACCEPTED` (Phase 0A) |
+| **ADR-005** | Public Benchmark Methodology and Integrity Rules | Governance | Fair, transparent, reproducible benchmarks against native baselines | `ACCEPTED` (Phase 0A) |
+| **ADR-006** | C Header Parsing Strategy | Toolchain | Direct `#import <header.h>`, libclang AST discovery and caching | `ACCEPTED` (Phase 0B.2) |
+| **ADR-007** | Formal Syntax and Indentation-Based Grammar | Grammar | Python-inspired `:`, 4-space indent, `let`/`var` | `PROPOSED` (Awaiting Owner Review) |
+| **ADR-008** | Structured Concurrency and Zero-GIL | Runtime | Lexical nursery scopes (`scope`/`spawn`), work-stealing, parallel tasks | `PROPOSED` (Awaiting Owner Review) |
+| **ADR-009** | Typed Intermediate Representation (TIR) Architecture | Compiler | Basic-block CFG TIR with `ComputeAddress`, multi-backend abstraction | `PROPOSED` (Awaiting Owner Review) |
+| **ADR-010** | Compiler Self-Hosting and Bootstrap Pipeline | Toolchain | 4-stage bootstrap pipeline, Go retirement criteria | `PROPOSED` (Awaiting Owner Review) |
 
 ---
 
