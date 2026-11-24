@@ -25,12 +25,13 @@
    - Link-Time Optimization comparison: **WON (GCC -O3 -flto)** vs **C (GCC 16 -O3 -flto)**.
    - Cross-compiler reference: **C (Clang 23 -O3)**.
    - Managed runtime reference: **Go Native (`compress/zlib`)** and **Go CGO (`-lz`)**.
-3. **Isolated Memory Measurement**:
-   Peak Resident Set Size (RSS) is measured on isolated runs using `/usr/bin/time -v` (`Maximum resident set size`), eliminating multi-process accumulation artifacts.
+3. **Isolated Memory Measurement & Allocation Strategy Disclosure**:
+   - Peak Resident Set Size (RSS) is measured on isolated runs using `/usr/bin/time -v` (`Maximum resident set size`), eliminating multi-process accumulation artifacts.
+   - **Buffer Allocation Strategy**: `bench.won` utilizes fixed-size stack arrays (`[u8; 1048576]`, emitted as C stack local arrays `unsigned char buf[N] = {0};` in `main`), whereas `bench.c` utilizes heap `malloc` and `free`. Both allocate strictly outside the 50-iteration timed loop. The stack array zero-initialization and page allocation explain the minor difference in peak RSS (~5,380 KB vs ~4,336 KB).
 4. **Mandatory Round-Trip Byte Verification**:
    Each iteration across all implementations asserts byte-for-byte equality between the decompressed output and the original input (`memcmp` / `bytes_equal` / `bytes.Equal`).
-5. **Process-Level Timing**:
-   Measures end-to-end execution time using `time.perf_counter_ns` over 30 measured runs preceded by 5 warm-up runs.
+5. **Process-Level Timing with Interleaved Sampling**:
+   Measures end-to-end execution time using `time.perf_counter_ns` across 30 measured rounds preceded by 5 warm-up runs. In each round, every target is executed in sequence (Target 1, Target 2, ..., Target N) to eliminate temporal, thermal, and dynamic frequency scaling (DVFS) drift across implementations.
 
 ---
 

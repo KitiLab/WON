@@ -1,8 +1,14 @@
 {
   "header_path": "/usr/include/zlib.h",
-  "header_sha256": "8bc935aeb8909d05fe58f9286a0fe2c674a41638c374786ee888485ab5ff4409",
+  "header_sha256": "52ec39f105951afae8e41db0376109096a3333fed08b9537349bb7b4ecfd5d0f",
+  "dependency_files": [
+    "/usr/include/zconf.h",
+    "/usr/include/zlib.h",
+    "/usr/include/zlib_name_mangling.h"
+  ],
   "target_triple": "x86_64-redhat-linux-gnu",
   "clang_version": "clang version 23.1.5 (Fedora 23.1.5-2.fc45)",
+  "clang_flags": "-Xclang -ast-dump=json -fsyntax-only",
   "typedefs": {
     "Byte": {
       "name": "Byte",

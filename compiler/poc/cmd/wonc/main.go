@@ -178,12 +178,11 @@ func runBindings(args []string) {
 		os.Exit(1)
 	}
 
-	// 写入 bindings/zlib/generated/ 目录
-	outDir := "bindings/zlib/generated"
+	jsonPath := findBindingCache("zlib_binding.json")
+	outDir := filepath.Dir(jsonPath)
 	_ = os.MkdirAll(outDir, 0755)
 
 	jsonBytes, _ := json.MarshalIndent(meta, "", "  ")
-	jsonPath := filepath.Join(outDir, "zlib_binding.json")
 	if err := os.WriteFile(jsonPath, jsonBytes, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "写入绑定文件失败: %v\n", err)
 		os.Exit(1)
@@ -253,7 +252,19 @@ func runBuild(args []string) {
 	gen := codegen.New(prog, bindings)
 	cSource, err := gen.Generate()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "生成 C 代码失败: %v\n", err)
+		report.AddDiagnostic(diagnostic.Diagnostic{
+			Code:     "WON-GEN-001",
+			Severity: "error",
+			Message:  err.Error(),
+			File:     srcFile,
+			Span:     prog.GetSpan(),
+		})
+		if *format == "json" {
+			jsonStr, _ := report.ToJSON()
+			fmt.Println(jsonStr)
+		} else {
+			fmt.Print(report.String())
+		}
 		os.Exit(1)
 	}
 

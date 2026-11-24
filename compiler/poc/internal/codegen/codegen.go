@@ -1,5 +1,6 @@
 // Package codegen 实现了从 WON AST 到严格 ISO C11 标准源码的生成器
-// 坚决剔除任何 GNU 语句表达式 (({ ... })) 扩展，使用纯标准 C11 块作用域与临时变量保证 -pedantic-errors 零警告零错误。
+// 坚决剔除任何 GNU 语句表达式 (({ ... })) 扩展，使用纯标准 C11 块作用域与临时变量保证 -pedantic-errors -Wall -Wextra -Werror 零警告零错误。
+// 所有未实现的 AST 结构均显式返回明确的错误，杜绝任何静默兜底回退。
 package codegen
 
 import (
@@ -16,7 +17,6 @@ type Generator struct {
 	bindings map[string]*bindgen.BindingMeta
 	sb       strings.Builder
 	indent   int
-	tempID   int
 }
 
 // New 创建生成器实例
@@ -69,13 +69,15 @@ func (g *Generator) Generate() (string, error) {
 
 	// 4. 生成函数声明与定义
 	for _, fn := range g.prog.Functions {
-		g.genFunction(fn)
+		if err := g.genFunction(fn); err != nil {
+			return "", err
+		}
 	}
 
 	return g.sb.String(), nil
 }
 
-func (g *Generator) genFunction(fn *ast.FunctionDecl) {
+func (g *Generator) genFunction(fn *ast.FunctionDecl) error {
 	retType := "void"
 	if fn.ReturnType == "i32" {
 		retType = "int"
@@ -99,87 +101,139 @@ func (g *Generator) genFunction(fn *ast.FunctionDecl) {
 	}
 
 	g.indent++
-	g.genBlockStatements(fn.Body)
+	if err := g.genBlockStatements(fn.Body); err != nil {
+		return err
+	}
 	g.indent--
 	g.writeLine("}")
 	g.writeLine("")
+	return nil
 }
 
-func (g *Generator) genBlockStatements(b *ast.BlockStmt) {
+func (g *Generator) genBlockStatements(b *ast.BlockStmt) error {
 	for _, stmt := range b.Statements {
-		g.genStatement(stmt)
+		if err := g.genStatement(stmt); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func (g *Generator) genStatement(stmt ast.Stmt) {
+func (g *Generator) genStatement(stmt ast.Stmt) error {
 	switch s := stmt.(type) {
 	case *ast.LetStmt:
-		g.genLet(s)
+		return g.genLet(s)
 	case *ast.AssignStmt:
 		if u, ok := s.Value.(*ast.UnsafeExpr); ok {
 			g.writeLine("{")
 			g.indent++
-			g.genUnsafeBlockAssign(u.Block, s.Target)
+			if err := g.genUnsafeBlockAssign(u.Block, s.Target); err != nil {
+				return err
+			}
 			g.indent--
 			g.writeLine("}")
-		} else {
-			valStr := g.genExpr(s.Value)
-			g.writeLine(fmt.Sprintf("%s = %s;", s.Target, valStr))
+			return nil
 		}
+		valStr, err := g.genExpr(s.Value)
+		if err != nil {
+			return err
+		}
+		g.writeLine(fmt.Sprintf("%s = %s;", s.Target, valStr))
+		return nil
 	case *ast.IfStmt:
-		condStr := g.genExpr(s.Cond)
-		g.writeLine(fmt.Sprintf("if (%s) {", condStr))
+		condStr, err := g.genExpr(s.Cond)
+		if err != nil {
+			return err
+		}
+		// 避免多重嵌套外层括号触发 Clang -Wparentheses-equality 警告
+		if strings.HasPrefix(condStr, "(") && strings.HasSuffix(condStr, ")") {
+			g.writeLine(fmt.Sprintf("if %s {", condStr))
+		} else {
+			g.writeLine(fmt.Sprintf("if (%s) {", condStr))
+		}
 		g.indent++
-		g.genBlockStatements(s.Then)
+		if err := g.genBlockStatements(s.Then); err != nil {
+			return err
+		}
 		g.indent--
 		if s.Else != nil {
 			if elseBlock, ok := s.Else.(*ast.BlockStmt); ok {
 				g.writeLine("} else {")
 				g.indent++
-				g.genBlockStatements(elseBlock)
+				if err := g.genBlockStatements(elseBlock); err != nil {
+					return err
+				}
 				g.indent--
 			} else {
 				g.writeLine("} else")
-				g.genStatement(s.Else)
+				if err := g.genStatement(s.Else); err != nil {
+					return err
+				}
 			}
-		} else {
-			g.writeLine("}")
 		}
+		g.writeLine("}")
+		return nil
 	case *ast.WhileStmt:
-		condStr := g.genExpr(s.Cond)
-		g.writeLine(fmt.Sprintf("while (%s) {", condStr))
+		condStr, err := g.genExpr(s.Cond)
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(condStr, "(") && strings.HasSuffix(condStr, ")") {
+			g.writeLine(fmt.Sprintf("while %s {", condStr))
+		} else {
+			g.writeLine(fmt.Sprintf("while (%s) {", condStr))
+		}
 		g.indent++
-		g.genBlockStatements(s.Body)
+		if err := g.genBlockStatements(s.Body); err != nil {
+			return err
+		}
 		g.indent--
 		g.writeLine("}")
+		return nil
 	case *ast.ReturnStmt:
 		if s.Value != nil {
-			g.writeLine(fmt.Sprintf("return %s;", g.genExpr(s.Value)))
+			valStr, err := g.genExpr(s.Value)
+			if err != nil {
+				return err
+			}
+			g.writeLine(fmt.Sprintf("return %s;", valStr))
 		} else {
 			g.writeLine("return;")
 		}
+		return nil
 	case *ast.ExprStmt:
 		if u, ok := s.Expr.(*ast.UnsafeExpr); ok {
 			g.writeLine("{")
 			g.indent++
-			g.genBlockStatements(u.Block)
+			if err := g.genBlockStatements(u.Block); err != nil {
+				return err
+			}
 			g.indent--
 			g.writeLine("}")
-			return
+			return nil
 		}
-		exprStr := g.genExpr(s.Expr)
+		exprStr, err := g.genExpr(s.Expr)
+		if err != nil {
+			return err
+		}
 		if exprStr != "" {
 			g.writeLine(fmt.Sprintf("%s;", exprStr))
 		}
+		return nil
+	default:
+		return fmt.Errorf("代码生成器遇到不受支持的语句类型: %T (第 %d 行, 第 %d 列)", stmt, stmt.GetSpan().Start.Line, stmt.GetSpan().Start.Column)
 	}
 }
 
-func (g *Generator) genLet(s *ast.LetStmt) {
+func (g *Generator) genLet(s *ast.LetStmt) error {
 	// 数组初始化声明: let [mut] buf: [u8; 256] = [0; 256];
 	if arr, ok := s.Init.(*ast.ArrayRepeatLiteral); ok {
-		elemVal := g.genExpr(arr.Elem)
+		elemVal, err := g.genExpr(arr.Elem)
+		if err != nil {
+			return err
+		}
 		g.writeLine(fmt.Sprintf("unsigned char %s[%d] = {%s};", s.Name, arr.Count, elemVal))
-		return
+		return nil
 	}
 
 	cType := g.inferType(s)
@@ -189,28 +243,41 @@ func (g *Generator) genLet(s *ast.LetStmt) {
 		g.writeLine(fmt.Sprintf("%s %s;", cType, s.Name))
 		g.writeLine("{")
 		g.indent++
-		g.genUnsafeBlockAssign(u.Block, s.Name)
+		if err := g.genUnsafeBlockAssign(u.Block, s.Name); err != nil {
+			return err
+		}
 		g.indent--
 		g.writeLine("}")
-		return
+		return nil
 	}
 
-	initStr := g.genExpr(s.Init)
+	initStr, err := g.genExpr(s.Init)
+	if err != nil {
+		return err
+	}
 	g.writeLine(fmt.Sprintf("%s %s = %s;", cType, s.Name, initStr))
+	return nil
 }
 
-func (g *Generator) genUnsafeBlockAssign(b *ast.BlockStmt, targetVar string) {
+func (g *Generator) genUnsafeBlockAssign(b *ast.BlockStmt, targetVar string) error {
 	n := len(b.Statements)
 	for i, stmt := range b.Statements {
 		if i == n-1 {
 			// 尾表达式语句转换为直接目标赋值
 			if es, ok := stmt.(*ast.ExprStmt); ok {
-				g.writeLine(fmt.Sprintf("%s = %s;", targetVar, g.genExpr(es.Expr)))
+				exprStr, err := g.genExpr(es.Expr)
+				if err != nil {
+					return err
+				}
+				g.writeLine(fmt.Sprintf("%s = %s;", targetVar, exprStr))
 				continue
 			}
 		}
-		g.genStatement(stmt)
+		if err := g.genStatement(stmt); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func (g *Generator) inferType(s *ast.LetStmt) string {
@@ -260,68 +327,95 @@ func (g *Generator) inferType(s *ast.LetStmt) string {
 	}
 }
 
-func (g *Generator) genExpr(expr ast.Expr) string {
+func (g *Generator) genExpr(expr ast.Expr) (string, error) {
 	if expr == nil {
-		return ""
+		return "", nil
 	}
 
 	switch e := expr.(type) {
 	case *ast.IntegerLiteral:
-		return e.Raw
+		return e.Raw, nil
 	case *ast.StringLiteral:
-		return fmt.Sprintf("%q", e.Value)
+		return fmt.Sprintf("%q", e.Value), nil
 	case *ast.Identifier:
-		return e.Name
+		return e.Name, nil
 	case *ast.BinaryExpr:
-		left := g.genExpr(e.Left)
-		right := g.genExpr(e.Right)
-		return fmt.Sprintf("(%s %s %s)", left, e.Op, right)
+		left, err := g.genExpr(e.Left)
+		if err != nil {
+			return "", err
+		}
+		right, err := g.genExpr(e.Right)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("(%s %s %s)", left, e.Op, right), nil
 	case *ast.UnaryExpr:
-		sub := g.genExpr(e.Expr)
-		return fmt.Sprintf("(%s%s)", e.Op, sub)
+		sub, err := g.genExpr(e.Expr)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("(%s%s)", e.Op, sub), nil
 	case *ast.BorrowExpr:
-		sub := g.genExpr(e.Expr)
-		return fmt.Sprintf("(&%s)", sub)
+		sub, err := g.genExpr(e.Expr)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("(&%s)", sub), nil
 	case *ast.CallExpr:
-		args := make([]string, 0)
+		args := make([]string, 0, len(e.Args))
 		for _, arg := range e.Args {
-			args = append(args, g.genExpr(arg))
+			argStr, err := g.genExpr(arg)
+			if err != nil {
+				return "", err
+			}
+			args = append(args, argStr)
 		}
 		if e.Callee == "println" {
-			return genPrintlnCall(args)
+			return genPrintlnCall(args), nil
 		}
 		if e.Callee == "bytes_equal" {
-			return fmt.Sprintf("won_bytes_equal(%s, %s, %s)", args[0], args[1], args[2])
+			if len(args) != 3 {
+				return "", fmt.Errorf("内置函数 bytes_equal 期望 3 个实参，实际收到 %d 个 (第 %d 行, 第 %d 列)", len(args), e.Span.Start.Line, e.Span.Start.Column)
+			}
+			return fmt.Sprintf("won_bytes_equal(%s, %s, %s)", args[0], args[1], args[2]), nil
 		}
-		return fmt.Sprintf("%s(%s)", e.Callee, strings.Join(args, ", "))
+		return fmt.Sprintf("%s(%s)", e.Callee, strings.Join(args, ", ")), nil
 	case *ast.NamespacedCallExpr:
-		args := make([]string, 0)
+		args := make([]string, 0, len(e.Args))
 		for _, arg := range e.Args {
-			args = append(args, g.genExpr(arg))
+			argStr, err := g.genExpr(arg)
+			if err != nil {
+				return "", err
+			}
+			args = append(args, argStr)
 		}
-		return fmt.Sprintf("%s(%s)", e.Function, strings.Join(args, ", "))
+		return fmt.Sprintf("%s(%s)", e.Function, strings.Join(args, ", ")), nil
 	case *ast.MethodCallExpr:
-		recStr := g.genExpr(e.Receiver)
+		recStr, err := g.genExpr(e.Receiver)
+		if err != nil {
+			return "", err
+		}
 		switch e.Method {
 		case "as_bytes", "as_ptr":
-			return fmt.Sprintf("((const unsigned char*)(%s))", recStr)
+			return fmt.Sprintf("((const unsigned char*)(%s))", recStr), nil
 		case "as_mut_ptr":
-			return fmt.Sprintf("((unsigned char*)(%s))", recStr)
+			return fmt.Sprintf("((unsigned char*)(%s))", recStr), nil
 		case "len":
-			return fmt.Sprintf("((unsigned long)sizeof(%s))", recStr)
+			return fmt.Sprintf("((unsigned long)sizeof(%s))", recStr), nil
 		default:
-			return fmt.Sprintf("%s.%s()", recStr, e.Method)
+			return "", fmt.Errorf("代码生成器遇到不受支持的方法调用: .%s() (第 %d 行, 第 %d 列)", e.Method, e.Span.Start.Line, e.Span.Start.Column)
 		}
 	case *ast.UnsafeExpr:
-		// 当 unsafe 表达式被嵌套在非语句位置时，提取单一表达式或报错
+		// 当 unsafe 表达式作为子表达式时，仅支持包含单一表达式语句的块
 		if len(e.Block.Statements) == 1 {
 			if es, ok := e.Block.Statements[0].(*ast.ExprStmt); ok {
 				return g.genExpr(es.Expr)
 			}
 		}
-		return "0 /* unsupported nested unsafe */"
+		return "", fmt.Errorf("不支持在嵌套子表达式位置使用多语句 unsafe 块 (第 %d 行, 第 %d 列): 请使用独立语句 'let x = unsafe { ... }' 声明", e.Span.Start.Line, e.Span.Start.Column)
+	default:
+		return "", fmt.Errorf("代码生成器遇到不受支持的表达式类型: %T (第 %d 行, 第 %d 列)", expr, expr.GetSpan().Start.Line, expr.GetSpan().Start.Column)
 	}
-	return ""
 }
 
 func genPrintlnCall(args []string) string {
@@ -340,20 +434,16 @@ func genPrintlnCall(args []string) string {
 		}
 	}
 	format.WriteString("\\n")
-	if len(passArgs) > 0 {
-		return fmt.Sprintf(`printf("%s", %s)`, format.String(), strings.Join(passArgs, ", "))
+	if len(passArgs) == 0 {
+		return fmt.Sprintf(`printf("%s")`, format.String())
 	}
-	return fmt.Sprintf(`printf("%s")`, format.String())
+	return fmt.Sprintf(`printf("%s", %s)`, format.String(), strings.Join(passArgs, ", "))
 }
 
 func mapWonTypeToC(wonType string) string {
 	switch wonType {
 	case "i32":
 		return "int"
-	case "u32":
-		return "uint32_t"
-	case "i64":
-		return "int64_t"
 	case "u64":
 		return "unsigned long" // 匹配 Linux x86_64 uLong ABI
 	case "u8":

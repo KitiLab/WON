@@ -143,3 +143,17 @@ fn main() -> i32 {
 | **Benchmark Fairness** | Mismatched compiler flags; `RUSAGE_CHILDREN` multi-process memory leak | Matched `-O3` and `-O3 -flto` flags; isolated per-process RSS via `/usr/bin/time -v` | `VERIFIED` (`run_bench.py` 30 samples) |
 | **AI Agent Repair** | In-process test runner string manipulation | Live autonomous repair experiment with `wonc check --format=json` and `edit_file` | `VERIFIED` ([docs/phase-0b-ai-agent-experiment.md](phase-0b-ai-agent-experiment.md)) |
 | **Static Linking** | Unclear error reporting on missing static libc | Added specific diagnostic distinguishing missing static archives | `VERIFIED` (`wonc build --static`) |
+
+---
+
+## 6. Final Compiler Correctness Gate (Phase 0B.2) Verification Matrix
+
+| Area | Engineering Review Finding | Corrective Implementation in Phase 0B.2 | Verification Status |
+| :--- | :--- | :--- | :--- |
+| **FFI Type Validation** | Checker only checked function names and argument counts | Extended semantic checker to validate argument types against extracted Clang signatures for `compressBound`, `compress`, `uncompress`, `zlibVersion`; strictly enforces pointer mutability (`&mut [u8; N]` vs `&[u8; N]`) and scalar types; produces structured diagnostics `WON-FFI-004` (parameter type mismatch), `WON-FFI-005` (unsupported function type), `WON-FFI-006` (void return assigned to variable). | `PASS` (`checker_test.go`) |
+| **Codegen Fallbacks** | Placeholder fallback `0 /* unsupported nested unsafe */` returned silently | Removed silent fallback; all codegen routines return errors on unsupported syntax with line and column numbers; CLI formats as structured diagnostic `WON-GEN-001`. | `PASS` (`codegen_test.go`) |
+| **Strict C11 Compilation** | C codegen lacked mandatory `-Werror` testing under both compilers | Fixed extraneous parentheses and string newline escapes; added test asserting clean compilation with `-std=c11 -pedantic-errors -Wall -Wextra -Werror` under both GCC 16.2.1 and Clang 23.1.5. | `PASS` (`codegen_test.go`) |
+| **Cache Key Hardening** | Header cache fingerprint only hashed the primary top-level header | Implemented composite SHA-256 fingerprint incorporating primary header, transitively included headers (`zconf.h`, `zlib_name_mangling.h` via `clang -MM`), Clang version, target triple, and compilation flags. Invalidation verified on transitive changes. | `PASS` (`binding_test.go`) |
+| **Edge-Case Completeness** | Correctness tests only verified nominal small payloads | Implemented automated tests for 7 distinct edge cases: empty payload, normal payload, embedded NUL bytes, non-ASCII UTF-8, 4KB payload, insufficient buffer capacity (`Z_BUF_ERROR`), and corrupted payload rejection. Byte-for-byte equality verified. | `PASS` (`correctness_test.go`) |
+| **Benchmark Integrity** | Mismatched buffer allocation strategies and temporal drift risk | Disclosed stack array allocation (`bench.won`) vs heap `malloc` (`bench.c`); implemented interleaved sampling across iterations to eliminate thermal and frequency-scaling drift; confirmed zero performance claim over C. | `PASS` (`benchmarks/phase0/`) |
+| **Static Linking Status** | Missing static archives on Fedora Linux 45 | Confirmed `glibc-static` (`libc.a`) and `zlib-static` (`libz.a`) are absent from system; formally classified as `BLOCKED (Environment)`. | `BLOCKED (Environment)` |

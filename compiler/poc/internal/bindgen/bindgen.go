@@ -1,5 +1,6 @@
 // Package bindgen 实现了基于 Clang 语义 AST 的真实 C 头文件绑定提取器
 // 解析系统实际安装的 C 头文件 (/usr/include/zlib.h)，提取函数签名与类型别名，保证 ABI 精确匹配。
+// 引入高防伪复合依赖指纹 (Composite Fingerprint) 机制，综合覆盖直接头文件、传递依赖头文件、Clang版本与目标架构。
 package bindgen
 
 import (
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -30,9 +32,11 @@ type TypedefMapping struct {
 // BindingMeta 记录生成绑定的元数据与溯源信息
 type BindingMeta struct {
 	HeaderPath      string                    `json:"header_path"`
-	HeaderSHA256    string                    `json:"header_sha256"`
+	HeaderSHA256    string                    `json:"header_sha256"` // 包含所有传递包含依赖与工具链参数的复合 SHA-256
+	DependencyFiles []string                  `json:"dependency_files,omitempty"`
 	TargetTriple    string                    `json:"target_triple"`
 	ClangVersion    string                    `json:"clang_version"`
+	ClangFlags      string                    `json:"clang_flags,omitempty"`
 	ZlibVersion     string                    `json:"zlib_version,omitempty"`
 	Typedefs        map[string]TypedefMapping `json:"typedefs"`
 	Functions       map[string]FunctionSig    `json:"functions"`
@@ -52,7 +56,7 @@ type ClangType struct {
 	QualType string `json:"qualType"`
 }
 
-// CalculateHeaderSHA256 计算头文件的 SHA-256 哈希值
+// CalculateHeaderSHA256 计算单头文件哈希 (兼容性接口)
 func CalculateHeaderSHA256(headerPath string) (string, error) {
 	headerBytes, err := os.ReadFile(headerPath)
 	if err != nil {
@@ -62,15 +66,90 @@ func CalculateHeaderSHA256(headerPath string) (string, error) {
 	return hex.EncodeToString(hash[:]), nil
 }
 
-// GetOrExtractZlibBindings 获取并验证绑定元数据。若存在有效缓存且哈希匹配则直接读取，否则重新调用 Clang 提取
+// CalculateCompositeFingerprint 综合计算主头文件、传递依赖头文件、Clang版本与目标架构的确定性 SHA-256 指纹
+func CalculateCompositeFingerprint(headerPath string, extraArgs ...string) (string, []string, error) {
+	if headerPath == "" {
+		headerPath = "/usr/include/zlib.h"
+	}
+
+	// 1. 获取 Clang 版本
+	clangVerCmd := exec.Command("clang", "--version")
+	clangVerOut, err := clangVerCmd.Output()
+	if err != nil {
+		return "", nil, fmt.Errorf("执行 clang --version 失败: %w", err)
+	}
+	clangVer := strings.TrimSpace(strings.Split(string(clangVerOut), "\n")[0])
+
+	// 2. 获取目标架构 Triple
+	clangTripleCmd := exec.Command("clang", "-print-target-triple")
+	clangTripleOut, _ := clangTripleCmd.Output()
+	targetTriple := strings.TrimSpace(string(clangTripleOut))
+	if targetTriple == "" {
+		targetTriple = "x86_64-unknown-linux-gnu"
+	}
+
+	// 3. 利用 clang -MM 探测直接与间接引入的所有非系统头文件依赖 (如 zconf.h)
+	headerDir := filepath.Dir(headerPath)
+	mmArgs := []string{"-MM"}
+	if headerDir != "" && headerDir != "." {
+		mmArgs = append(mmArgs, "-I", headerDir)
+	}
+	mmArgs = append(mmArgs, extraArgs...)
+	mmArgs = append(mmArgs, headerPath)
+
+	depFilesMap := make(map[string]bool)
+	depFilesMap[headerPath] = true
+
+	mmCmd := exec.Command("clang", mmArgs...)
+	mmOut, err := mmCmd.Output()
+	if err == nil {
+		tokens := strings.Fields(string(mmOut))
+		for _, token := range tokens {
+			if strings.HasSuffix(token, ":") || token == "\\" || token == "" {
+				continue
+			}
+			cleanPath := filepath.Clean(token)
+			depFilesMap[cleanPath] = true
+		}
+	}
+
+	depFiles := make([]string, 0, len(depFilesMap))
+	for f := range depFilesMap {
+		depFiles = append(depFiles, f)
+	}
+	sort.Strings(depFiles)
+
+	// 4. 组装输入源并计算确定性复合 SHA-256
+	h := sha256.New()
+	h.Write([]byte("clang: " + clangVer + "\n"))
+	h.Write([]byte("target: " + targetTriple + "\n"))
+	h.Write([]byte("flags: -Xclang -ast-dump=json -fsyntax-only " + strings.Join(extraArgs, " ") + "\n"))
+
+	for _, f := range depFiles {
+		content, readErr := os.ReadFile(f)
+		if readErr != nil {
+			if f == headerPath {
+				return "", nil, fmt.Errorf("读取主头文件失败 %s: %w", f, readErr)
+			}
+			continue
+		}
+		h.Write([]byte("dep: " + f + "\n"))
+		h.Write(content)
+		h.Write([]byte("\n"))
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), depFiles, nil
+}
+
+// GetOrExtractZlibBindings 获取并验证绑定元数据。若存在有效缓存且复合哈希完全匹配则直接读取，否则重新调用 Clang 提取
 func GetOrExtractZlibBindings(headerPath, cacheFile string) (*BindingMeta, error) {
 	if headerPath == "" {
 		headerPath = "/usr/include/zlib.h"
 	}
 
-	currentHash, err := CalculateHeaderSHA256(headerPath)
+	currentHash, _, err := CalculateCompositeFingerprint(headerPath)
 	if err != nil {
-		return nil, fmt.Errorf("读取头文件失败 %s: %w", headerPath, err)
+		return nil, fmt.Errorf("计算复合头文件依赖指纹失败 %s: %w", headerPath, err)
 	}
 
 	// 尝试检查缓存
@@ -78,7 +157,7 @@ func GetOrExtractZlibBindings(headerPath, cacheFile string) (*BindingMeta, error
 		if cacheBytes, err := os.ReadFile(cacheFile); err == nil {
 			var cached BindingMeta
 			if err := json.Unmarshal(cacheBytes, &cached); err == nil {
-				// 校验指纹：若头文件哈希一致，且所需函数均存在，则缓存有效
+				// 校验高防伪复合指纹与符号完备性
 				if cached.HeaderSHA256 == currentHash && len(cached.Functions) > 0 {
 					return &cached, nil
 				}
@@ -109,9 +188,9 @@ func ExtractZlibBindings(headerPath string) (*BindingMeta, error) {
 		headerPath = "/usr/include/zlib.h"
 	}
 
-	shaStr, err := CalculateHeaderSHA256(headerPath)
+	compositeHash, depFiles, err := CalculateCompositeFingerprint(headerPath)
 	if err != nil {
-		return nil, fmt.Errorf("读取 C 头文件失败 %s: %w", headerPath, err)
+		return nil, fmt.Errorf("计算复合指纹失败: %w", err)
 	}
 
 	// 获取 Clang 版本与默认 target triple
@@ -139,12 +218,14 @@ func ExtractZlibBindings(headerPath string) (*BindingMeta, error) {
 	}
 
 	meta := &BindingMeta{
-		HeaderPath:   headerPath,
-		HeaderSHA256: shaStr,
-		TargetTriple: targetTriple,
-		ClangVersion: clangVer,
-		Typedefs:     make(map[string]TypedefMapping),
-		Functions:    make(map[string]FunctionSig),
+		HeaderPath:      headerPath,
+		HeaderSHA256:    compositeHash,
+		DependencyFiles: depFiles,
+		TargetTriple:    targetTriple,
+		ClangVersion:    clangVer,
+		ClangFlags:      "-Xclang -ast-dump=json -fsyntax-only",
+		Typedefs:        make(map[string]TypedefMapping),
+		Functions:       make(map[string]FunctionSig),
 	}
 
 	// 目标提取的符号

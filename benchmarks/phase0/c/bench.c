@@ -1,4 +1,8 @@
 // C 语言 Phase 0B 基准测试对比基线 (GCC/Clang -O3 -flto)
+// 内存分配策略说明 (Allocation Disclosure):
+// 当前 C 基准实现采用堆分配 (malloc/free)，而 bench.won 采用函数局部数组 ([u8; N])。
+// 缓冲区分配均在 50 次压缩/解压循环之外完成，对循环内部执行吞吐无直接影响。
+// 函数局部数组的零初始化与物理页预映射使 WON 进程峰值驻留集 (Peak RSS) 略高于 C 堆分配 (~5.3MB vs ~4.3MB)。
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>

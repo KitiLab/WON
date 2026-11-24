@@ -17,18 +17,18 @@ Furthermore, in Phase 0B.1, the binding metadata must participate directly in th
    - *Rejected*: Inaccurate, fails on multiline declarations, cannot resolve typedefs, breaks on macro attributes.
 2. **Custom Complete C Preprocessor and Parser**:
    - *Rejected for Phase 0B*: Prohibitive complexity for a vertical slice; high risk of non-standard behavior on glibc/system headers.
-3. **Clang Semantic JSON AST Dump (`clang -Xclang -ast-dump=json`) with Fingerprint Caching (Selected)**:
+3. **Clang Semantic JSON AST Dump (`clang -Xclang -ast-dump=json`) with Composite Fingerprint Caching (Selected)**:
    - Leverages the host's existing, verified Clang installation (`clang version 23.1.5`).
    - Produces 100% compliant, fully expanded semantic ASTs containing exact return types, parameter types, qualifiers (`const`), and canonical typedef resolutions.
    - Outputs machine-readable JSON directly inspectable by Go.
-   - Caches parsed metadata keyed by the SHA-256 fingerprint of the header file, ensuring fast incremental builds and automatic invalidation when headers change.
+   - Caches parsed metadata keyed by a composite SHA-256 fingerprint tracking the primary header, transitively included headers (via `clang -MM`), host Clang version, target ABI triple, and compilation flags. Automatically invalidates and regenerates bindings when any transitive dependency changes.
 
 ## Decision
-**WON adopts the Clang Semantic AST strategy with SHA-256 header fingerprint caching for C header binding generation.**
+**WON adopts the Clang Semantic AST strategy with composite SHA-256 dependency fingerprint caching for C header binding generation.**
 
-The generator computes the SHA-256 hash of `/usr/include/zlib.h`, checks for a valid matching cache file in `bindings/zlib/generated/zlib_binding.json`, or invokes `clang -Xclang -ast-dump=json -fsyntax-only <header.h>`, extracts matching `FunctionDecl` and `TypedefDecl` nodes, and emits verified binding metadata with target triple provenance.
+The generator resolves all header dependencies using `clang -MM`, computes a composite SHA-256 hash covering the primary header (`/usr/include/zlib.h`) and its transitive dependencies (`zconf.h`, `zlib_name_mangling.h`), Clang version, and target triple. It validates the cache file in `bindings/zlib/generated/zlib_binding.json`, or invokes `clang -Xclang -ast-dump=json -fsyntax-only <header.h>`, extracts matching `FunctionDecl` and `TypedefDecl` nodes, and emits verified binding metadata with target triple provenance.
 
-This metadata is injected directly into `checker.New(report, bindings)` to enforce symbol resolution (`WON-FFI-002`) and argument counts (`WON-FFI-003`), as well as `codegen.New(prog, bindings)` to infer accurate C return types.
+This metadata is injected directly into `checker.New(report, bindings)` to enforce symbol resolution (`WON-FFI-002`), argument counts (`WON-FFI-003`), parameter type compatibility and pointer mutability (`WON-FFI-004`), supported function types (`WON-FFI-005`), and void return handling (`WON-FFI-006`), as well as `codegen.New(prog, bindings)` to infer accurate C return types.
 
 ## Consequences
 - **Positive**: Absolute ABI precision; zero manual binding boilerplate; automatic typedef resolution (`Bytef` -> `unsigned char`, `uLong` -> `unsigned long`); fast incremental builds via SHA-256 cache verification.

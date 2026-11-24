@@ -42,49 +42,61 @@ def get_isolated_peak_rss(binary_path):
                 return int(parts[1].strip())
     return 0
 
-def measure_execution(binary_path, iterations=30, warmup=5):
-    print(f"--> 测试目标: {binary_path} (预热 {warmup} 次，正式采样 {iterations} 次)...")
-    
-    # 预热阶段
-    for _ in range(warmup):
-        res = subprocess.run([binary_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if res.returncode != 0:
-            raise RuntimeError(f"预热运行失败: {res.stderr.decode()}")
+def measure_targets_interleaved(targets, iterations=30, warmup=5):
+    """
+    交叉交错测量法 (Interleaved Sampling):
+    - 消除时间漂移、CPU 调频 (Frequency Scaling) 与热节流 (Thermal Throttling) 偏差
+    - 预热各目标后，在每一轮采样中按序运行每个目标一次，共进行 30 轮交叉采样
+    """
+    print(f"--> [预热阶段] 对每个测试目标进行 {warmup} 次独立预热运行...")
+    for name, info in targets.items():
+        for _ in range(warmup):
+            res = subprocess.run([info["bin"]], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res.returncode != 0:
+                raise RuntimeError(f"预热运行失败 ({name}): {res.stderr.decode()}")
 
-    samples_ms = []
+    print("--> [内存采样] 独立测量各目标峰值物理内存 (Peak RSS via /usr/bin/time -v)...")
+    peak_rss = {}
+    for name, info in targets.items():
+        peak_rss[name] = get_isolated_peak_rss(info["bin"])
 
-    # 正式测量阶段 (进程级端到端耗时)
-    for _ in range(iterations):
-        start_ns = time.perf_counter_ns()
-        proc = subprocess.run([binary_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        elapsed_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
-        
-        if proc.returncode != 0:
-            raise RuntimeError(f"运行失败 (code {proc.returncode}): {proc.stderr.decode()}")
-        
-        samples_ms.append(round(elapsed_ms, 3))
+    print(f"--> [正式采样] 执行 {iterations} 轮交叉采样 (每轮依次运行所有目标)...")
+    samples = {name: [] for name in targets}
+    for round_idx in range(iterations):
+        for name, info in targets.items():
+            start_ns = time.perf_counter_ns()
+            proc = subprocess.run([info["bin"]], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            elapsed_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
 
-    peak_rss_kb = get_isolated_peak_rss(binary_path)
+            if proc.returncode != 0:
+                raise RuntimeError(f"运行失败 ({name}, code {proc.returncode}): {proc.stderr.decode()}")
 
-    sorted_samples = sorted(samples_ms)
-    median_val = statistics.median(sorted_samples)
-    q1 = statistics.median(sorted_samples[: len(sorted_samples) // 2])
-    q3 = statistics.median(sorted_samples[(len(sorted_samples) + 1) // 2 :])
-    iqr_val = round(q3 - q1, 3)
+            samples[name].append(round(elapsed_ms, 3))
 
-    return {
-        "samples_ms": samples_ms,
-        "median_ms": round(median_val, 3),
-        "iqr_ms": iqr_val,
-        "q1_ms": round(q1, 3),
-        "q3_ms": round(q3, 3),
-        "mean_ms": round(statistics.mean(samples_ms), 3),
-        "stddev_ms": round(statistics.stdev(samples_ms), 3),
-        "min_ms": round(min(samples_ms), 3),
-        "max_ms": round(max(samples_ms), 3),
-        "peak_rss_kb": peak_rss_kb,
-        "binary_size_bytes": get_binary_size(binary_path),
-    }
+    results = {}
+    for name, info in targets.items():
+        samples_ms = samples[name]
+        sorted_samples = sorted(samples_ms)
+        median_val = statistics.median(sorted_samples)
+        q1 = statistics.median(sorted_samples[: len(sorted_samples) // 2])
+        q3 = statistics.median(sorted_samples[(len(sorted_samples) + 1) // 2 :])
+        iqr_val = round(q3 - q1, 3)
+
+        results[name] = {
+            "samples_ms": samples_ms,
+            "median_ms": round(median_val, 3),
+            "iqr_ms": iqr_val,
+            "q1_ms": round(q1, 3),
+            "q3_ms": round(q3, 3),
+            "mean_ms": round(statistics.mean(samples_ms), 3),
+            "stddev_ms": round(statistics.stdev(samples_ms), 3),
+            "min_ms": round(min(samples_ms), 3),
+            "max_ms": round(max(samples_ms), 3),
+            "peak_rss_kb": peak_rss[name],
+            "binary_size_bytes": get_binary_size(info["bin"]),
+            "compiler_flags": info["flags"],
+        }
+    return results
 
 def main():
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -147,13 +159,9 @@ def main():
             print(f"编译错误 {name}: {res.stderr.decode()}")
             sys.exit(1)
 
-    # 2. 测量
-    print("\n[2/3] 执行 30 轮高精度样本收集...")
-    results = {}
-    for name, info in targets.items():
-        metrics = measure_execution(info["bin"], iterations=30, warmup=5)
-        metrics["compiler_flags"] = info["flags"]
-        results[name] = metrics
+    # 2. 测量 (交叉采样)
+    print("\n[2/3] 执行 30 轮高精度交叉采样样本收集...")
+    results = measure_targets_interleaved(targets, iterations=30, warmup=5)
 
     # 3. 输出汇总与保存 JSON
     kernel_ver = subprocess.check_output(["uname", "-r"]).decode().strip()
