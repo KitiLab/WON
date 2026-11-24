@@ -63,6 +63,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Go decompressed length mismatch: %d\n", n)
 			os.Exit(4)
 		}
+
+		if !bytes.Equal(inputBuf, decompBuf) {
+			fmt.Fprintf(os.Stderr, "Go byte mismatch\n")
+			os.Exit(5)
+		}
 	}
 
 	fmt.Printf("Go Native benchmark success! Iterations: %d\n", maxIter)

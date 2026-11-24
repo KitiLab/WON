@@ -32,9 +32,12 @@ func TestEndToEndZlibCompression(t *testing.T) {
 	if !strings.Contains(outStr, "Zlib round-trip verification: PASS") {
 		t.Errorf("输出未包含 round-trip 验证通过标记: %s", outStr)
 	}
+	if !strings.Contains(outStr, "Byte-for-byte verification: PASS") {
+		t.Errorf("输出未包含逐字节严格一致性验证标记: %s", outStr)
+	}
 	if !strings.Contains(outStr, "Decompressed size matches exactly: 57") {
 		t.Errorf("输出未确认解压尺寸严格匹配: %s", outStr)
 	}
 
-	t.Logf("端到端 zlib 原生运行测试通过: \n%s", outStr)
+	t.Logf("端到端 zlib 原生运行测试通过 (尺寸与逐字节一致性通过): \n%s", outStr)
 }

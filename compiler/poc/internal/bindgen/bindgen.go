@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -51,18 +52,67 @@ type ClangType struct {
 	QualType string `json:"qualType"`
 }
 
+// CalculateHeaderSHA256 计算头文件的 SHA-256 哈希值
+func CalculateHeaderSHA256(headerPath string) (string, error) {
+	headerBytes, err := os.ReadFile(headerPath)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(headerBytes)
+	return hex.EncodeToString(hash[:]), nil
+}
+
+// GetOrExtractZlibBindings 获取并验证绑定元数据。若存在有效缓存且哈希匹配则直接读取，否则重新调用 Clang 提取
+func GetOrExtractZlibBindings(headerPath, cacheFile string) (*BindingMeta, error) {
+	if headerPath == "" {
+		headerPath = "/usr/include/zlib.h"
+	}
+
+	currentHash, err := CalculateHeaderSHA256(headerPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取头文件失败 %s: %w", headerPath, err)
+	}
+
+	// 尝试检查缓存
+	if cacheFile != "" {
+		if cacheBytes, err := os.ReadFile(cacheFile); err == nil {
+			var cached BindingMeta
+			if err := json.Unmarshal(cacheBytes, &cached); err == nil {
+				// 校验指纹：若头文件哈希一致，且所需函数均存在，则缓存有效
+				if cached.HeaderSHA256 == currentHash && len(cached.Functions) > 0 {
+					return &cached, nil
+				}
+			}
+		}
+	}
+
+	// 缓存缺失或已过时，执行真实 Clang 语义提取
+	meta, err := ExtractZlibBindings(headerPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// 如果指定了缓存路径，则写回最新有效缓存
+	if cacheFile != "" {
+		_ = os.MkdirAll(filepath.Dir(cacheFile), 0755)
+		if jsonBytes, err := json.MarshalIndent(meta, "", "  "); err == nil {
+			_ = os.WriteFile(cacheFile, jsonBytes, 0644)
+		}
+	}
+
+	return meta, nil
+}
+
 // ExtractZlibBindings 执行 Clang 提取真实 /usr/include/zlib.h 绑定
 func ExtractZlibBindings(headerPath string) (*BindingMeta, error) {
 	if headerPath == "" {
 		headerPath = "/usr/include/zlib.h"
 	}
 
-	headerBytes, err := os.ReadFile(headerPath)
+	shaStr, err := CalculateHeaderSHA256(headerPath)
 	if err != nil {
 		return nil, fmt.Errorf("读取 C 头文件失败 %s: %w", headerPath, err)
 	}
-	hash := sha256.Sum256(headerBytes)
-	shaStr := hex.EncodeToString(hash[:])
 
 	// 获取 Clang 版本与默认 target triple
 	clangVerCmd := exec.Command("clang", "--version")

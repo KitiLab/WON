@@ -21,7 +21,8 @@
 /compiler/bin/
 /compiler/poc/bin/
 /cli/bin/
-benchmarks/phase0/*_bench
+benchmarks/phase0/*_bench*
+benchmarks/phase0/payloads/payload_1mb.txt
 examples/*_bin
 
 # Rust artifacts (if tools/subcomponents use Rust)

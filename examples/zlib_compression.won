@@ -5,10 +5,15 @@ fn main() -> i32 {
     let input_bytes = message.as_bytes();
     let input_len: u64 = 57;
 
-    // 1. 调用 compressBound 获取充足的压缩缓冲区上限容量
+    // 1. 调用 compressBound 获取充足的压缩缓冲区上限容量并做边界防护
     let max_bound = unsafe {
         zlib::compressBound(input_len)
     };
+
+    if max_bound > 256 {
+        println("Buffer capacity too small for max_bound: ", max_bound);
+        return 1;
+    }
 
     let mut compressed_buf: [u8; 256] = [0; 256];
     let mut compressed_len: u64 = 256;
@@ -56,7 +61,17 @@ fn main() -> i32 {
         return 3;
     }
 
+    // 5. 严格逐字节比较原始输入与解压后内容
+    let is_equal = unsafe {
+        bytes_equal(input_bytes.as_ptr(), decompressed_buf.as_ptr(), input_len)
+    };
+    if is_equal == 0 {
+        println("Byte-for-byte content mismatch!");
+        return 4;
+    }
+
     println("Decompressed size matches exactly: ", decompressed_len);
+    println("Byte-for-byte verification: PASS");
     println("Zlib round-trip verification: PASS");
 
     return 0;

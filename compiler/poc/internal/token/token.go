@@ -30,32 +30,32 @@ const (
 	IMPORT
 
 	// 运算符与分隔符
-	PLUS        // +
-	MINUS       // -
-	STAR        // *
-	SLASH       // /
-	ASSIGN      // =
-	EQ          // ==
-	NOTEQ       // !=
-	LT          // <
-	LTEQ        // <=
-	GT          // >
-	GTEQ        // >=
-	NOT         // !
-	AMP         // &
-	COLONCOLON  // ::
-	COLON       // :
-	SEMICOLON   // ;
-	COMMA       // ,
-	DOT         // .
-	RARROW      // ->
-	LPAREN      // (
-	RPAREN      // )
-	LBRACE      // {
-	RBRACE      // }
-	LBRACKET    // [
-	RBRACKET    // ]
-	HASH        // #
+	PLUS       // +
+	MINUS      // -
+	STAR       // *
+	SLASH      // /
+	ASSIGN     // =
+	EQ         // ==
+	NOTEQ      // !=
+	LT         // <
+	LTEQ       // <=
+	GT         // >
+	GTEQ       // >=
+	NOT        // !
+	AMP        // &
+	COLONCOLON // ::
+	COLON      // :
+	SEMICOLON  // ;
+	COMMA      // ,
+	DOT        // .
+	RARROW     // ->
+	LPAREN     // (
+	RPAREN     // )
+	LBRACE     // {
+	RBRACE     // }
+	LBRACKET   // [
+	RBRACKET   // ]
+	HASH       // #
 )
 
 var kindNames = map[Kind]string{

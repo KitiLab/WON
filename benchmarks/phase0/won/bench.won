@@ -52,6 +52,14 @@ fn main() -> i32 {
             return 3;
         }
 
+        // 验证解压数据与原始输入逐字节严格相等
+        let is_eq = unsafe {
+            bytes_equal(input_buf.as_ptr(), decomp_buf.as_ptr(), input_len)
+        };
+        if is_eq == 0 {
+            return 4;
+        }
+
         iter = iter + 1;
     }
 

@@ -8,6 +8,7 @@ package main
 */
 import "C"
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"unsafe"
@@ -53,6 +54,11 @@ func main() {
 		if int(decompLen) != payloadSize {
 			fmt.Fprintf(os.Stderr, "CGO decompressed length mismatch\n")
 			os.Exit(4)
+		}
+
+		if !bytes.Equal(inputData, decompBuf) {
+			fmt.Fprintf(os.Stderr, "CGO byte mismatch\n")
+			os.Exit(5)
 		}
 	}
 

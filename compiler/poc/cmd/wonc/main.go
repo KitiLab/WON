@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/KitiLab/WON/compiler/poc/internal/ast"
 	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
 	"github.com/KitiLab/WON/compiler/poc/internal/checker"
 	"github.com/KitiLab/WON/compiler/poc/internal/codegen"
@@ -57,7 +58,55 @@ func printHelp() {
 	fmt.Println("  wonc version                     查看编译器版本与目标架构")
 	fmt.Println("  wonc check [--format=json] <file> 语法与语义检查")
 	fmt.Println("  wonc bindings [zlib]             从系统 C 头文件生成绑定")
-	fmt.Println("  wonc build [--static] [-o out] <file> 编译为原生机器码可执行文件")
+	fmt.Println("  wonc build [--static] [--lto] [-o out] <file> 编译为原生机器码可执行文件")
+}
+
+// resolveBindings 遍历程序中的 #import 声明并加载对应的 C 库绑定元数据
+func resolveBindings(prog *ast.Program) (map[string]*bindgen.BindingMeta, error) {
+	bindings := make(map[string]*bindgen.BindingMeta)
+	for _, imp := range prog.Imports {
+		header := strings.Trim(imp.HeaderPath, "<>\"")
+		switch header {
+		case "zlib.h":
+			cacheFile := findBindingCache("zlib_binding.json")
+			meta, err := bindgen.GetOrExtractZlibBindings("/usr/include/zlib.h", cacheFile)
+			if err != nil {
+				return nil, fmt.Errorf("解析 C 头文件 <%s> 绑定失败: %w", header, err)
+			}
+			bindings["zlib"] = meta
+		case "payload_loader.h":
+			meta := &bindgen.BindingMeta{
+				HeaderPath: "payload_loader.h",
+				Functions: map[string]bindgen.FunctionSig{
+					"load_benchmark_payload": {
+						Name:       "load_benchmark_payload",
+						QualType:   "void (const char *, unsigned char *, unsigned long)",
+						ReturnType: "void",
+						ParamTypes: []string{"const char *", "unsigned char *", "unsigned long"},
+					},
+				},
+			}
+			bindings["payload"] = meta
+		default:
+			return nil, fmt.Errorf("Phase 0B 暂不支持头文件 %s 的自动绑定提取 (目前仅支持 <zlib.h>)", imp.HeaderPath)
+		}
+	}
+	return bindings, nil
+}
+
+func findBindingCache(filename string) string {
+	candidates := []string{
+		filepath.Join("bindings", "zlib", "generated", filename),
+		filepath.Join("..", "bindings", "zlib", "generated", filename),
+		filepath.Join("..", "..", "bindings", "zlib", "generated", filename),
+		filepath.Join("..", "..", "..", "bindings", "zlib", "generated", filename),
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return filepath.Join("bindings", "zlib", "generated", filename)
 }
 
 func runCheck(args []string) {
@@ -84,7 +133,17 @@ func runCheck(args []string) {
 	prog := p.ParseProgram()
 
 	if !report.HasErrors() {
-		chk := checker.New(report)
+		bindings, err := resolveBindings(prog)
+		if err != nil {
+			report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:     "WON-FFI-001",
+				Severity: "error",
+				Message:  err.Error(),
+				File:     srcFile,
+				Span:     prog.GetSpan(),
+			})
+		}
+		chk := checker.New(report, bindings)
 		chk.CheckProgram(prog)
 	}
 
@@ -138,6 +197,7 @@ func runBindings(args []string) {
 func runBuild(args []string) {
 	fs := flag.NewFlagSet("build", flag.ExitOnError)
 	static := fs.Bool("static", false, "启用完全静态链接 (-static)")
+	lto := fs.Bool("lto", false, "启用链接时优化 (-flto)")
 	format := fs.String("format", "text", "诊断输出格式: text | json")
 	output := fs.String("o", "", "输出二进制路径")
 	includeDir := fs.String("I", "", "附加 C 头文件包含目录")
@@ -162,8 +222,20 @@ func runBuild(args []string) {
 	p := parser.New(lex, report, srcFile)
 	prog := p.ParseProgram()
 
+	var bindings map[string]*bindgen.BindingMeta
 	if !report.HasErrors() {
-		chk := checker.New(report)
+		var bindErr error
+		bindings, bindErr = resolveBindings(prog)
+		if bindErr != nil {
+			report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:     "WON-FFI-001",
+				Severity: "error",
+				Message:  bindErr.Error(),
+				File:     srcFile,
+				Span:     prog.GetSpan(),
+			})
+		}
+		chk := checker.New(report, bindings)
 		chk.CheckProgram(prog)
 	}
 
@@ -178,7 +250,7 @@ func runBuild(args []string) {
 	}
 
 	// 2. 生成 C 代码
-	gen := codegen.New(prog, nil)
+	gen := codegen.New(prog, bindings)
 	cSource, err := gen.Generate()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "生成 C 代码失败: %v\n", err)
@@ -201,6 +273,9 @@ func runBuild(args []string) {
 	if *includeDir != "" {
 		extraCFlags = append(extraCFlags, "-I", *includeDir)
 	}
+	if *lto {
+		extraCFlags = append(extraCFlags, "-flto")
+	}
 
 	// 3. 原生编译链接
 	toolOpts := toolchain.Options{
@@ -220,8 +295,8 @@ func runBuild(args []string) {
 	}
 
 	if compileErr != nil {
-		if *static && strings.Contains(compileErr.Error(), "have you installed the static version") {
-			fmt.Fprintf(os.Stderr, "[wonc 错误] 静态链接失败: 系统环境缺少 glibc-static (libc.a) 或 zlib-static (libz.a)。\n底层错误:\n%s\n", compileErr.Error())
+		if *static && (strings.Contains(compileErr.Error(), "cannot find -l") || strings.Contains(compileErr.Error(), "have you installed the static version")) {
+			fmt.Fprintf(os.Stderr, "[wonc 错误] 静态链接失败: 系统环境缺少静态库归档文件 (如 libc.a 或 libz.a，在 Fedora/RHEL 下需安装 glibc-static 与 zlib-static)。\n底层链接器报错:\n%s\n", compileErr.Error())
 		} else {
 			fmt.Fprintf(os.Stderr, "[wonc 编译错误]: %v\n", compileErr)
 		}

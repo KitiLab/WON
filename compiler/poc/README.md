@@ -1,9 +1,9 @@
 # WON Phase 0B Bootstrap Compiler (`wonc`)
 
-This directory houses the initial **Phase 0B Proof of Concept** compiler prototype for the WON programming language.
+This directory houses the **Phase 0B & Phase 0B.1 Proof of Concept** compiler prototype for the WON programming language.
 
-> **Status**: `IMPLEMENTED` (Phase 0B Vertical Slice)  
-> **Notice**: This is a minimal bootstrap compiler built to empirically validate language parsing, C header binding generation, C code generation, and AI-native structured diagnostics. It is not the production compiler.
+> **Status**: `IMPLEMENTED` (Phase 0B & Phase 0B.1 Acceptance Remediation Verified)  
+> **Notice**: This is a minimal bootstrap compiler built to empirically validate language parsing, C header binding generation, strict ISO C11 code generation, zero-overhead C FFI execution, and AI-native structured diagnostics. It is not the production compiler.
 
 ---
 
@@ -12,18 +12,22 @@ This directory houses the initial **Phase 0B Proof of Concept** compiler prototy
 ```
 compiler/poc/
 ├── cmd/
-│   └── wonc/                  # CLI 驱动入口 (main.go)
+│   └── wonc/                  # CLI 驱动入口 (main.go - check, bindings, build)
 ├── internal/
-│   ├── ast/                   # 抽象语法树节点定义
+│   ├── ast/                   # 抽象语法树节点模型
 │   ├── token/                 # 词法记号定义
 │   ├── lexer/                 # 源码位置精确保留的词法分析器
 │   ├── parser/                # 递归下降语法解析器
-│   ├── checker/               # 极简语义分析（可变性检查与 unsafe 隔离）
-│   ├── bindgen/               # 基于 Clang 语义 AST 的 C 头文件绑定提取器
-│   ├── codegen/               # 标准 ISO C99/C11 源码生成器
+│   ├── checker/               # 语义分析（变量作用域、可变性借用、C FFI 签名校验与 unsafe 边界）
+│   ├── bindgen/               # 基于 Clang 语义 AST 的真实 C 头文件绑定提取与 SHA-256 指纹缓存器
+│   ├── codegen/               # 严格标准 ISO C11 源码生成器 (杜绝非标 GNU 扩展)
 │   ├── diagnostic/            # 人机通用的标准 JSON 结构化诊断系统
-│   └── toolchain/             # 底层 GCC / Clang 原生编译器调用封装
-├── tests/                     # 端到端集成与 AI 自动化修复测试
+│   └── toolchain/             # 底层 GCC / Clang 原生编译器与链接器调用封装
+├── tests/                     # 端到端集成测试、边界正确性测试、绑定指纹测试与 JSON 诊断协议测试
+│   ├── binding_test.go        # 头文件 SHA-256 指纹防伪与自动失效重提测试
+│   ├── correctness_test.go    # 空输入、损坏数据安全拒绝与边界防护测试
+│   ├── integration_test.go    # 端到端构建与逐字节一致性测试
+│   └── protocol_test.go       # JSON 诊断格式与自动化代码修复切片协议测试
 ├── go.mod                     # Go 模块配置 (标准库零三方依赖)
 └── README.md
 ```
@@ -54,10 +58,11 @@ go test -v ./...
 Tests cover:
 - Lexer tokenization, string escape sequences, and illegal character diagnostics.
 - Parser AST construction, control flow, loops, and error reporting.
-- Semantic checker mutability enforcement (`WON-MUT-001`) and unsafe isolation (`WON-SEC-001`).
-- Clang AST header inspection on `/usr/include/zlib.h`.
-- C code generation and native executable linking.
-- Machine-readable JSON diagnostic parsing and automated AI repair validation.
+- Semantic checker mutability enforcement (`WON-MUT-001`), unsafe isolation (`WON-SEC-001`), and FFI signature matching (`WON-FFI-001/002/003`).
+- Clang AST header inspection and SHA-256 fingerprint validation on `/usr/include/zlib.h`.
+- Strict ISO C11 code generation validated with `-pedantic-errors -Wall -Wextra` against both GCC 16 and Clang 23.
+- End-to-end zlib compression and byte-for-byte correctness verification.
+- Machine-readable JSON diagnostic serialization and automated AI repair protocol.
 
 ---
 
@@ -83,6 +88,9 @@ Tests cover:
 # 编译生成原生机器码可执行文件
 ./bin/wonc build -o zlib_demo examples/zlib_compression.won
 
+# 启用链接时优化 (--lto) 编译
+./bin/wonc build --lto -o zlib_demo_lto examples/zlib_compression.won
+
 # 运行验证
 ./zlib_demo
 ```
@@ -92,17 +100,4 @@ Tests cover:
 # 尝试静态链接 (-static)
 ./bin/wonc build --static examples/zlib_compression.won
 ```
-*注：在当前 Fedora Linux 45 主机环境中，由于系统缺少 `glibc-static` (`libc.a`) 和 `zlib-static` (`libz.a`) 归档，编译器将明确提示环境依赖缺失。*
-
----
-
-## Supported Phase 0B Language Subset
-
-- Functions: `fn name(params) -> RetType { ... }`
-- Variables: `let` (只读) 与 `let mut` (可变)
-- Basic Types: `i32`, `u64`, `u8`, `&str`, 定长数组 `[u8; N]`
-- Control Flow: `if / else`, `while (cond) { ... }`, `return`
-- Borrowing: `&var`, `&mut var`
-- Unsafe Blocks: `unsafe { ... }` 隔离底层 C FFI 调用
-- Foreign Calls: `zlib::compress(...)`, `zlib::uncompress(...)`, `zlib::compressBound(...)`
-- Builtins: `.as_bytes()`, `.as_ptr()`, `.as_mut_ptr()`, `.len()`, `println(...)`
+*注：若系统环境缺少 `glibc-static` (`libc.a`) 或 `zlib-static` (`libz.a`)，编译器将输出精确的依赖缺失诊断。*

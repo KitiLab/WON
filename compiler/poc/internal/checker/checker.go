@@ -1,11 +1,13 @@
 // Package checker 实现了 WON Phase 0B 极简语义分析与可变性检查器
-// 重点验证变量作用域、可变性借用约束 (WON-MUT-001) 以及 C FFI 不安全边界 (WON-SEC-001)。
+// 重点验证变量作用域、可变性借用约束 (WON-MUT-001)、C FFI 绑定签名验证 (WON-FFI) 以及安全边界 (WON-SEC-001)。
 package checker
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/KitiLab/WON/compiler/poc/internal/ast"
+	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
 )
 
@@ -43,21 +45,19 @@ func (s *Scope) lookup(name string) *VarInfo {
 
 // Checker 语义分析器
 type Checker struct {
-	report     *diagnostic.Report
-	inUnsafe   bool
-	knownDecls map[string]bool // 已知 C 函数
+	report   *diagnostic.Report
+	inUnsafe bool
+	bindings map[string]*bindgen.BindingMeta // 引入的 C 库绑定元数据映射 (如 "zlib" -> meta)
 }
 
-// New 创建语义分析器实例
-func New(report *diagnostic.Report) *Checker {
+// New 创建语义分析器实例，注入已解析的 C 头文件绑定元数据
+func New(report *diagnostic.Report, bindings map[string]*bindgen.BindingMeta) *Checker {
+	if bindings == nil {
+		bindings = make(map[string]*bindgen.BindingMeta)
+	}
 	return &Checker{
-		report: report,
-		knownDecls: map[string]bool{
-			"compress":      true,
-			"uncompress":    true,
-			"compressBound": true,
-			"zlibVersion":   true,
-		},
+		report:   report,
+		bindings: bindings,
 	}
 }
 
@@ -114,7 +114,6 @@ func (c *Checker) checkStatement(stmt ast.Stmt, scope *Scope) {
 			return
 		}
 		if !v.IsMut {
-			// 触发不可变赋值错误
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code:        "WON-MUT-001",
 				Severity:    "error",
@@ -188,7 +187,6 @@ func (c *Checker) checkExpression(expr ast.Expr, scope *Scope) {
 	case *ast.BorrowExpr:
 		c.checkExpression(e.Expr, scope)
 		if e.IsMut {
-			// 可变借用 &mut var 必须确保被借用变量声明了 mut
 			if ident, ok := e.Expr.(*ast.Identifier); ok {
 				v := scope.lookup(ident.Name)
 				if v != nil && !v.IsMut {
@@ -227,12 +225,65 @@ func (c *Checker) checkExpression(expr ast.Expr, scope *Scope) {
 		for _, arg := range e.Args {
 			c.checkExpression(arg, scope)
 		}
+		// 校验内置 bytes_equal 参数个数
+		if e.Callee == "bytes_equal" {
+			if len(e.Args) != 3 {
+				c.report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:     "WON-TYP-001",
+					Severity: "error",
+					Message:  fmt.Sprintf("内置函数 bytes_equal 期望 3 个参数 (ptr1, ptr2, len)，实际传入 %d 个", len(e.Args)),
+					File:     e.Span.File,
+					Span:     e.Span,
+				})
+			}
+		}
 
 	case *ast.NamespacedCallExpr:
 		for _, arg := range e.Args {
 			c.checkExpression(arg, scope)
 		}
-		// 跨 C 命名空间调用，必须在 unsafe 块内
+
+		// 1. 验证外部命名空间是否已绑定引入
+		meta, exists := c.bindings[e.Namespace]
+		if !exists {
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-FFI-001",
+				Severity:    "error",
+				Message:     fmt.Sprintf("未导入的外部 C 命名空间: %q (请在源文件头部使用 #import 引入)", e.Namespace),
+				File:        e.Span.File,
+				Span:        e.Span,
+				Explanation: fmt.Sprintf("无法解析命名空间 '%s'。WON 要求通过 #import 指令显式引入 C 头文件并建立绑定映射。", e.Namespace),
+			})
+			return
+		}
+
+		// 2. 验证外部函数符号是否存在于提取的头文件元数据中
+		fnSig, found := meta.Functions[e.Function]
+		if !found {
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-FFI-002",
+				Severity:    "error",
+				Message:     fmt.Sprintf("在 C 头文件 '%s' 中未找到导出的函数符号: %q", meta.HeaderPath, e.Function),
+				File:        e.Span.File,
+				Span:        e.Span,
+				Explanation: fmt.Sprintf("从头文件 '%s' 提取的真实声明符号列表中不存在函数 '%s'。", meta.HeaderPath, e.Function),
+			})
+			return
+		}
+
+		// 3. 验证参数数量是否与 C 函数原型匹配
+		if len(e.Args) != len(fnSig.ParamTypes) {
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-FFI-003",
+				Severity:    "error",
+				Message:     fmt.Sprintf("外部 C 函数 '%s::%s' 参数数量不匹配: 期望 %d 个参数，实际传入 %d 个", e.Namespace, e.Function, len(fnSig.ParamTypes), len(e.Args)),
+				File:        e.Span.File,
+				Span:        e.Span,
+				Explanation: fmt.Sprintf("根据头文件解析的真实函数签名: %s(%s)，期望参数个数为 %d。", e.Function, strings.Join(fnSig.ParamTypes, ", "), len(fnSig.ParamTypes)),
+			})
+		}
+
+		// 4. 跨 C 命名空间调用，必须在显式 unsafe 块内
 		if !c.inUnsafe {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code:        "WON-SEC-001",

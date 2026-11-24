@@ -46,6 +46,11 @@ int main(void) {
             fprintf(stderr, "C decompressed length mismatch\n");
             return 4;
         }
+
+        if (memcmp(input_buf, decomp_buf, PAYLOAD_SIZE) != 0) {
+            fprintf(stderr, "C decompressed bytes mismatch\n");
+            return 5;
+        }
     }
 
     printf("C benchmark success! Iterations: %d\n", MAX_ITER);

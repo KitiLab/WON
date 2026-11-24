@@ -1,4 +1,5 @@
-// Package codegen 实现了从 WON AST 到标准 ISO C99/C11 源码的生成器
+// Package codegen 实现了从 WON AST 到严格 ISO C11 标准源码的生成器
+// 坚决剔除任何 GNU 语句表达式 (({ ... })) 扩展，使用纯标准 C11 块作用域与临时变量保证 -pedantic-errors 零警告零错误。
 package codegen
 
 import (
@@ -11,17 +12,21 @@ import (
 
 // Generator C 源码生成器
 type Generator struct {
-	prog    *ast.Program
-	binding *bindgen.BindingMeta
-	sb      strings.Builder
-	indent  int
+	prog     *ast.Program
+	bindings map[string]*bindgen.BindingMeta
+	sb       strings.Builder
+	indent   int
+	tempID   int
 }
 
 // New 创建生成器实例
-func New(prog *ast.Program, binding *bindgen.BindingMeta) *Generator {
+func New(prog *ast.Program, bindings map[string]*bindgen.BindingMeta) *Generator {
+	if bindings == nil {
+		bindings = make(map[string]*bindgen.BindingMeta)
+	}
 	return &Generator{
-		prog:    prog,
-		binding: binding,
+		prog:     prog,
+		bindings: bindings,
 	}
 }
 
@@ -35,12 +40,12 @@ func (g *Generator) writeLine(s string) {
 	g.sb.WriteString("\n")
 }
 
-// Generate 执行代码生成，返回完整 C 语言源码
+// Generate 执行代码生成，返回符合 ISO C11 规范的完整 C 语言源码
 func (g *Generator) Generate() (string, error) {
 	g.sb.Reset()
 
 	// 1. 标准 C 运行时头文件
-	g.writeLine("/* 由 WON Phase 0B 编译器自动生成 - 请勿手动修改 */")
+	g.writeLine("/* 由 WON Phase 0B 编译器自动生成 - 严格遵循 ISO C11 标准 */")
 	g.writeLine("#define _POSIX_C_SOURCE 200809L")
 	g.writeLine("#include <stdio.h>")
 	g.writeLine("#include <stdlib.h>")
@@ -56,13 +61,10 @@ func (g *Generator) Generate() (string, error) {
 	g.writeLine("")
 
 	// 3. 内置辅助函数与宏
-	g.writeLine("// --- WON 极简内置运行时宏与辅助函数 ---")
-	g.writeLine("#define won_assert_eq(a, b, msg) do { \\")
-	g.writeLine("    if ((a) != (b)) { \\")
-	g.writeLine("        fprintf(stderr, \"[WON PANIC] 断言失败: %s (实际: %ld != 预期: %ld)\\n\", (msg), (long)(a), (long)(b)); \\")
-	g.writeLine("        exit(1); \\")
-	g.writeLine("    } \\")
-	g.writeLine("} while(0)")
+	g.writeLine("// --- WON 极简内置运行时宏与字节比较函数 ---")
+	g.writeLine("static inline bool won_bytes_equal(const unsigned char* a, const unsigned char* b, unsigned long len) {")
+	g.writeLine("    return memcmp(a, b, len) == 0;")
+	g.writeLine("}")
 	g.writeLine("")
 
 	// 4. 生成函数声明与定义
@@ -114,8 +116,16 @@ func (g *Generator) genStatement(stmt ast.Stmt) {
 	case *ast.LetStmt:
 		g.genLet(s)
 	case *ast.AssignStmt:
-		valStr := g.genExpr(s.Value)
-		g.writeLine(fmt.Sprintf("%s = %s;", s.Target, valStr))
+		if u, ok := s.Value.(*ast.UnsafeExpr); ok {
+			g.writeLine("{")
+			g.indent++
+			g.genUnsafeBlockAssign(u.Block, s.Target)
+			g.indent--
+			g.writeLine("}")
+		} else {
+			valStr := g.genExpr(s.Value)
+			g.writeLine(fmt.Sprintf("%s = %s;", s.Target, valStr))
+		}
 	case *ast.IfStmt:
 		condStr := g.genExpr(s.Cond)
 		g.writeLine(fmt.Sprintf("if (%s) {", condStr))
@@ -165,51 +175,89 @@ func (g *Generator) genStatement(stmt ast.Stmt) {
 }
 
 func (g *Generator) genLet(s *ast.LetStmt) {
-	// 检查是否为数组重复声明: let [mut] buf: [u8; 256] = [0; 256];
+	// 数组初始化声明: let [mut] buf: [u8; 256] = [0; 256];
 	if arr, ok := s.Init.(*ast.ArrayRepeatLiteral); ok {
 		elemVal := g.genExpr(arr.Elem)
 		g.writeLine(fmt.Sprintf("unsigned char %s[%d] = {%s};", s.Name, arr.Count, elemVal))
 		return
 	}
 
-	cType := "int64_t"
-	if s.Type != "" {
-		cType = mapWonTypeToC(s.Type)
-	} else {
-		switch init := s.Init.(type) {
-		case *ast.StringLiteral:
-			cType = "const char*"
-		case *ast.IntegerLiteral:
-			cType = "int64_t"
-		case *ast.MethodCallExpr:
-			switch init.Method {
-			case "as_bytes", "as_ptr":
-				cType = "const unsigned char*"
-			case "as_mut_ptr":
-				cType = "unsigned char*"
-			case "len":
-				cType = "unsigned long"
-			default:
-				cType = "int64_t"
-			}
-		case *ast.UnsafeExpr:
-			cType = "int"
-			if len(init.Block.Statements) > 0 {
-				if es, ok := init.Block.Statements[len(init.Block.Statements)-1].(*ast.ExprStmt); ok {
-					if nc, ok := es.Expr.(*ast.NamespacedCallExpr); ok {
-						if nc.Function == "compressBound" {
-							cType = "unsigned long"
-						}
-					}
-				}
-			}
-		default:
-			cType = "int64_t"
-		}
+	cType := g.inferType(s)
+
+	// 若初始值为 unsafe 块表达式，使用标准 ISO C11 变量预声明 + 复合语句块赋值
+	if u, ok := s.Init.(*ast.UnsafeExpr); ok {
+		g.writeLine(fmt.Sprintf("%s %s;", cType, s.Name))
+		g.writeLine("{")
+		g.indent++
+		g.genUnsafeBlockAssign(u.Block, s.Name)
+		g.indent--
+		g.writeLine("}")
+		return
 	}
 
 	initStr := g.genExpr(s.Init)
 	g.writeLine(fmt.Sprintf("%s %s = %s;", cType, s.Name, initStr))
+}
+
+func (g *Generator) genUnsafeBlockAssign(b *ast.BlockStmt, targetVar string) {
+	n := len(b.Statements)
+	for i, stmt := range b.Statements {
+		if i == n-1 {
+			// 尾表达式语句转换为直接目标赋值
+			if es, ok := stmt.(*ast.ExprStmt); ok {
+				g.writeLine(fmt.Sprintf("%s = %s;", targetVar, g.genExpr(es.Expr)))
+				continue
+			}
+		}
+		g.genStatement(stmt)
+	}
+}
+
+func (g *Generator) inferType(s *ast.LetStmt) string {
+	if s.Type != "" {
+		return mapWonTypeToC(s.Type)
+	}
+	switch init := s.Init.(type) {
+	case *ast.StringLiteral:
+		return "const char*"
+	case *ast.IntegerLiteral:
+		return "int64_t"
+	case *ast.MethodCallExpr:
+		switch init.Method {
+		case "as_bytes", "as_ptr":
+			return "const unsigned char*"
+		case "as_mut_ptr":
+			return "unsigned char*"
+		case "len":
+			return "unsigned long"
+		default:
+			return "int64_t"
+		}
+	case *ast.CallExpr:
+		if init.Callee == "bytes_equal" {
+			return "bool"
+		}
+		return "int64_t"
+	case *ast.UnsafeExpr:
+		// 从绑定的实际头文件签名中推断返回值类型
+		if len(init.Block.Statements) > 0 {
+			if es, ok := init.Block.Statements[len(init.Block.Statements)-1].(*ast.ExprStmt); ok {
+				if nc, ok := es.Expr.(*ast.NamespacedCallExpr); ok {
+					if meta, ok := g.bindings[nc.Namespace]; ok {
+						if fnSig, ok := meta.Functions[nc.Function]; ok {
+							return mapCQualTypeToWONCType(fnSig.ReturnType)
+						}
+					}
+				}
+				if call, ok := es.Expr.(*ast.CallExpr); ok && call.Callee == "bytes_equal" {
+					return "bool"
+				}
+			}
+		}
+		return "int"
+	default:
+		return "int64_t"
+	}
 }
 
 func (g *Generator) genExpr(expr ast.Expr) string {
@@ -242,6 +290,9 @@ func (g *Generator) genExpr(expr ast.Expr) string {
 		if e.Callee == "println" {
 			return genPrintlnCall(args)
 		}
+		if e.Callee == "bytes_equal" {
+			return fmt.Sprintf("won_bytes_equal(%s, %s, %s)", args[0], args[1], args[2])
+		}
 		return fmt.Sprintf("%s(%s)", e.Callee, strings.Join(args, ", "))
 	case *ast.NamespacedCallExpr:
 		args := make([]string, 0)
@@ -262,19 +313,13 @@ func (g *Generator) genExpr(expr ast.Expr) string {
 			return fmt.Sprintf("%s.%s()", recStr, e.Method)
 		}
 	case *ast.UnsafeExpr:
-		var inner strings.Builder
-		inner.WriteString("({\n")
-		indentStr := strings.Repeat("    ", g.indent+1)
-		for _, stmt := range e.Block.Statements {
-			if es, ok := stmt.(*ast.ExprStmt); ok {
-				inner.WriteString(fmt.Sprintf("%s%s;\n", indentStr, g.genExpr(es.Expr)))
-			} else {
-				// 普通语句
-				inner.WriteString(fmt.Sprintf("%s/* stmt */;\n", indentStr))
+		// 当 unsafe 表达式被嵌套在非语句位置时，提取单一表达式或报错
+		if len(e.Block.Statements) == 1 {
+			if es, ok := e.Block.Statements[0].(*ast.ExprStmt); ok {
+				return g.genExpr(es.Expr)
 			}
 		}
-		inner.WriteString(strings.Repeat("    ", g.indent) + "})")
-		return inner.String()
+		return "0 /* unsupported nested unsafe */"
 	}
 	return ""
 }
@@ -319,7 +364,25 @@ func mapWonTypeToC(wonType string) string {
 		return "const unsigned char*"
 	case "*mut u8":
 		return "unsigned char*"
+	case "bool":
+		return "bool"
 	default:
 		return wonType
+	}
+}
+
+func mapCQualTypeToWONCType(qualType string) string {
+	clean := strings.TrimSpace(qualType)
+	switch clean {
+	case "unsigned long", "uLong", "uLongf":
+		return "unsigned long"
+	case "int":
+		return "int"
+	case "const char *", "const char*":
+		return "const char*"
+	case "unsigned char *", "unsigned char*":
+		return "unsigned char*"
+	default:
+		return clean
 	}
 }

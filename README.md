@@ -87,9 +87,9 @@ The initial backend generates standard C code, harnessing decades of mature opti
 ## 4. Current Development Status
 
 > [!NOTE]
-> **WON has completed Phase 0B (Proof of Concept Vertical Slice).**
+> **WON has completed Phase 0B and Phase 0B.1 (Proof of Concept Vertical Slice & Acceptance Remediation).**
 >
-> A functioning bootstrap compiler (`wonc`) is operational under `compiler/poc/`. It parses `.won` source code, extracts C declarations directly from system headers (`zlib.h`) using Clang semantic AST, emits standard ISO C11, compiles native binaries via GCC/Clang, and provides structured JSON diagnostics with automated self-repair diffs for AI coding agents.
+> A functioning bootstrap compiler (`wonc`) is operational under `compiler/poc/`. It parses `.won` source code, extracts C declarations directly from system headers (`zlib.h`) using Clang semantic AST, verifies signatures in semantic analysis, emits strictly compliant ISO C11 (compiling cleanly under `gcc` and `clang` with `-std=c11 -pedantic-errors -Wall -Wextra`), compiles native binaries, and provides structured JSON diagnostics with automated self-repair diffs for AI coding agents.
 
 ### Working CLI Commands (`wonc`)
 
@@ -104,7 +104,7 @@ cd compiler/poc && go build -o bin/wonc ./cmd/wonc
 # Generate bindings directly from /usr/include/zlib.h
 ./bin/wonc bindings zlib
 
-# Compile to native executable and execute
+# Compile to native executable and execute (with optional --lto)
 ./bin/wonc build -o zlib_demo examples/zlib_compression.won
 ./zlib_demo
 ```
@@ -117,11 +117,13 @@ cd compiler/poc && go build -o bin/wonc ./cmd/wonc
 | Architecture Decision Records (ADRs) | `IMPLEMENTED` | [docs/decisions/](docs/decisions/) |
 | Language Syntax & Type System | `SPECIFIED` | [docs/language-design.md](docs/language-design.md) |
 | Ownership-Lite Memory Model | `SPECIFIED` | [docs/memory-model.md](docs/memory-model.md) |
-| Initial C Codegen Strategy | `IMPLEMENTED` | [ADR-001](docs/decisions/ADR-001-c-codegen-backend.md) |
+| Initial C Codegen Strategy (ISO C11) | `IMPLEMENTED` | [ADR-001](docs/decisions/ADR-001-c-codegen-backend.md) |
 | C Header Binding Engine (Clang AST) | `IMPLEMENTED` (zlib) | [ADR-006](docs/decisions/ADR-006-c-header-parsing-strategy.md) |
 | Phase 0B Proof of Concept | `IMPLEMENTED` | [docs/phase-0-proof-of-concept.md](docs/phase-0-proof-of-concept.md) |
 | AI Structured JSON Diagnostics | `IMPLEMENTED` | [docs/ai-native-design.md](docs/ai-native-design.md) |
+| AI Agent Autonomous Self-Repair | `IMPLEMENTED` | [docs/phase-0b-ai-agent-experiment.md](docs/phase-0b-ai-agent-experiment.md) |
 | Empirical Benchmark Suite (30 Runs) | `IMPLEMENTED` | [benchmarks/phase0/](benchmarks/phase0/) |
+| Static Linking (-static) | `BLOCKED (Environment)` | [docs/phase-0-proof-of-concept.md#4-static-linking-evaluation--environment-status](docs/phase-0-proof-of-concept.md#4-static-linking-evaluation--environment-status) |
 | Production Compiler (v1.0) | `PLANNED` | [docs/roadmap.md](docs/roadmap.md) |
 
 ---

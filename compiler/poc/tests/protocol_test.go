@@ -20,7 +20,8 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func TestJSONDiagnosticsAndAutomatedRepair(t *testing.T) {
+// TestJSONDiagnosticsProtocol 验证编译器输出的结构化 JSON 诊断协议完整性
+func TestJSONDiagnosticsProtocol(t *testing.T) {
 	woncBin := filepath.Join("..", "bin", "wonc")
 	brokenFile := filepath.Join("..", "..", "..", "tests", "ai_repair", "broken.won")
 	repairedFile := filepath.Join("..", "..", "..", "tests", "ai_repair", "auto_repaired.won")
@@ -96,5 +97,5 @@ func TestJSONDiagnosticsAndAutomatedRepair(t *testing.T) {
 		t.Fatalf("修复后的二进制运行失败: %v\n输出:\n%s", err, string(runOut))
 	}
 
-	t.Logf("自动化闭环修复验证成功！运行输出: %s", string(runOut))
+	t.Logf("协议与自动化闭环修复验证成功！运行输出: %s", string(runOut))
 }
