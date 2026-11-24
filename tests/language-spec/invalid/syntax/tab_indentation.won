@@ -1,0 +1,10 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Syntax Indentation Rules (Tab Rejection)
+## Spec Reference: docs/language-spec/syntax-and-grammar.md#31-source-encoding-and-whitespace
+## Violation: Source line contains a hard tab character (\t) in indentation.
+## Expected Diagnostic: WON-SYN-001: Tab characters are forbidden in indentation; use spaces instead.
+
+fn calculate_total(a: i64, b: i64) -> i64:
+	let sum = a + b    # Hard tab character at start of line
+	sum

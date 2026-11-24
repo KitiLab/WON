@@ -1,14 +1,18 @@
 # WON Memory Model & Ownership-Lite
 
-> **Document Status**: `SPECIFIED` / `UNDER INVESTIGATION`  
+> **Document Status**: `SPECIFIED`  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 0A
+> **Last Updated**: Phase 1A  
+> **Normative Specification**: [docs/language-spec/ownership-and-memory.md](language-spec/ownership-and-memory.md)
 
 ---
 
 ## 1. Introduction: The "Ownership-Lite" Vision
 
 A primary design goal of WON is to deliver compile-time memory safety without the cognitive friction and syntactic complexity of Rust-style named lifetime annotations (`'a`, `'b`).
+
+> [!NOTE]
+> The formal normative rules for ownership-lite value semantics, borrowing, single-reference elision, explicit sharing (`Shared[T]`, `Arc[T]`), and raw pointer safety are specified in **[docs/language-spec/ownership-and-memory.md](language-spec/ownership-and-memory.md)**.
 
 We term our approach **"Ownership-Lite"**:
 - It retains the core safety benefits of ownership, move semantics, and lexical borrowing.

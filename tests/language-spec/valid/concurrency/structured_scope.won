@@ -1,0 +1,22 @@
+## [SPEC-FIXTURE]
+## Category: Valid
+## Feature: Structured Concurrency Scope and Task Spawning
+## Spec Reference: docs/language-spec/concurrency-model.md#2-structured-concurrency-and-task-scopes
+## Expected Behavior: Compiles cleanly, executes parallel tasks inside nursery scope, joins results safely without thread leaks.
+
+fn compute_partial(base: i64, multiplier: i64) -> i64:
+    base * multiplier
+
+fn parallel_calculation() -> (i64, i64):
+    scope s:
+        let t1 = s.spawn:
+            compute_partial(10, 5)
+        let t2 = s.spawn:
+            compute_partial(20, 3)
+
+        # Both tasks join before scope exits
+        (t1.join().unwrap(), t2.join().unwrap())
+
+fn main():
+    let (r1, r2) = parallel_calculation()
+    println("Results: {r1}, {r2}")

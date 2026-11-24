@@ -1,0 +1,13 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Concurrency Thread Safety (Data Race Prevention)
+## Spec Reference: docs/language-spec/concurrency-model.md#3-thread-safety-the-send-and-sync-capabilities
+## Violation: Spawning a concurrent background task that captures an unsynchronized mutable reference across thread boundaries.
+## Expected Diagnostic: WON-CON-001: Cannot capture mutable reference '&mut counter' across concurrency boundary; requires Send + Sync synchronization (e.g., Arc[Mutex[T]]).
+
+fn increment_in_parallel():
+    var counter: i64 = 0
+
+    scope s:
+        s.spawn:
+            counter += 1    # Reject: Unsynchronized data race on mutable local variable

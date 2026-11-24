@@ -17,13 +17,22 @@ WON's syntax and type system are engineered to provide systems-level control wit
 
 ---
 
+> [!NOTE]
+> **Formal Specification Reference**: The complete, normative language specification is documented under [`docs/language-spec/`](language-spec/README.md). See:
+> - [`syntax-and-grammar.md`](language-spec/syntax-and-grammar.md) for formal EBNF and indentation tokenization.
+> - [`type-system.md`](language-spec/type-system.md) for primitive and composite type semantics.
+> - [`ownership-and-memory.md`](language-spec/ownership-and-memory.md) for ownership-lite memory safety rules.
+
+---
+
 ## 2. Decided Design Principles vs Unresolved Questions
 
 | Area | Decided Principles (`SPECIFIED`) | Unresolved Questions (`UNDER INVESTIGATION`) |
 | :--- | :--- | :--- |
-| **Mutability** | Immutability by default (`let`); explicit `mut` keyword. | Exact syntax for deep vs shallow immutability in nested structs. |
-| **Functions** | `fn name(param: Type) -> RetType`; explicit return types for public functions. | Default parameter values vs explicit function overloading. |
-| **Error Handling** | Sum types: `Result<T, E>` and `Option<T>`; no unhandled exceptions. | Exact symbol for propagation operator (`?` vs `try` keyword). |
+| **Mutability** | Immutability via `let`; mutability via `var` (ADR-007). | Exact syntax for deep vs shallow immutability in nested structs. |
+| **Syntax Style** | Indentation-based blocks with `:` (ADR-007). | Phase 1B lexer transition from Phase 0 brace prototype. |
+| **Functions** | `fn name(param: Type) -> RetType`; explicit public signatures. | Default parameter values vs explicit function overloading. |
+| **Error Handling** | Sum types: `Result[T, E]` and `Option[T]`; `?` operator. | Error chaining trait standards (`std::error::Error`). |
 | **Pointers & FFI** | Distinct safe references (`&T`, `&mut T`) vs raw pointers (`*const T`, `*mut T`). | Lifetime inference rules across complex struct member projections. |
 | **Memory Model** | Move by default for non-`Copy` types; ownership-lite lexical borrowing. | Automatic reference counting promotion for circular graphs. |
 | **Generics** | Compile-time monomorphization with trait constraints. | Syntax for associated types vs generic type parameters on traits. |
@@ -33,32 +42,30 @@ WON's syntax and type system are engineered to provide systems-level control wit
 ## 3. Proposed Language Constructs
 
 ### 3.1 Variables and Binding
-Variables are declared using `let`. They are immutable by default:
+Variables are declared using `let` (immutable) or `var` (mutable):
 
 ```won
-let count: i32 = 42;
-let mut buffer: Vec<u8> = Vec::new();
-buffer.push(0xFF);
+let count: i32 = 42
+var buffer: Vec[u8] = Vec::new()
+buffer.push(0xFF)
 ```
 
 Type inference is supported for local variables where the type can be deduced unambiguously:
 
 ```won
-let name = "WON";          // Inferred as &str
-let ratio = 3.14159;       // Inferred as f64
+let name = "WON"          # Inferred as &str
+let ratio = 3.14159       # Inferred as f64
 ```
 
 ### 3.2 Functions
 Functions are declared with `fn`:
 
 ```won
-fn calculate_hash(data: &[u8], seed: u64) -> u64 {
-    let mut hash = seed;
-    for byte in data {
-        hash = (hash ^ (*byte as u64)) * 1099511628211;
-    }
-    return hash;
-}
+fn calculate_hash(data: &[u8], seed: u64) -> u64:
+    var hash = seed
+    for byte in data:
+        hash = (hash ^ (*byte as u64)) * 1099511628211
+    hash
 ```
 
 ### 3.3 Data Structures: Structs

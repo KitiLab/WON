@@ -1,0 +1,13 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Foreign Function Interface Safety Boundary
+## Spec Reference: docs/language-spec/c-interop-and-unsafe.md#5-unsafe-boundary-classification
+## Violation: Calling a foreign C library function outside an explicit `unsafe:` block.
+## Expected Diagnostic: WON-SEC-001: Call to foreign C function 'zlib::compressBound' requires explicit 'unsafe:' block.
+
+#import <zlib.h>
+
+fn main():
+    let len: u64 = 100
+    # Reject: Foreign call without unsafe block
+    let bound = zlib::compressBound(len)

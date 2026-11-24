@@ -1,0 +1,35 @@
+## [SPEC-FIXTURE]
+## Category: Valid
+## Feature: Structs, Methods, Algebraic Enums, and Exhaustive Pattern Matching
+## Spec Reference: docs/language-spec/type-system.md#3-composite-types
+## Expected Behavior: Compiles cleanly, calculates Euclidean distance, and matches enum variants without runtime overhead.
+
+struct Point:
+    pub x: f64
+    pub y: f64
+
+impl Point:
+    fn new(x: f64, y: f64) -> Point:
+        Point { x: x, y: y }
+
+    fn distance_squared(&self) -> f64:
+        self.x * self.x + self.y * self.y
+
+enum Shape:
+    Circle(f64)
+    Rectangle:
+        width: f64
+        height: f64
+
+fn calculate_area(shape: &Shape) -> f64:
+    match shape:
+        Shape::Circle(radius) =>
+            3.1415926535 * radius * radius
+        Shape::Rectangle { width, height } =>
+            width * height
+
+fn main():
+    let p = Point::new(3.0, 4.0)
+    let dist_sq = p.distance_squared()
+    let c = Shape::Circle(2.0)
+    let area = calculate_area(&c)

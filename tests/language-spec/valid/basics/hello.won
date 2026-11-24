@@ -1,0 +1,8 @@
+## [SPEC-FIXTURE]
+## Category: Valid
+## Feature: Basic Function and Console Output
+## Spec Reference: docs/language-spec/syntax-and-grammar.md#5-comprehensive-canonical-syntax-examples
+## Expected Behavior: Compiles cleanly, prints greeting to standard output, exits with code 0.
+
+fn main():
+    println("Hello, WON World!")

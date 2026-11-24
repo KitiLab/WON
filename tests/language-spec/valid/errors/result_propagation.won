@@ -1,0 +1,31 @@
+## [SPEC-FIXTURE]
+## Category: Valid
+## Feature: Result Type and ? Operator Error Propagation
+## Spec Reference: docs/language-spec/error-handling.md#3-the-error-propagation-operator-
+## Expected Behavior: Compiles cleanly, unwraps Ok values, converts lower-level error to domain error and returns early on Err.
+
+struct ParseError:
+    message: str
+
+enum ServiceError:
+    BadInput(str)
+    Internal(ParseError)
+
+impl From[ParseError] for ServiceError:
+    fn from(err: ParseError) -> ServiceError:
+        ServiceError::Internal(err)
+
+fn parse_digit(ch: char) -> Result[u32, ParseError]:
+    if ch >= '0' and ch <= '9':
+        Result::Ok((ch as u32) - ('0' as u32))
+    else:
+        Result::Err(ParseError { message: "Not an ASCII digit" })
+
+fn parse_two_digits(c1: char, c2: char) -> Result[u32, ServiceError]:
+    # The ? operator unwraps or returns early with automatic From::from conversion
+    let d1 = parse_digit(c1)?
+    let d2 = parse_digit(c2)?
+    Result::Ok(d1 * 10 + d2)
+
+fn main():
+    let res = parse_two_digits('4', '2')

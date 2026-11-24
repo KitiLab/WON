@@ -30,13 +30,57 @@ Foundation    Slice        & AST    Compiler     & AI CLI    & Fuzzing   Launch 
   - *Deliverables*: Minimal prototype parser, zlib header binding generator, C codegen backend, benchmark harness vs C/Go, AI self-repair test.
   - *Acceptance Criteria*: Statically linked executable compiles and decompresses a buffer; identical zlib workload measured against GCC -O3 and Go; automated agent repairs a structured syntax error using JSON compiler diagnostics.
 
-### Phase 1: Language Foundations
-- **Objective**: Establish the formal language grammar, abstract syntax tree (AST), lexical analyzer, and foundation data structures.
-- **Deliverables**:
-  - Formal EBNF / PEG grammar specification.
-  - High-throughput lexer and parser producing source-span-mapped AST nodes.
-  - Formatting and syntax validation tools.
-- **Acceptance Criteria**: Comprehensive syntax test suite covering valid and invalid language constructs with accurate error offsets.
+### Phase 1: Language Foundations & Formal Specification
+- **Sub-phase 1A (Completed Specification)**:
+  - *Objective*: Transform the product vision into a formal, rigorous, internally consistent language specification suite ([docs/language-spec/](language-spec/README.md)).
+  - *Deliverables*: Formal EBNF grammar, Type System, Ownership-Lite & Borrowing, Structured Concurrency, Error Handling, C Interoperability, Self-Hosting & Multi-Stage Bootstrap Pipeline, Typed Intermediate Representation (TIR) Architecture, Specification Test Fixtures, ADR-007 through ADR-010, and Reconciliation Audit.
+  - *Status*: `SPECIFIED` (Under Architectural Review).
+- **Sub-phase 1B (Parser & Foundations Implementation)**:
+  - *Objective*: Implement the formal indentation-based lexer (`INDENT`/`DEDENT` off-side rule), recursive-descent parser, and span-mapped AST data structures in the bootstrap compiler.
+  - *Deliverables*: Upgraded `wonc0` lexer/parser, syntax test suite verifying valid and invalid fixtures in `tests/language-spec/`.
+
+---
+
+## 3. Implementation Dependency Roadmap
+
+The implementation roadmap adheres to strict technical dependency ordering across three sequential layers:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                      Layer 1: Foundational Core                         │
+│ • Lexer with synthetic INDENT/DEDENT off-side rule                     │
+│ • Recursive-descent parser and exact source-span AST                   │
+│ • Symbol tables, multi-pass name resolution, module layout             │
+│ • Bidirectional local type inference & trait constraint solver         │
+│ • Ownership-lite borrow checking (move analysis, alias XOR mutability) │
+│ • Typed Intermediate Representation (TIR) builder & basic blocks       │
+│ • C11 code generation backend (C11Emitter)                             │
+│ • Direct C header ingestion (#import) with composite fingerprint cache  │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Unlocks
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│             Layer 2: Prerequisites for Self-Hosting (Stage 1)          │
+│ • Dynamic resizable arrays (Vec[T]) and owned strings (String, &str)   │
+│ • Associative symbol maps (HashMap[K, V])                              │
+│ • Algebraic data types (structs, enums, match pattern destructuring)  │
+│ • File I/O (reading source code, writing generated artifacts)          │
+│ • Process spawning (invoking GCC/Clang/LD) and subprocess execution    │
+│ • Structured JSON diagnostics protocol and error reporting             │
+│ • Multi-file package compilation and module organization               │
+│ • Self-hosted compiler implementation in WON (wonc1)                   │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Unlocks
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│             Layer 3: Advanced Language & Ecosystem Capabilities        │
+│ • Structured concurrency runtime (scope, spawn, work-stealing pool)    │
+│ • OS process sandboxing (Linux Landlock/seccomp, macOS Seatbelt)       │
+│ • Integrated LLVM / QBE direct machine code backends                   │
+│ • Automated AI coding-agent repair and introspection APIs              │
+│ • Cross-compilation toolchains and package distribution registry       │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
 ### Phase 2: Core Compiler & Ownership-Lite
 - **Objective**: Implement the type inference engine, typed intermediate representation (TIR), ownership-lite verification passes, and production C codegen backend.

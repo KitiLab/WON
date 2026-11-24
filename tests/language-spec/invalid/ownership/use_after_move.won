@@ -1,0 +1,18 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Ownership Move Semantics (Use After Move)
+## Spec Reference: docs/language-spec/ownership-and-memory.md#2-value-semantics-copy-vs-move
+## Violation: Variable 'original_data' was moved into 'transferred_data' and subsequently referenced.
+## Expected Diagnostic: WON-MEM-001: Use of moved value 'original_data'. Value was moved to 'transferred_data' on line 12.
+
+struct DynamicPayload:
+    content: str
+
+fn process(payload: DynamicPayload):
+    println("Content: {payload.content}")
+
+fn main():
+    let original_data = DynamicPayload { content: "Critical Data" }
+    let transferred_data = original_data    # Ownership moved here
+
+    process(original_data)                  # Reject: original_data is invalidated

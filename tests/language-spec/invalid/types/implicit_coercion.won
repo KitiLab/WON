@@ -1,0 +1,10 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Static Type System (No Implicit Coercion)
+## Spec Reference: docs/language-spec/type-system.md#4-local-type-inference
+## Violation: Attempting to assign an `i32` value to an `i64` variable without explicit `as` cast.
+## Expected Diagnostic: WON-TYP-001: Type mismatch: Expected 'i64', found 'i32'. Implicit numeric conversions are forbidden; use explicit 'as i64'.
+
+fn main():
+    let small_number: i32 = 42
+    let large_number: i64 = small_number    # Reject: Implicit widening is forbidden

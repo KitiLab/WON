@@ -87,9 +87,13 @@ The initial backend generates standard C code, harnessing decades of mature opti
 ## 4. Current Development Status
 
 > [!NOTE]
-> **WON has completed Phase 0B and Phase 0B.1 (Proof of Concept Vertical Slice & Acceptance Remediation).**
+> **WON is in Phase 1 (Language Foundations). Phase 0B/0B.2 is completed and verified; Phase 1A formal specification is delivered.**
 >
-> A functioning bootstrap compiler (`wonc`) is operational under `compiler/poc/`. It parses `.won` source code, extracts C declarations directly from system headers (`zlib.h`) using Clang semantic AST, verifies signatures in semantic analysis, emits strictly compliant ISO C11 (compiling cleanly under `gcc` and `clang` with `-std=c11 -pedantic-errors -Wall -Wextra`), compiles native binaries, and provides structured JSON diagnostics with automated self-repair diffs for AI coding agents.
+> A functioning bootstrap compiler (`wonc0` under `compiler/poc/`) validates the Phase 0B proof of concept (C header ingestion, strict ISO C11 code generation with `-Werror`, and autonomous AI coding-agent repair).
+>
+> **Phase 1A Formal Language Specification Suite** is published under [`docs/language-spec/`](docs/language-spec/README.md), establishing the formal EBNF grammar, type system, ownership-lite memory model, structured concurrency, error handling, Typed Intermediate Representation (TIR), and the 4-stage self-hosting roadmap.
+>
+> *Note on Static Linking*: Standalone static binary generation remains classified as `BLOCKED (Environment)` on this host due to missing system development archives (`libc.a`, `libz.a`). Dynamic native builds link against `/lib64/libz.so.1` and pass 100% of functional gates.
 
 ### Working CLI Commands (`wonc`)
 
@@ -115,8 +119,13 @@ cd compiler/poc && go build -o bin/wonc ./cmd/wonc
 | :--- | :--- | :--- |
 | Repository Architecture & Governance | `IMPLEMENTED` | [AGENTS.md](AGENTS.md), [GOVERNANCE.md](GOVERNANCE.md) |
 | Architecture Decision Records (ADRs) | `IMPLEMENTED` | [docs/decisions/](docs/decisions/) |
-| Language Syntax & Type System | `SPECIFIED` | [docs/language-design.md](docs/language-design.md) |
-| Ownership-Lite Memory Model | `SPECIFIED` | [docs/memory-model.md](docs/memory-model.md) |
+| Language Specification (Draft 0.1) | `SPECIFIED` | [docs/language-spec/](docs/language-spec/README.md) |
+| Syntax & Formal Grammar (EBNF) | `SPECIFIED` | [docs/language-spec/syntax-and-grammar.md](docs/language-spec/syntax-and-grammar.md) |
+| Primitive & Composite Type System | `SPECIFIED` | [docs/language-spec/type-system.md](docs/language-spec/type-system.md) |
+| Ownership-Lite Memory Model | `SPECIFIED` | [docs/language-spec/ownership-and-memory.md](docs/language-spec/ownership-and-memory.md) |
+| Structured Concurrency & Zero-GIL | `SPECIFIED` | [docs/language-spec/concurrency-model.md](docs/language-spec/concurrency-model.md) |
+| Self-Hosting & Bootstrap Pipeline | `SPECIFIED` | [docs/language-spec/self-hosting-and-bootstrap.md](docs/language-spec/self-hosting-and-bootstrap.md) |
+| Typed Intermediate Rep (TIR) | `SPECIFIED` | [docs/language-spec/compiler-and-ir-requirements.md](docs/language-spec/compiler-and-ir-requirements.md) |
 | Initial C Codegen Strategy (ISO C11) | `IMPLEMENTED` | [ADR-001](docs/decisions/ADR-001-c-codegen-backend.md) |
 | C Header Binding Engine (Clang AST) | `IMPLEMENTED` (zlib) | [ADR-006](docs/decisions/ADR-006-c-header-parsing-strategy.md) |
 | Phase 0B Proof of Concept | `IMPLEMENTED` | [docs/phase-0-proof-of-concept.md](docs/phase-0-proof-of-concept.md) |

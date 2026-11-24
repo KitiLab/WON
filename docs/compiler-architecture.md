@@ -2,13 +2,19 @@
 
 > **Document Status**: `SPECIFIED`  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 0A
+> **Last Updated**: Phase 1A  
+> **Normative Specification**: [docs/language-spec/compiler-and-ir-requirements.md](language-spec/compiler-and-ir-requirements.md)
 
 ---
 
 ## 1. Architectural Overview & Pipeline
 
-The WON compiler (`wonc`) employs a multi-stage, modular architecture designed for high compilation throughput, actionable error diagnostics, and native code generation:
+The WON compiler (`wonc`) employs a multi-stage, modular architecture designed for high compilation throughput, actionable error diagnostics, and native code generation.
+
+> [!NOTE]
+> For formal specifications of the compiler stages and Typed Intermediate Representation (TIR), refer directly to:
+> - **[compiler-and-ir-requirements.md](language-spec/compiler-and-ir-requirements.md)**: TIR structure, basic-block CFG, and multi-backend design.
+> - **[self-hosting-and-bootstrap.md](language-spec/self-hosting-and-bootstrap.md)**: 4-stage self-hosting roadmap and Go bootstrap retirement criteria.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐

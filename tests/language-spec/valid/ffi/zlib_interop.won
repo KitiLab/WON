@@ -1,0 +1,37 @@
+## [SPEC-FIXTURE]
+## Category: Valid
+## Feature: Native C Header Ingestion and Bound-Checked Compression
+## Spec Reference: docs/language-spec/c-interop-and-unsafe.md#2-the-header-import-model-import
+## Expected Behavior: Compiles cleanly, extracts Clang AST signatures, enforces unsafe boundary, executes native compression.
+
+#import <zlib.h>
+
+fn compress_payload(payload: &[u8]) -> Result[usize, i32]:
+    let input_len: u64 = payload.len() as u64
+
+    # Bound capacity check
+    let max_bound: u64 = unsafe:
+        zlib::compressBound(input_len)
+
+    if max_bound > 1024:
+        return Result::Err(-1)
+
+    var output_buf: [u8; 1024] = [0u8; 1024]
+    var dest_len: u64 = 1024
+
+    let status: i32 = unsafe:
+        zlib::compress(
+            output_buf.as_mut_ptr(),
+            &mut dest_len,
+            payload.as_ptr(),
+            input_len
+        )
+
+    if status == 0:
+        Result::Ok(dest_len as usize)
+    else:
+        Result::Err(status)
+
+fn main():
+    let data = "WON Native Systems Interop"
+    let res = compress_payload(data.as_bytes())

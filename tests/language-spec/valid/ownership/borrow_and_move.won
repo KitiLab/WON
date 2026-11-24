@@ -1,0 +1,36 @@
+## [SPEC-FIXTURE]
+## Category: Valid
+## Feature: Value Semantics, Moves, Immutable & Mutable Borrowing
+## Spec Reference: docs/language-spec/ownership-and-memory.md#2-value-semantics-copy-vs-move
+## Expected Behavior: Compiles cleanly, tracks single-ownership moves, permits non-overlapping mutable borrow after immutable borrow.
+
+struct HeavyBuffer:
+    data: [u8; 1024]
+    len: usize
+
+fn read_length(buf: &HeavyBuffer) -> usize:
+    buf.len
+
+fn append_byte(buf: &mut HeavyBuffer, byte: u8):
+    if buf.len < 1024:
+        buf.data[buf.len] = byte
+        buf.len += 1
+
+fn consume_buffer(buf: HeavyBuffer):
+    # Takes full ownership; buffer dropped at end of scope
+    println("Buffer consumed with length: {buf.len}")
+
+fn main():
+    var my_buf = HeavyBuffer {
+        data: [0u8; 1024],
+        len: 0
+    }
+
+    # Immutable borrow
+    let current_len = read_length(&my_buf)
+
+    # Mutable borrow (non-overlapping with prior borrow)
+    append_byte(&mut my_buf, 42u8)
+
+    # Ownership transfer (move)
+    consume_buffer(my_buf)
