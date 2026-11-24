@@ -10,7 +10,7 @@
 ## 1. Concurrency Principles
 
 WON's concurrency design is governed by four core tenets:
-1. **Zero Global Interpreter Lock (Zero-GIL)**: High-performance, concurrent execution utilizing 100% of available CPU cores across native OS threads and lightweight tasks.
+1. **Zero Global Interpreter Lock (Zero-GIL)**: High-performance, concurrent execution enabling multi-core hardware scaling across native OS threads and lightweight tasks without a Global Interpreter Lock.
 2. **Compile-Time Data-Race Freedom**: In safe WON code, data races are provably impossible at compile time through the ownership and trait system.
 3. **Structured Concurrency by Default**: Background tasks are bound strictly to lexical scopes (`scope`). A task **MUST NOT** outlive the scope that created it, completely eliminating dangling thread leaks and orphaned processes.
 4. **Explicit Sharing & Synchronization**: Shared mutable memory across threads is impossible without explicit, compiler-verified synchronization primitives (`Mutex`, `RwLock`, `Atomic`).
@@ -24,7 +24,7 @@ In traditional unstructured concurrency (e.g., C `pthread_create`, Go `go func()
 WON mandates **Structured Concurrency**:
 
 ```won
-fn fetch_all(urls: &[str]) -> Result[Vec[str], NetworkError]:
+fn fetch_all(urls: &[String]) -> Result[Vec[String], NetworkError]:
     scope s:
         var handles = Vec::new()
         for url in urls:
@@ -42,14 +42,23 @@ fn fetch_all(urls: &[str]) -> Result[Vec[str], NetworkError]:
 
 ### 2.1 The Scope Nursery (`scope s:`)
 - A `scope` block creates an execution nursery.
-- Tasks spawned within the scope (`s.spawn: ...`) are registered with the nursery.
-- When control reaches the end of the `scope` block, the current thread suspends until all registered child tasks finish executing.
-- **Safety Invariant**: Because child tasks cannot outlive the parent `scope`, child tasks **MAY borrow immutable references (`&T`) from the enclosing stack frame**, completely avoiding unnecessary heap clones.
+- Tasks spawned within the scope (`s.spawn: ...`) return a `TaskHandle[T]` where $T$ is the type of the trailing expression in the task body.
+- When control reaches the end of the `scope` block, the current thread suspends until all registered child tasks finish executing, return, or enter a terminal cancelled state.
+- **Borrowed Stack Capture Invariant**: Because child tasks cannot outlive the parent `scope`, child tasks **MAY borrow immutable references (`&T`) from the enclosing stack frame**, provided $T$ implements `Sync`. Borrowing `&mut T` across task boundaries is strictly rejected (`WON-CON-001`).
 
-### 2.2 Task Failure and Cancellation Propagation
-- If any child task in a scope encounters an unhandled error or panic, the nursery triggers cooperative cancellation across all remaining sibling tasks.
-- Resources owned by cancelled tasks are unwound and dropped deterministically.
-- The parent scope collects the error and returns it to the caller.
+### 2.2 Task Handles, Cancellation, and Error Aggregation
+1. **Task Handles (`TaskHandle[T]`)**:
+   - `.join() -> Result[T, TaskError]`: Suspends until the specific child task finishes and yields its result.
+   - `.cancel()`: Sends a cooperative cancellation signal to the task.
+   - `.is_finished() -> bool`: Non-blocking check for task completion.
+2. **Cooperative Cancellation**:
+   - Cancellation in WON is cooperative. When a scope or task is cancelled, a cancellation token is set. Tasks periodically inspect cancellation state (via `s.is_cancelled()` or automatically during standard non-blocking I/O operations).
+   - If a child task blocks indefinitely inside an uncooperative CPU loop or a foreign C blocking call, it cannot be forcibly terminated (preventing memory corruption); it runs until it yields, exits, or the parent process terminates.
+3. **Multiple Child Errors**:
+   - If multiple child tasks fail concurrently within a scope, the nursery aggregates all failures into an `AggregateTaskError(Vec[TaskError])`, ensuring no failure is silently masked.
+
+### 2.3 Foreign C Blocking Calls
+Standard WON I/O operations are non-blocking and integrated with OS event loops (`epoll`, `kqueue`). However, when calling a foreign C library that performs a synchronous blocking syscall (e.g., blocking `read()` on a raw socket), the underlying OS thread is occupied. The runtime adapts by expanding its OS worker thread pool up to a configurable maximum to prevent starving remaining runnable tasks.
 
 ---
 
@@ -80,7 +89,7 @@ Thread safety is enforced at compile time using two marker traits automatically 
 ### 3.3 Task Boundary Enforcement
 The `s.spawn:` primitive requires that any value captured by value implement `Send`, and any value captured by reference implement `Sync`:
 ```won
-# Compile-time check on spawn
+# Canonical signature:
 fn spawn[F: Fn() -> R + Send, R: Send](&self, f: F) -> TaskHandle[R]
 ```
 
@@ -108,6 +117,7 @@ fn pipeline():
             while let Option::Some(val) = rx.recv():
                 println("Received: {val}")
 ```
+- **Closure Semantics**: When a channel is closed via `tx.close()`, all items remaining in the buffer can still be drained by `rx.recv()`. Once empty and closed, `rx.recv()` returns `Option::None`. Attempting to send on a closed channel returns `Result::Err(SendError::ChannelClosed)`.
 
 ### 4.2 Shared Memory: `Mutex[T]` and `RwLock[T]`
 When shared state is necessary:
@@ -126,20 +136,21 @@ impl SharedCounter:
         # Mutex unlocked automatically here
 ```
 
-### 4.3 Atomic Primitives
+### 4.3 Atomic Primitives and Memory Ordering
 Lock-free primitives utilizing native hardware atomic instructions:
 - `AtomicBool`, `AtomicI32`, `AtomicI64`, `AtomicUsize`.
 - Provide sequentially consistent (`SeqCst`), acquire/release (`AcqRel`), and relaxed (`Relaxed`) memory orderings.
 
 ---
 
-## 5. Runtime Architecture and Scheduler Requirements
+## 5. Runtime Architecture & Scheduler Model
 
-1. **M:N Work-Stealing Scheduler**:
-   - The standard WON runtime executes $M$ lightweight tasks across $N$ OS worker threads (where $N$ defaults to the number of logical CPU cores).
-   - Each worker thread maintains a local double-ended task queue (deque). Idle threads steal tasks from busy threads, ensuring balanced CPU saturation.
+> **Status**: `UNDER INVESTIGATION` (Implementation Architecture)
+
+1. **Work-Stealing Scheduler**:
+   - The proposed runtime architecture schedules $M$ lightweight tasks across $N$ OS worker threads (where $N$ defaults to logical CPU core count).
+   - Idle worker threads steal tasks from the deques of busy threads.
+   - *Note*: The M:N work-stealing scheduler is a planned runtime architecture, not an immutable language-level guarantee. Standalone single-threaded CLI tools link without the multi-threaded scheduler.
 2. **Non-Blocking I/O Integration**:
    - The runtime integrates directly with OS-native event demultiplexers (`epoll` on Linux, `kqueue` on macOS/BSD, `IOCP` on Windows).
-   - Network and file descriptors suspend the calling task without blocking the underlying OS thread.
-3. **Zero Mandatory Runtime for Standalone CLI**:
-   - Programs that do not utilize `scope` or `spawn` link without the multi-threaded task scheduler, producing minimal single-file binaries with near-zero startup overhead.
+   - Network and file descriptors suspend the calling task without blocking the underlying OS worker thread.

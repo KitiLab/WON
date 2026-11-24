@@ -87,11 +87,11 @@ The initial backend generates standard C code, harnessing decades of mature opti
 ## 4. Current Development Status
 
 > [!NOTE]
-> **WON is in Phase 1 (Language Foundations). Phase 0B/0B.2 is completed and verified; Phase 1A formal specification is delivered.**
+> **WON is in Phase 1 (Language Foundations). Phase 0B/0B.2 is completed and verified; Phase 1A/1A.1 formal specification is delivered.**
 >
 > A functioning bootstrap compiler (`wonc0` under `compiler/poc/`) validates the Phase 0B proof of concept (C header ingestion, strict ISO C11 code generation with `-Werror`, and autonomous AI coding-agent repair).
 >
-> **Phase 1A Formal Language Specification Suite** is published under [`docs/language-spec/`](docs/language-spec/README.md), establishing the formal EBNF grammar, type system, ownership-lite memory model, structured concurrency, error handling, Typed Intermediate Representation (TIR), and the 4-stage self-hosting roadmap.
+> **Phase 1A/1A.1 Formal Language Specification Suite** is published under [`docs/language-spec/`](docs/language-spec/README.md), establishing the formal EBNF grammar, type system, ownership-lite memory model, structured concurrency, error handling, Typed Intermediate Representation (TIR), sidecar C binding contracts, and the 4-stage self-hosting roadmap. See the [Phase 1A.1 Semantic Closure Log](docs/language-spec/phase-1a.1-semantic-closure.md) for full audit traceability.
 >
 > *Note on Static Linking*: Standalone static binary generation remains classified as `BLOCKED (Environment)` on this host due to missing system development archives (`libc.a`, `libz.a`). Dynamic native builds link against `/lib64/libz.so.1` and pass 100% of functional gates.
 

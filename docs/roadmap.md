@@ -31,10 +31,14 @@ Foundation    Slice        & AST    Compiler     & AI CLI    & Fuzzing   Launch 
   - *Acceptance Criteria*: Statically linked executable compiles and decompresses a buffer; identical zlib workload measured against GCC -O3 and Go; automated agent repairs a structured syntax error using JSON compiler diagnostics.
 
 ### Phase 1: Language Foundations & Formal Specification
-- **Sub-phase 1A (Completed Specification)**:
+- **Sub-phase 1A (Language Specification Initial Draft)**:
   - *Objective*: Transform the product vision into a formal, rigorous, internally consistent language specification suite ([docs/language-spec/](language-spec/README.md)).
   - *Deliverables*: Formal EBNF grammar, Type System, Ownership-Lite & Borrowing, Structured Concurrency, Error Handling, C Interoperability, Self-Hosting & Multi-Stage Bootstrap Pipeline, Typed Intermediate Representation (TIR) Architecture, Specification Test Fixtures, ADR-007 through ADR-010, and Reconciliation Audit.
   - *Status*: `SPECIFIED` (Under Architectural Review).
+- **Sub-phase 1A.1 (Specification Integrity Review & Semantic Closure)**:
+  - *Objective*: Remediate formal grammar gaps, establish mathematical soundness models for reference provenance ($\text{Prov}(e)$), formalize 3-tier string model, integer overflow semantics, declarative C sidecar contracts (`.wonbind`), and provide 100% EBNF traceability across all 20 canonical examples.
+  - *Deliverables*: Comprehensive closure log ([docs/language-spec/phase-1a.1-semantic-closure.md](language-spec/phase-1a.1-semantic-closure.md)), updated specification files, and verified traceability matrix.
+  - *Status*: `SPECIFIED` (Completed & Reconciled).
 - **Sub-phase 1B (Parser & Foundations Implementation)**:
   - *Objective*: Implement the formal indentation-based lexer (`INDENT`/`DEDENT` off-side rule), recursive-descent parser, and span-mapped AST data structures in the bootstrap compiler.
   - *Deliverables*: Upgraded `wonc0` lexer/parser, syntax test suite verifying valid and invalid fixtures in `tests/language-spec/`.

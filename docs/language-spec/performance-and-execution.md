@@ -12,14 +12,14 @@
 The primary performance objective of WON is **native parity with optimized C**:
 - **Ahead-of-Time Compilation**: Source files compile directly to native machine code via optimized backends.
 - **Zero GC Pauses**: Memory reclamation is 100% deterministic, executed via RAII stack drops and explicit deallocations without runtime pauses.
-- **Zero Global Interpreter Lock (GIL)**: Concurrent tasks execute across all available CPU cores with native OS threading.
+- **Zero Global Interpreter Lock (Zero-GIL)**: Concurrent tasks execute across all available CPU cores with native OS threading.
 - **Predictable Mechanical Sympathy**: Cache-conscious memory layouts, contiguous array allocations, and zero hidden boxing.
 
 ---
 
 ## 2. Memory Allocation Semantics: Stack vs. Heap
 
-WON distinguishes stack allocation from heap allocation with absolute transparency:
+WON distinguishes stack allocation from heap allocation with complete transparency:
 
 ```
                           Memory Allocation Rules
@@ -31,11 +31,16 @@ WON distinguishes stack allocation from heap allocation with absolute transparen
 • Fixed-size Arrays ([T; N])                       • Owned Strings (String)
 • Structs by value                                 • Heap Boxes (Box[T])
 • Zero runtime allocator cost                      • Explicit Shared (Shared[T], Arc[T])
-• Lifetime bounded by local scope                  • Bounded by RAII drop owner
+• Lifetime bounded by local scope                  • String interpolation & closures
 ```
 
 1. **Stack by Default**: Variables, tuples, structs, and fixed-size arrays (`[u8; 1024]`) are allocated directly on the current thread stack. Stack allocation incurs zero heap allocation overhead, maximizes L1/L2 cache locality, and reclaims memory instantaneously upon stack frame unwinding.
-2. **Explicit Heap Allocation**: Heap memory is never allocated implicitly by the compiler. It is allocated strictly when constructing heap-backed collection types (`Vec`, `String`, `HashMap`) or explicit heap boxes (`Box::new(val)`).
+2. **Heap Allocation Points**:
+   - Heap memory is allocated strictly through explicit collection types (`Vec[T]`, `HashMap[K, V]`), heap boxes (`Box::new(val)`), or shared pointers (`Shared::new(val)`, `Arc::new(val)`).
+   - In expressions, dynamic allocations occur specifically during:
+     - String formatting and interpolation (`"Hello, {name}"` produces an owned `String`).
+     - Growing dynamic collections beyond their current capacity.
+     - Heap-allocated closures capturing non-`Copy` environments.
 3. **Pluggable Allocators**: Systems and embedded targets can replace the standard heap allocator (`jemalloc` or system `malloc`) with custom arena, slab, or embedded bare-metal allocators.
 
 ---
@@ -65,7 +70,7 @@ struct ZStream:
 ### 3.3 Packed Structs (`@repr(packed)`)
 For binary wire protocols and hardware device registers:
 - Struct fields have an alignment of 1 byte with zero inter-field padding.
-- Accessing unaligned fields generates safe byte-by-byte copies to prevent hardware unaligned memory faults.
+- **Safety Invariant**: Because borrowing an unaligned field can trigger hardware misalignment traps on modern architectures, **taking a reference to an unaligned field (`&packed.field`) is strictly FORBIDDEN in safe code** (`WON-TYP-005: Cannot borrow unaligned packed field by reference`). Access **MUST** occur by value copy or via raw pointer in an `unsafe:` block.
 
 ---
 
@@ -83,15 +88,15 @@ For binary wire protocols and hardware device registers:
 
 ## 5. Calling Conventions and Machine Interop
 
-- **Internal Function Calls**: The compiler uses a fast register-based calling convention: arguments are passed in hardware registers (`RAX`, `RDI`, `RSI`, `RDX`, `RCX`, `R8`, `R9` on x86_64), with small structs returned directly in registers.
+- **Internal Function Calls**: Internal function calling conventions are target-specific backend responsibilities (e.g., register-based passing on x86_64 and AArch64). The compiler is free to optimize register assignments across module boundaries during whole-program Link-Time Optimization (LTO).
 - **Foreign C Calls**: Functions declared with `extern "C"` adhere strictly to the target platform C calling convention:
   - Linux, macOS, BSD: System V AMD64 ABI.
   - Windows: Microsoft x64 ABI.
-- **Inlining Strategy**: Small functions and generic method specializations are aggressively inlined across module boundaries during Link-Time Optimization (LTO).
+- **Inlining Strategy**: Small functions and generic method specializations are aggressively inlined across module boundaries during LTO.
 
 ---
 
 ## 6. Runtime Startup and Execution Footprint
 
-- **Sub-Millisecond Startup**: Because WON executables do not initialize a garbage collection daemon, JIT engine, or complex reflection tables, startup latency is under 1 millisecond.
+- **Sub-Millisecond Startup Target**: Because WON executables do not initialize a garbage collection daemon, JIT engine, or complex reflection tables, sub-millisecond process startup is an empirical design target on modern systems.
 - **Minimal Binary Size**: Dead code elimination and LTO strip unreferenced functions, allowing minimal CLI utilities to compile down to tens of kilobytes.

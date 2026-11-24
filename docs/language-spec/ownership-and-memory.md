@@ -76,39 +76,110 @@ Rather than transferring ownership, values can be temporarily accessed via refer
 
 ## 4. The Lifetime-Free Enforcement Engine
 
-Rust achieves soundness by requiring developers to explicitly name and link lifetime parameters across function signatures:
-```rust
-// Rust: Explicit lifetime parameters required
-fn longest<'a>(x: &'a str, y: &'a str) -> &'a str { ... }
-```
+> **Status**: `PROPOSED` / `UNDER INVESTIGATION` (Formal Soundness Model)
 
-WON eliminates `'a` annotations using **Scope-Bounded Region Inference** and a strict set of **Reference Return Rules**:
+Rust achieves soundness by requiring developers to explicitly name and link lifetime parameters across function signatures (`fn longest<'a>(x: &'a str, y: &'a str) -> &'a str`).
+
+WON eliminates explicit `'a` lifetime annotations from application and systems APIs by employing **Reference Provenance Tracking**, **Scope-Bounded Region Inference**, and **Strict Multi-Reference Rejection**:
 
 ### 4.1 Lexical Scope Bounding
 References in local variables are tracked via lexical intervals. A reference `&x` is bounded strictly by the scope of the owner `x`. A reference **MUST NOT** escape the scope of the referenced value.
 
-### 4.2 Function Call Boundary Invariants
-At function call boundaries, the compiler enforces three deterministic rules without requiring lifetime syntax:
+### 4.2 Reference Provenance Tracking ($\text{Prov}(e)$)
+The compiler statically computes a **Provenance Set** $\text{Prov}(e)$ for every reference expression $e$:
+$$\text{Prov}(e) \subseteq \text{Params} \cup \text{Globals} \cup \text{Locals}$$
+
+- **Parameter Provenance**: If $e$ is derived from an input reference parameter $p$, then $p \in \text{Prov}(e)$.
+- **Global Provenance**: If $e$ points to static/constant global memory, $\text{Prov}(e) = \{\text{static}\}$.
+- **Local Provenance**: If $e$ borrows a local variable $l$ within the current stack frame, then $l \in \text{Prov}(e)$.
+- **Conditional Paths**: For branches (`if cond: r1 else: r2`), the resulting provenance is the union: $\text{Prov} = \text{Prov}(r_1) \cup \text{Prov}(r_2)$.
+
+> **The Non-Escape Invariant**:
+> If a function returns a reference $r_{\text{ret}}$, the compiler asserts:
+> $$\text{Prov}(r_{\text{ret}}) \cap \text{Locals} = \emptyset$$
+> If any execution path allows a reference derived from a local stack variable to reach the return expression, compilation is rejected with diagnostic `WON-MEM-003: Escape of local reference`.
+
+### 4.3 Function Boundary Invariants
 
 1. **Rule 1: References Cannot Escape into Stored Fields Without Explicit Sharing**  
    Structs containing borrowed references (`&T`) cannot be returned from the function where the referenced value was created. To store references across long-lived boundaries, developers **MUST** use explicit owned sharing (`Shared[T]` or `Arc[T]`).
 
-2. **Rule 2: Single-Reference Elision**  
-   If a function takes exactly one reference parameter and returns a reference, the output reference is automatically tied to the input reference's lifetime:
-   ```won
-   # Inferred: The returned &str is borrowed from `input`
-   fn trim_whitespace(input: &str) -> &str:
-       ...
-   ```
+2. **Rule 2: Provenance-Validated Single-Reference Elision**  
+   If a function takes exactly one reference parameter $p$ and returns a reference:
+   - The returned reference is valid **if and only if** its proven provenance satisfies:
+     $$\text{Prov}(r_{\text{ret}}) \subseteq \{p\} \cup \{\text{static}\}$$
+   - The return reference's lifetime is automatically bound to the caller's argument lifetime corresponding to $p$.
+   - If $\text{Prov}(r_{\text{ret}})$ contains any local stack variable, compilation is rejected (`WON-MEM-003`).
 
-3. **Rule 3: Multi-Reference Disambiguation Rule**  
-   If a function takes multiple reference parameters and returns a reference, one of two disambiguation rules applies:
-   - **Method Receiver Precedence**: If the function is a method taking `&self` or `&mut self`, the returned reference is tied exclusively to `self`.
-   - **Explicit Disambiguation Requirement**: If a free function takes multiple reference arguments (such as `fn select(a: &str, b: &str) -> &str`), the compiler rejects the ambiguous signature (`WON-MEM-002`) and requires the developer to either:
-     - Return an owned value (`String`).
-     - Or pass an explicit output destination reference (`fn select(a: &str, b: &str, out: &mut &str)`).
+3. **Rule 3: Provenance-Driven Method Receiver Rule**  
+   For methods with a receiver (`&self` or `&mut self`) and additional reference parameters:
+   - The compiler computes $\text{Prov}(r_{\text{ret}})$.
+   - If $\text{Prov}(r_{\text{ret}}) \subseteq \{\text{self}\}$, the returned reference is tied to `self`.
+   - If $\text{Prov}(r_{\text{ret}}) \subseteq \{\text{other}\}$, the returned reference is tied to `other`, **NOT** `self`. For example:
+     ```won
+     fn choose(&self, other: &str) -> &str:
+         other    # Prov = {other}; caller binds lifetime to `other`
+     ```
+   - If the return provenance conditionally merges `self` and another reference parameter ($\text{Prov} = \{\text{self}, \text{other}\}$), the signature is ambiguous and **MUST** be rejected under Rule 4.
 
-By forbidding ambiguous multi-input-to-single-output reference returns in free functions, WON guarantees 100% sound lifetime verification without a single lifetime annotation in the language grammar.
+4. **Rule 4: Conservative Multi-Reference Rejection**  
+   If a free function (or method) takes multiple reference parameters and its return expression conditionally originates from more than one input reference parameter ($\text{Prov}(r_{\text{ret}}) = \{p_1, p_2, \dots\}$), WON **conservatively rejects the signature at compile time** (`WON-MEM-002: Ambiguous multi-reference provenance`).
+   
+   To resolve the ambiguity without named lifetime annotations, developers **MUST** choose one of three safe designs:
+   - **Alternative A (Return Owned Value)**: Return an owned `String` or `Vec[T]`.
+   - **Alternative B (Return Selection Index)**: Return a numeric index (`usize`) or enum discriminator into the slice/collection.
+   - **Alternative C (Caller-Allocated Destination)**: Pass an explicit caller-allocated destination reference (`fn select(a: &str, b: &str, out: &mut &str)`), binding the output lifetime unambiguously at the caller's scope.
+
+### 4.4 Formal Borrow Analysis Algorithm
+
+The borrow checker operates on the Control Flow Graph (CFG) in six sequential phases:
+
+```text
+Algorithm: Scope-Bounded Borrow and Provenance Checker
+Input: CFG of Function F = (BasicBlocks, Edges)
+Output: Valid CFG or Compile Diagnostic (WON-MEM-xxx)
+
+1. [Initialization Tracking]
+   For each local variable v:
+     State(v) in { Uninitialized, Initialized, Moved }
+   Track Moves: When non-Copy variable v is moved, mark State(v) = Moved.
+   If read(v) occurs while State(v) == Moved:
+     Emit WON-MEM-001 (Use of moved value).
+
+2. [Provenance Analysis]
+   For each reference expression r = &x or r = &mut x:
+     Prov(r) = { x } if x in (Params U Locals U Globals)
+     If r = deref(p): Prov(r) = Prov(p)
+   At merge points: Prov(r_out) = Union(Prov(r_in1), Prov(r_in2))
+
+3. [Live Borrow Sets]
+   Maintain at each program point:
+     ActiveShared: Set of (target, borrow_id, scope_end)
+     ActiveMutable: Set of (target, borrow_id, scope_end)
+   
+   On `b = &x`:
+     If x in ActiveMutable:
+       Emit WON-MEM-004 (Cannot borrow x immutably while mutably borrowed).
+     Add (x, b, Scope(b)) to ActiveShared.
+
+   On `b = &mut x`:
+     If x in ActiveShared or x in ActiveMutable:
+       Emit WON-MEM-005 (Cannot borrow x mutably while borrowed).
+     Add (x, b, Scope(b)) to ActiveMutable.
+
+4. [Mutation Invalidation]
+   On write/assignment to x:
+     If x in ActiveShared or x in ActiveMutable:
+       Emit WON-MEM-006 (Cannot mutate x while borrowed).
+
+5. [Function Return Verification]
+   For return statement `return expr`:
+     If Type(expr) is reference `&T` or `&mut T`:
+       If Prov(expr) INTERSECT Locals != Empty:
+         Emit WON-MEM-003 (Escape of local stack reference).
+       If |Prov(expr) INTERSECT Params| > 1:
+         Emit WON-MEM-002 (Ambiguous multi-reference provenance).
+```
 
 ---
 
@@ -118,27 +189,48 @@ Complex data topologies (graphs, ASTs, observers) require non-exclusive or share
 
 ### 5.1 `Shared[T]` (Single-Threaded Reference Counting)
 - Provides shared ownership within a single thread.
-- Tracks strong and weak reference counts.
+- Tracks strong and weak reference counts (`Weak[T]` via `Shared::downgrade()`) to break cyclic graphs.
 - Non-atomic reference counting operations ensure near-zero CPU overhead.
 - Does not implement `Send` or `Sync`; rejected by the compiler if passed across thread boundaries.
 
 ### 5.2 `Arc[T]` (Atomic Thread-Safe Reference Counting)
-- Provides multi-threaded shared ownership.
-- Reference counts are updated using atomic CPU instructions (`lock xadd`).
+- Provides multi-threaded shared ownership with atomic reference counting.
 - Safe to transfer across task and thread boundaries (`Send + Sync` when `T: Send + Sync`).
+- Provides `Weak[T]` (`Arc::downgrade()`) for thread-safe cycle breaking.
 
 ### 5.3 Interior Mutability: `Mutex[T]` and `RwLock[T]`
 Shared references (`&Shared[T]` or `&Arc[T]`) are immutable. To mutate data behind a shared pointer, explicit synchronization primitives are required:
 ```won
-let shared_state = Arc::new(Mutex::new(Counter { count: 0 }))
+let shared_state = Arc::new(Mutex::new(Counter { count: 0i64 }))
 ```
 
 ### 5.4 `Arena[T]` (Region-Based Memory Management)
 For compilers, parsers, and game engines where thousands of small objects share a common lifecycle:
 - An `Arena[T]` allocates memory in contiguous blocks (chunks).
 - Individual object deallocations are no-ops.
-- When the entire `Arena` goes out of scope, all allocated memory is reclaimed in a single, high-speed OS deallocation.
-- Objects allocated within an arena share the arena's lifetime, eliminating per-node reference counting overhead.
+- When the entire `Arena` goes out of scope, all allocated chunk memory is reclaimed in a single, high-speed OS deallocation.
+- Objects allocated within an arena do **NOT** invoke individual `Drop` destructors by default unless explicitly allocated via `arena.alloc_with_drop(val)`.
+
+---
+
+## 6. Advanced Memory & Destruction Semantics
+
+### 6.1 Copy Behavior for Large Fixed-Size Arrays
+Types that implement `Copy` (including `[T; N]` where `T: Copy`) duplicate bits upon assignment. However, to prevent stack overflow from copying large fixed-size arrays:
+- Arrays where `size_of([T; N]) > 256` bytes trigger a compiler performance warning (`WON-PERF-001`) advising the developer to pass the array by immutable reference `&[T; N]` instead of copying by value.
+
+### 6.2 Partial Moves from Structs
+- If a struct implements the `Drop` trait, partial moves of its fields are **FORBIDDEN** (`WON-MEM-007: Cannot partially move from struct implementing Drop`).
+- If a struct does not implement `Drop`, individual non-`Copy` fields may be moved out. Once any field is moved, the remaining fields may still be read, but the parent struct cannot be moved or passed as a whole.
+
+### 6.3 Partial Initialization and Destruction
+If an error or panic occurs while constructing a struct or tuple, all fields that have already been evaluated and initialized are destroyed in reverse order of evaluation; uninitialized fields are untouched.
+
+### 6.4 Destructor Panic Safety (Double-Panic Abort)
+Destructors (`Drop::drop`) must be panic-free. If a destructor panics while the thread is already unwinding from an active panic or task failure, the runtime immediately terminates the process via `abort()` to prevent undefined behavior and cascading heap corruption.
+
+### 6.5 Foreign C ABI Panic Boundary
+A WON panic **MUST NOT** unwind across an `extern "C"` boundary. If a safe WON callback passed to a C library panics, the panic is caught at the foreign boundary and converted to a process abort or designated C error code.
 
 ---
 

@@ -114,7 +114,7 @@ TIR Program
   - `StackAlloc(dest: LocalID, type: TIRType)`: Reserves stack space for a local variable.
   - `Load(dest: RegID, ptr: RegID)`: Dereferences a pointer and loads a value.
   - `Store(ptr: RegID, val: RegID)`: Writes a value into a memory location.
-  - `GetElementPtr(dest: RegID, base: RegID, indices: [Operand])`: Computes a field or array element address without memory access.
+  - `ComputeAddress(dest: RegID, base: RegID, path: [PathElement])`: Computes the effective memory address of an aggregate field (`Field(ident)`) or indexed element (`Index(Operand)`) without performing a memory dereference. Unlike backend-leaky constructs (such as LLVM's `getelementptr`), `ComputeAddress` operates strictly on high-level, strongly typed TIR data structures and is backend-neutral across C11, LLVM, and QBE generators.
 - **Value & Compute Operations**:
   - `Unary(dest: RegID, op: UnaryOp, src: Operand)`
   - `Binary(dest: RegID, op: BinaryOp, left: Operand, right: Operand)`

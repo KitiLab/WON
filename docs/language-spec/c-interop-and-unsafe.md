@@ -37,7 +37,9 @@ System C headers are consumed using the `#import` directive:
 
 ## 3. Target-ABI-Aware C Type Mapping
 
-C types are mapped to concrete WON types according to the target platform ABI (e.g., LP64 for Linux/macOS x86_64 vs. LLP64 for Windows x64):
+> **ABI Provenance Requirement**: C type mappings and data alignments are **NOT hardcoded assumptions**. They are dynamically extracted from the active Clang target triple (`clang -dumpmachine`) and the semantic AST data layout string for the active compilation target.
+
+The table below summarizes standard mappings for standard x86_64 target ABIs (LP64 for Linux/macOS vs. LLP64 for Windows):
 
 | C Data Type | Linux / macOS x86_64 (LP64) | Windows x64 (LLP64) | Notes / Invariants |
 | :--- | :--- | :--- | :--- |
@@ -65,21 +67,48 @@ C types are mapped to concrete WON types according to the target platform ABI (e
 
 ---
 
-## 4. Ownership Semantics Across the C Boundary
+## 4. Ownership Semantics and Sidecar Binding Contracts
 
-C headers describe data types and calling conventions, but **do not encode memory ownership semantics**. The compiler cannot know whether a returned `char*` must be freed with `free()`, whether it references static memory, or whether an input pointer is retained.
+C headers describe data types and function prototypes, but **do not encode memory ownership semantics**. A raw C signature cannot distinguish whether a returned pointer must be freed with `free()`, whether it borrows static memory, or whether an input pointer is retained inside an internal data structure.
 
 ### 4.1 Default Safety Rule: Raw Pointers are Unmanaged
-By default, all pointers passed to or returned from imported C functions are treated as unmanaged raw pointers (`*const T` or `*mut T`). The compiler does not track their lifetimes or invoke destructors upon them.
+By default, all pointers passed to or returned from imported C functions are treated as unmanaged raw pointers (`*const T` or `*mut T`). The compiler does not track their lifetimes, cannot verify nullability, and does not invoke destructors upon them.
 
-### 4.2 Explicit FFI Binding Policies
-When constructing production bindings or safe wrappers:
-1. **Borrows into C**:
-   Safe WON arrays and strings can be temporarily passed as C pointers using explicit view conversions:
-   - `s.as_ptr()` produces `*const u8` valid for the duration of the containing expression.
-   - `buf.as_mut_ptr()` produces `*mut u8` valid for the duration of the containing expression.
-2. **Buffer Capacity Guards**:
-   Functions that write into caller-supplied destination buffers (e.g., `compress(dest, &destLen, src, srcLen)`) **MUST** ensure the destination buffer has sufficient allocated capacity (e.g., through `compressBound()`) before executing the call.
+### 4.2 Extensible Safe Binding Contracts (`.wonbind`)
+To generate safe, idiomatic WON wrappers around raw C libraries without modifying external C headers, WON specifies an extensible **Sidecar Binding Contract** format (`.wonbind` files or manifest contract directives):
+
+```won
+# Sidecar binding contract for zlib compression: bindings/zlib/zlib.wonbind
+@bind(header: "zlib.h", package: "zlib")
+contract:
+    fn compressBound(sourceLen: uLong) -> uLong:
+        @pure
+
+    fn compress(
+        dest: *mut Bytef,
+        destLen: *mut uLongf,
+        source: *const Bytef,
+        sourceLen: uLong
+    ) -> i32:
+        @out_buffer(target: dest, length_in_out: destLen, capacity_assert: compressBound(sourceLen))
+        @borrow(param: source, length: sourceLen)
+
+    fn deflateInit_(strm: *mut z_stream, level: i32, version: *const u8, stream_size: i32) -> i32:
+        @state_initializer(strm, destructor: "deflateEnd")
+```
+
+#### Supported Contract Declarations:
+1. `@owned(destructor = "c_free")`: Returned pointer ownership is transferred to the caller; WON generates an RAII wrapper invoking the specified release function upon drop.
+2. `@borrow(param = N)`: Returned pointer borrows from input parameter $N$.
+3. `@out_buffer(target, length_param, capacity_assert)`: Enforces buffer capacity verification prior to call execution.
+4. `@nullability(param = N, state = "non_null" | "nullable")`: Enforces compile-time null checks or maps to `Option[*mut T]`.
+5. `@retained`: Alerts the ownership checker that C retains a pointer beyond the call, preventing local stack deallocation.
+6. `@callback_lifetime("call" | "persistent")`: Binds callback function pointer lifetimes to the containing call or to an explicit deregistration handle.
+
+### 4.3 Division of Responsibilities
+- `@repr(C)`: Governs **data layout and alignment** matching the host C compiler.
+- `extern "C"`: Governs **calling conventions and symbol mangling**.
+- `unsafe:`: Mandatory boundary for all raw FFI invocations that lack certified safe contracts. Certified wrappers generated via `.wonbind` contracts expose safe WON functions.
 
 ---
 

@@ -32,9 +32,9 @@ Every value in WON has a single owning variable at any given point in execution.
 - **Non-Copy Types**: Heap-allocated structures (such as `Vec<T>`, `String`, file handles) move ownership upon assignment or passing by value. Accessing a moved variable generates a compile-time error:
 
 ```won
-let s1: String = String::from("Hello WON");
-let s2 = s1; // Ownership moves to s2
-// println(s1); // COMPILE ERROR: Use of moved value 's1'
+let s1: String = String::from("Hello WON")
+let s2 = s1 # Ownership moves to s2
+# println(s1) # COMPILE ERROR: Use of moved value 's1' (WON-MEM-001)
 ```
 
 ### 2.2 Lexical Borrowing Rules
@@ -44,37 +44,38 @@ Instead of transferring ownership, code may borrow access to a value:
 - **Exclusivity Invariant**: A value cannot be borrowed mutably while immutable borrows are active.
 
 ```won
-let mut numbers: Vec<i32> = Vec::new();
-numbers.push(1);
+var numbers: Vec[i32] = Vec::new()
+numbers.push(1)
 
-// Lexical immutable borrow
-{
-    let view: &Vec<i32> = &numbers;
-    println(view.len());
-    // numbers.push(2); // COMPILE ERROR: Cannot borrow 'numbers' mutably while borrowed immutably
-} // 'view' goes out of scope here
+# Lexical immutable borrow
+block:
+    let view: &Vec[i32] = &numbers
+    println(view.len())
+    # numbers.push(2) # COMPILE ERROR: Cannot borrow 'numbers' mutably while borrowed immutably
 
-numbers.push(2); // OK: Exclusive access restored
+numbers.push(2) # OK: Exclusive access restored
 ```
 
 ### 2.3 Elimination of Named Lifetime Annotations
 In Rust, returning a reference from a struct or linking the lifetime of a parameter to a return type requires explicit lifetime annotations: `fn select<'a>(x: &'a T, y: &'a T) -> &'a T`.
 
-WON avoids named lifetime parameters through principled defaults:
+WON avoids named lifetime parameters through principled defaults and compile-time Reference Provenance ($\text{Prov}(e)$):
 1. **No Reference Escape**: Safe functions cannot return references to locally allocated stack frames.
 2. **Borrow Propagation**: If a function takes a single reference parameter and returns a reference, the returned reference is implicitly bound to the lifetime of the input borrow.
 3. **Multi-Borrow Projections**: When multiple references are supplied to a function returning a reference, the function must either:
    - Return an owned value, or
-   - Return a `Shared<T>` pointer, or
-   - Accept an explicit output buffer parameter passed by mutable reference (`&mut Out`).
+   - Return a `Shared[T]` pointer, or
+   - Accept an explicit output buffer parameter passed by mutable reference (`&mut Out`), or
+   - Trigger conservative compile-time rejection (`WON-MEM-002`) requiring caller disambiguation.
 
-### 2.4 Explicit Shared Ownership (`Shared<T>`)
+### 2.4 Explicit Shared Ownership (`Shared[T]`)
 For dynamic data structures where ownership cannot be resolved statically at compile time (such as complex graph structures or shared caches), WON provides explicit reference-counted wrappers:
-- `Shared<T>`: Deterministic atomic/non-atomic reference counted wrapper.
+- `Shared[T]`: Deterministic non-atomic reference counted wrapper for single-threaded usage.
+- `Arc[T]`: Atomic reference counted wrapper for multi-threaded usage (`Send + Sync`).
 - Releases memory immediately when the reference count drops to zero.
 
 ### 2.5 Unsafe Escape Hatches
-When interacting with C libraries, operating system drivers, or ultra-low-level memory allocators, developers can use `unsafe { ... }` blocks to perform raw pointer manipulation (`*const T`, `*mut T`). Safe code cannot perform pointer arithmetic or raw pointer dereferencing.
+When interacting with C libraries, operating system drivers, or ultra-low-level memory allocators, developers can use `unsafe:` blocks to perform raw pointer manipulation (`*const T`, `*mut T`). Safe code cannot perform pointer arithmetic or raw pointer dereferencing.
 
 ---
 

@@ -25,10 +25,11 @@ To ensure the language specification suite is completely cohesive, rigorous, and
 
 ### 4. `Str` versus Owned Strings and String Views
 - **Audit Finding**: Conceptual confusion existed between string views, static literals, and heap-allocated resizable strings.
-- **Resolution**: Formally partitioned into three distinct types:
-  - `&str`: Borrowed view into UTF-8 bytes (fat pointer: pointer + length).
-  - `String`: Owned, heap-allocated, resizable UTF-8 string buffer (pointer + length + capacity).
-  - `Str`: Convenient type alias for `&str` when used as an immutable parameter type.
+- **Resolution**: Formally partitioned into a rigorous 3-tier string architecture:
+  - `str`: Dynamically Sized Type (DST) representing an unsized sequence of valid UTF-8 code units in memory. Never instantiated directly as a value.
+  - `&str`: Immutable borrowed view into a UTF-8 sequence (16-byte fat pointer: 8-byte pointer + 8-byte byte length).
+  - `String`: Owned, heap-allocated, resizable UTF-8 buffer (24 bytes: 8-byte pointer, 8-byte length, 8-byte capacity).
+  - `Str`: Convenient type alias for `&str` when used as an immutable function parameter type.
 
 ### 5. Copy versus Move Behavior
 - **Audit Finding**: Potential ambiguity regarding whether structs with mixed fields are copied or moved.
@@ -40,37 +41,41 @@ To ensure the language specification suite is completely cohesive, rigorous, and
   - `Shared[T]`: Single-threaded reference counting (non-atomic). Zero multi-threading overhead. Does not implement `Send` or `Sync`.
   - `Arc[T]`: Multi-threaded atomic reference counting. Thread-safe (`Send + Sync` when `T: Send + Sync`).
 
-### 7. Borrowing versus Returned References (No Lifetime Annotations)
-- **Audit Finding**: Claiming memory safety without Rust-style `'a` annotations could lead to unsound dangling references if not formally constrained.
-- **Resolution**: Formally bounded: Borrowed references cannot be stored in returned structs without explicit ownership (`Shared`/`Arc`). Single input references automatically propagate to return references. Ambiguous multi-input reference returns in free functions are rejected at compile time (`WON-MEM-002`) requiring explicit output destination parameters.
+### 7. Borrowing versus Returned References (Provenance Tracking Without Lifetime Annotations)
+- **Audit Finding**: Claiming memory safety without Rust-style `'a` annotations risked unsoundness if multiple input references could escape or if receiver provenance was assumed without proof.
+- **Resolution**: Formally grounded via Reference Provenance ($\text{Prov}(e)$):
+  - Provenance analysis tracks origins at compile time without surface syntax annotations.
+  - Single-reference input elision is verified against return expression provenance: $\text{Prov}(r_{\text{ret}}) \subseteq \{p\} \cup \{\text{static}\}$.
+  - Provenance-driven receiver rules: `&self` does not unconditionally bind return references if the return provenance actually points to another argument.
+  - Functions returning references with multiple input reference parameters without provable origin are conservatively rejected at compile time (`WON-MEM-002`), requiring callers to supply an explicit output reference or use owned types.
 
-### 8. Ownership versus C Memory Management
-- **Audit Finding**: C libraries do not communicate ownership, risking premature freeing or memory leaks.
-- **Resolution**: All imported C pointers are treated as unmanaged raw pointers (`*const T` or `*mut T`) by default. Passing WON buffers to C requires explicit `.as_ptr()` or `.as_mut_ptr()` views with mandatory capacity assertions before foreign invocations.
+### 8. Ownership versus C Memory Management & Sidecar Contracts
+- **Audit Finding**: C libraries do not communicate memory ownership, nullability, or buffer sizes, risking premature freeing or memory corruption.
+- **Resolution**: Raw C imports treat all pointers as unmanaged `*const T` or `*mut T` by default (`WON-SEC-001`). To enable safe, ergonomic interop without manual wrappers, WON specifies declarative sidecar safe binding contracts (`.wonbind`) that attach `@owned`, `@borrow`, `@out_buffer`, and `@nullability` contracts to foreign C declarations.
 
 ### 9. Async Operations versus Structured Concurrency
-- **Audit Finding**: Traditional async/await often permits detached, orphaned tasks that outlive parent scopes.
-- **Resolution**: Structured Concurrency via nursery scopes (`scope s:`) is the normative concurrency model. All spawned tasks (`s.spawn:`) must complete or be cancelled before the scope exits, completely eliminating dangling background threads.
+- **Audit Finding**: Traditional async/await often permits detached, orphaned tasks that outlive parent scopes, and early drafts claimed unverified "100% CPU utilization" guarantees.
+- **Resolution**: Structured Concurrency via nursery scopes (`scope s:`) is the normative concurrency model. Tasks are spawned via `s.spawn: Block`, returning typed `TaskHandle[T]` for cooperative cancellation and join semantics. Capture of stack references requires `T: Sync`. Blocking C system calls are offloaded to dedicated OS worker threads. Unhandled task failures aggregate into `AggregateTaskError`.
 
 ### 10. Error Propagation (`?`) versus Destruction (RAII)
-- **Audit Finding**: Error returns could bypass destructor drops if stack unwinding is not strictly defined.
-- **Resolution**: The `?` operator is defined as an immediate early return accompanied by deterministic LIFO destruction of all live stack variables in the enclosing scope before the error value is returned.
+- **Audit Finding**: Error returns could bypass destructor drops, and type conversion behavior was under-specified.
+- **Resolution**: The `?` operator performs type conversion via `From`/`Into` traits, conservatively rejecting ambiguous conversions (`WON-ERR-002`). Unwinding executes deterministic LIFO destruction of all initialized local stack bindings. Double panic during destruction triggers an immediate unrecoverable abort. Panics across C ABI boundaries are strictly trapped and contained.
 
 ### 11. Generics versus Monomorphization
 - **Audit Finding**: Risk of runtime dispatch overhead or virtual table bloat with generic functions.
-- **Resolution**: Generics are 100% monomorphized at compile time into concrete, specialized functions and structs at the TIR level, guaranteeing zero virtual dispatch penalty.
+- **Resolution**: Generics are monomorphized 100% at compile time into specialized TIR functions. Dynamic trait dispatch is strictly opt-in via explicit `dyn Trait` fat pointers.
 
 ### 12. Unsafe Boundaries versus Generated FFI Wrappers
 - **Audit Finding**: Question whether generated C bindings should automatically mark everything safe.
-- **Resolution**: All foreign C functions remain classified as `unsafe` by default (`WON-SEC-001`). Safe ergonomic wrappers can be written in WON or generated with explicit buffer safety invariants.
+- **Resolution**: All foreign C functions remain classified as `unsafe` by default (`WON-SEC-001`). Safe ergonomic wrappers can be written in WON or generated via `.wonbind` contracts with explicit buffer safety invariants.
 
 ### 13. Self-Hosting versus Minimum Standard-Library Requirements
 - **Audit Finding**: Self-hosting could prematurely stall if it required the entire finished standard library.
-- **Resolution**: Pragmatic bootstrap matrix: Only 14 core compiler prerequisites (strings, vectors, maps, AST structs/enums, recursion, basic I/O, error propagation, process execution) are required for Stage 1 self-hosting. Advanced concurrency and rich ecosystem libraries are deferred to Phase 3.
+- **Resolution**: Pragmatic bootstrap matrix: Only 14 core compiler prerequisites (strings, vectors, maps, AST structs/enums, recursion, basic I/O, error propagation, process execution) are required for Stage 1 self-hosting. Convergence is mathematically defined as $\text{Emit}(\text{wonc1}, \text{Source}) \equiv \text{Emit}(\text{wonc2}, \text{Source})$.
 
 ### 14. C Backend versus Future Native Backend
-- **Audit Finding**: Risk of coupling the language definition to C generation quirks.
-- **Resolution**: Architectural independence: Typed Intermediate Representation (TIR) represents pure WON semantics. The C11 backend is merely one code generation target (`C11Emitter`), preserving an identical interface for future LLVM and QBE backends.
+- **Audit Finding**: Risk of coupling the language definition to C generation quirks or LLVM-specific leaky abstractions (e.g. `getelementptr`).
+- **Resolution**: Architectural independence: Typed Intermediate Representation (TIR) represents pure WON semantics using neutral operations like `ComputeAddress(dest, base, path)`. The C11 backend is merely one code generation target (`C11Emitter`), preserving an identical interface for future LLVM and QBE backends.
 
 ---
 
@@ -80,6 +85,8 @@ To ensure the language specification suite is completely cohesive, rigorous, and
 | :--- | :--- |
 | **AOT Compilation** | Ahead-of-Time compilation directly to native machine code prior to execution. |
 | **Borrowing** | Temporarily accessing a value via an immutable (`&T`) or mutable (`&mut T`) reference without taking ownership. |
+| **ComputeAddress** | Abstract typed memory address calculation in TIR representing aggregate field offsets or array indexing without performing a dereference. |
+| **Cooperative Cancellation** | Task termination mechanism where tasks observe cancellation signals via tokens or yield points, permitting orderly local resource cleanup. |
 | **Copy Semantics** | Implicit duplication of a value's bits during assignment without invalidating the source variable. Restricted to simple, stack-only types. |
 | **DEDENT** | A synthetic token emitted by the lexer when indentation level decreases to match a previous scope on the indentation stack. |
 | **Fat Pointer** | A two-word runtime structure consisting of a data pointer paired with auxiliary metadata (e.g., length for `&[T]`, or vtable pointer for `dyn Trait`). |
@@ -88,9 +95,12 @@ To ensure the language specification suite is completely cohesive, rigorous, and
 | **Move Semantics** | The transfer of ownership of a value from one variable or scope to another, immediately invalidating the source variable. |
 | **Nursery Scope** | A lexical block (`scope s:`) that bounds the lifetime of all concurrently spawned child tasks. |
 | **Ownership-Lite** | Compile-time memory safety enforcing single ownership and borrowing invariants without requiring user-annotated lifetime parameters (`'a`). |
+| **Provenance** | The static set of origin parameters or memory regions that can yield a given reference value ($\text{Prov}(e)$). |
 | **RAII** | Resource Acquisition Is Initialization: deterministic destruction of resources when the owning variable goes out of scope. |
+| **Sidecar Contract** | Declarative metadata (`.wonbind`) specifying memory ownership, capacity relationships, and nullability contracts for C header declarations. |
 | **Structured Concurrency**| Concurrency paradigm where concurrent tasks are strictly nested inside lexical scopes, ensuring no task outlives its parent. |
 | **TIR** | Typed Intermediate Representation: a language-independent, control-flow-graph-based intermediate language used for optimization and code generation. |
+| **Unsized Type (DST)**| A Dynamically Sized Type whose byte size is known only at runtime through accompanying metadata (e.g., `str`, `[T]`). |
 | **Zero-GIL** | Multi-threaded execution environment operating without a Global Interpreter Lock, fully utilizing all available CPU hardware cores. |
 
 ---

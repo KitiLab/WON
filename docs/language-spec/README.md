@@ -49,6 +49,8 @@ The WON language specification is organized into modular topic specifications:
 | **[compiler-and-ir-requirements.md](compiler-and-ir-requirements.md)** | Pipeline architecture, Typed Intermediate Representation (TIR), and multi-backend design | `SPECIFIED` |
 | **[safety-and-security-semantics.md](safety-and-security-semantics.md)** | Safe vs unsafe boundaries, compile-time capability analysis, and OS sandboxing (Landlock/Seatbelt) | `SPECIFIED` |
 | **[versioning-and-compatibility.md](versioning-and-compatibility.md)** | Language editions, ABI/API stability, compiler release lifecycle, and deprecation protocols | `SPECIFIED` |
+| **[reconciliation-and-glossary.md](reconciliation-and-glossary.md)** | Cross-document consistency review, architectural glossary, and design decision register | `SPECIFIED` |
+| **[phase-1a.1-semantic-closure.md](phase-1a.1-semantic-closure.md)** | Semantic closure audit log, defect resolutions, and formal soundness models | `SPECIFIED` |
 
 ---
 

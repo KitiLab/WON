@@ -69,12 +69,18 @@ Given an expression `expr?` evaluated inside a function returning `Result[U, Tar
 1. `expr` is evaluated to a value $V$ of type `Result[T, SourceError]`.
 2. If $V$ is `Result::Ok(val)`, the expression yields `val` and execution continues.
 3. If $V$ is `Result::Err(err)`:
-   - `err` is converted to `TargetError` via the `From[SourceError]` conversion trait.
-   - All stack variables currently live in the enclosing function are deterministically dropped in reverse declaration order.
+   - **Type Conversion Resolution**:
+     - If `TargetError` and `SourceError` are identical, `err` is passed directly.
+     - Else if `TargetError` implements `From[SourceError]`, the compiler automatically inserts `TargetError::from(err)`.
+     - If multiple ambiguous conversion implementations exist, compilation fails with `WON-ERR-002: Ambiguous error conversion`.
+     - If no valid conversion implementation exists, compilation fails with `WON-ERR-001: Mismatched error type`.
+   - **Deterministic Drop Execution**:
+     - All stack variables currently live in the enclosing block scopes are dropped in strict reverse declaration order (LIFO).
+     - If `expr?` failed during a struct or tuple literal initialization, fields that were already evaluated and initialized prior to the failing expression are dropped in reverse evaluation order; uninitialized fields are untouched.
    - The function immediately returns `Result::Err(converted_err)`.
 
 ```won
-fn parse_and_validate(raw_text: str) -> Result[Settings, AppError]:
+fn parse_and_validate(raw_text: &str) -> Result[Settings, AppError]:
     # If read_tokens() returns Err, it drops local variables and returns early.
     let tokens = lex_tokens(raw_text)?
     let ast = parse_ast(&tokens)?
@@ -85,7 +91,7 @@ fn parse_and_validate(raw_text: str) -> Result[Settings, AppError]:
 ### 3.2 Mechanics on `Option[T]`
 The `?` operator can also be used inside functions that return `Option[U]`:
 - If the evaluated expression is `Option::Some(val)`, it unwraps `val`.
-- If the evaluated expression is `Option::None`, local resources are dropped, and the function immediately returns `Option::None`.
+- If the evaluated expression is `Option::None`, live local resources are dropped in LIFO order, and the function immediately returns `Option::None`.
 
 ---
 
@@ -104,21 +110,21 @@ When `?` encounters an error type that does not match the enclosing function's r
 ```won
 enum AppError:
     Io(IoError)
-    Parse(str)
+    Parse(String)
     Compression(i32)
 
 impl From[IoError] for AppError:
     fn from(err: IoError) -> AppError:
         AppError::Io(err)
 
-impl From[str] for AppError:
-    fn from(msg: str) -> AppError:
-        AppError::Parse(msg)
+impl From[&str] for AppError:
+    fn from(msg: &str) -> AppError:
+        AppError::Parse(String::from(msg))
 
-# Both IoError and str can now be propagated with `?` directly into AppError!
-fn execute_workflow(filepath: str) -> Result[Data, AppError]:
+# Both IoError and &str can now be propagated with `?` directly into AppError!
+fn execute_workflow(filepath: &str) -> Result[Data, AppError]:
     let file = open_file(filepath)?        # IoError automatically converted
-    let parsed = parse_contents(&file)?   # str error automatically converted
+    let parsed = parse_contents(&file)?   # &str error automatically converted
     Result::Ok(parsed)
 ```
 
@@ -137,5 +143,15 @@ Not all errors are recoverable. A program **MUST NOT** attempt to recover from i
 
 ### 5.2 Panic Strategy Configuration
 The compiler provides two build strategies:
-- `--panic=abort` (Default for performance-critical systems): Panics immediately terminate the process via a hardware trap or `abort()`, eliminating stack-unwinding metadata.
+- `--panic=abort` (Default for systems programming & performance): Panics immediately terminate the process via a hardware trap or `abort()`, completely eliminating stack-unwinding tables.
 - `--panic=unwind`: Panics walk the stack and invoke `Drop::drop` on live stack objects before terminating or catching at a nursery boundary.
+
+### 5.3 Destructor Double-Panic Abort
+Destructors (`Drop::drop`) must be panic-free. If a destructor panics while the thread is already unwinding an active panic or task failure, the runtime immediately terminates the process via `abort()` with the diagnostic message:
+```text
+fatal: panic in destructor during unwinding (double-panic abort)
+```
+This rule guarantees that resource cleanup failures cannot cascade into undefined behavior or partial state corruption.
+
+### 5.4 Foreign C ABI Boundary Containment
+Panics **MUST NOT** unwind across an `extern "C"` boundary into foreign C stack frames. If a safe WON callback passed to a C library triggers an unhandled panic, the runtime intercepts the panic at the boundary and terminates the process cleanly via `abort()`.
