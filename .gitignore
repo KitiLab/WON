@@ -19,7 +19,10 @@
 
 # Go artifacts
 /compiler/bin/
+/compiler/poc/bin/
 /cli/bin/
+benchmarks/phase0/*_bench
+examples/*_bin
 
 # Rust artifacts (if tools/subcomponents use Rust)
 /target/

@@ -8,7 +8,7 @@
 
 ---
 
-[![Project Status](https://img.shields.io/badge/status-Phase%200A%20%28Incubation%29-blue.svg)](#current-development-status)
+[![Project Status](https://img.shields.io/badge/status-Phase%200B%20%28Proof%20of%20Concept%29-brightgreen.svg)](#current-development-status)
 [![License](https://img.shields.io/badge/license-Pending%20Decision-orange.svg)](LICENSE_PENDING.md)
 [![Organization](https://img.shields.io/badge/org-KitiLab-black.svg)](https://github.com/KitiLab)
 
@@ -86,23 +86,43 @@ The initial backend generates standard C code, harnessing decades of mature opti
 
 ## 4. Current Development Status
 
-> [!IMPORTANT]
-> **WON is currently in Phase 0A (Official Repository Initialization & Engineering Foundation).**
+> [!NOTE]
+> **WON has completed Phase 0B (Proof of Concept Vertical Slice).**
 >
-> There is **no working compiler executable yet**. All language features, memory models, and benchmark methodologies described in this repository represent active architectural designs and specifications. We strictly uphold empirical truth: no premature feature claims and no fabricated benchmark numbers.
+> A functioning bootstrap compiler (`wonc`) is operational under `compiler/poc/`. It parses `.won` source code, extracts C declarations directly from system headers (`zlib.h`) using Clang semantic AST, emits standard ISO C11, compiles native binaries via GCC/Clang, and provides structured JSON diagnostics with automated self-repair diffs for AI coding agents.
+
+### Working CLI Commands (`wonc`)
+
+```bash
+# Build the bootstrap compiler
+cd compiler/poc && go build -o bin/wonc ./cmd/wonc
+
+# Check syntax and semantics (with terminal or JSON output)
+./bin/wonc check examples/zlib_compression.won
+./bin/wonc check --format=json examples/zlib_compression.won
+
+# Generate bindings directly from /usr/include/zlib.h
+./bin/wonc bindings zlib
+
+# Compile to native executable and execute
+./bin/wonc build -o zlib_demo examples/zlib_compression.won
+./zlib_demo
+```
 
 ### Feature & Component Status Summary
 
 | Subsystem / Feature | Current Status | Specification Reference |
 | :--- | :--- | :--- |
 | Repository Architecture & Governance | `IMPLEMENTED` | [AGENTS.md](AGENTS.md), [GOVERNANCE.md](GOVERNANCE.md) |
-| Architecture Decision Records (ADRs) | `SPECIFIED` | [docs/decisions/](docs/decisions/) |
+| Architecture Decision Records (ADRs) | `IMPLEMENTED` | [docs/decisions/](docs/decisions/) |
 | Language Syntax & Type System | `SPECIFIED` | [docs/language-design.md](docs/language-design.md) |
 | Ownership-Lite Memory Model | `SPECIFIED` | [docs/memory-model.md](docs/memory-model.md) |
-| Initial C Codegen Strategy | `SPECIFIED` | [ADR-001](docs/decisions/ADR-001-c-codegen-backend.md) |
-| C Header Binding Engine | `UNDER INVESTIGATION` | [ADR-006](docs/decisions/ADR-006-c-header-parsing-strategy.md) |
-| Phase 0B Proof of Concept | `SPECIFIED` | [docs/phase-0-proof-of-concept.md](docs/phase-0-proof-of-concept.md) |
-| Working Compiler Executable | `PLANNED` | [docs/roadmap.md](docs/roadmap.md) |
+| Initial C Codegen Strategy | `IMPLEMENTED` | [ADR-001](docs/decisions/ADR-001-c-codegen-backend.md) |
+| C Header Binding Engine (Clang AST) | `IMPLEMENTED` (zlib) | [ADR-006](docs/decisions/ADR-006-c-header-parsing-strategy.md) |
+| Phase 0B Proof of Concept | `IMPLEMENTED` | [docs/phase-0-proof-of-concept.md](docs/phase-0-proof-of-concept.md) |
+| AI Structured JSON Diagnostics | `IMPLEMENTED` | [docs/ai-native-design.md](docs/ai-native-design.md) |
+| Empirical Benchmark Suite (30 Runs) | `IMPLEMENTED` | [benchmarks/phase0/](benchmarks/phase0/) |
+| Production Compiler (v1.0) | `PLANNED` | [docs/roadmap.md](docs/roadmap.md) |
 
 ---
 

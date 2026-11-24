@@ -1,0 +1,67 @@
+{
+  "header_path": "/usr/include/zlib.h",
+  "header_sha256": "8bc935aeb8909d05fe58f9286a0fe2c674a41638c374786ee888485ab5ff4409",
+  "target_triple": "x86_64-redhat-linux-gnu",
+  "clang_version": "clang version 23.1.5 (Fedora 23.1.5-2.fc45)",
+  "typedefs": {
+    "Byte": {
+      "name": "Byte",
+      "target_type": "unsigned char"
+    },
+    "Bytef": {
+      "name": "Bytef",
+      "target_type": "Byte"
+    },
+    "uInt": {
+      "name": "uInt",
+      "target_type": "unsigned int"
+    },
+    "uLong": {
+      "name": "uLong",
+      "target_type": "unsigned long"
+    },
+    "uLongf": {
+      "name": "uLongf",
+      "target_type": "uLong"
+    }
+  },
+  "functions": {
+    "compress": {
+      "name": "compress",
+      "qual_type": "int (unsigned char *, unsigned long *, const unsigned char *, unsigned long)",
+      "return_type": "int",
+      "param_types": [
+        "unsigned char *",
+        "unsigned long *",
+        "const unsigned char *",
+        "unsigned long"
+      ]
+    },
+    "compressBound": {
+      "name": "compressBound",
+      "qual_type": "unsigned long (unsigned long)",
+      "return_type": "unsigned long",
+      "param_types": [
+        "unsigned long"
+      ]
+    },
+    "uncompress": {
+      "name": "uncompress",
+      "qual_type": "int (unsigned char *, unsigned long *, const unsigned char *, unsigned long)",
+      "return_type": "int",
+      "param_types": [
+        "unsigned char *",
+        "unsigned long *",
+        "const unsigned char *",
+        "unsigned long"
+      ]
+    },
+    "zlibVersion": {
+      "name": "zlibVersion",
+      "qual_type": "const char *(void)",
+      "return_type": "const char *",
+      "param_types": []
+    }
+  },
+  "generated_at_unix": 0
+}

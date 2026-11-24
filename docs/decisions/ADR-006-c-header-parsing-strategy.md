@@ -2,37 +2,31 @@
 
 ## Metadata
 - **Decision ID**: ADR-006
-- **Title**: C Header Parsing Strategy Evaluation
-- **Status**: PROPOSED / UNDER EVALUATION
+- **Title**: C Header Parsing Strategy for Phase 0B
+- **Status**: ACCEPTED (Phase 0B Implementation)
 - **Date**: 2026-11-24
 - **Author**: KitiLab Engineering
 
 ## Context
-WON's capability to import C libraries directly (`#import <zlib.h>`) requires parsing C header files to extract macro definitions, struct layouts, typedefs, and function signatures. C headers feature complex macro expansions, platform-specific compiler builtins (`__attribute__`), and preprocessor directives.
+WON requires automatic discovery of C declarations directly from system headers (`#import <zlib.h>`). The parser must handle complex preprocessor macros, type definitions (`Bytef`, `uLong`), and target platform ABIs without fragile regular expressions or hardcoded mock signatures.
 
-Selecting the right parsing approach determines compiler dependencies, compilation latency, and parsing accuracy.
-
-## Considered Candidates
-
-### 1. Embedded libclang (LLVM)
-- **Pros**: 100% standard C/C++ compliance; flawlessly handles complex macros, GCC extensions, and architecture-specific type sizes.
-- **Cons**: Substantial dynamic library dependency (`libclang.so`); slower cold-start parsing times; cross-compilation complexity.
-
-### 2. Lightweight Custom C Header Parser
-- **Pros**: Zero external dependencies; extremely fast parsing speeds; easily embedded directly in the WON compiler binary; straightforward for AI agents to audit.
-- **Cons**: Difficult to achieve 100% GCC/Clang header macro compatibility across arbitrary glibc system headers.
-
-### 3. Tree-Sitter C Grammar
-- **Pros**: Fast, robust incremental parsing; well-tested C grammar.
-- **Cons**: Does not perform macro preprocessor expansion or semantic type resolution natively; requires a separate preprocessor pass.
-
-### 4. Native Preprocessed Header Analysis (Hybrid)
-- **Pros**: Invokes host C compiler in preprocessor-only mode (`clang -E` or `gcc -E`) to expand macros, then parses the clean preprocessed tokens using a focused C parser.
-- **Cons**: Relies on host C preprocessor.
-
-## Current Recommendation
-For the **Phase 0B proof-of-concept**, we will evaluate a targeted, focused header extraction for `zlib.h` (which has a clean, standard header). The full evaluation between libclang and the hybrid preprocessor strategy will be completed before Phase 1.
+## Considered Alternatives
+1. **Regular Expression / Heuristic Text Parsing**:
+   - *Rejected*: Inaccurate, fails on multiline declarations, cannot resolve typedefs, breaks on macro attributes.
+2. **Custom Complete C Preprocessor and Parser**:
+   - *Rejected for Phase 0B*: Prohibitive complexity for a vertical slice; high risk of non-standard behavior on glibc/system headers.
+3. **Clang Semantic JSON AST Dump (`clang -Xclang -ast-dump=json`) (Selected)**:
+   - Leverages the host's existing, verified Clang installation (`clang version 23.1.5`).
+   - Produces 100% compliant, fully expanded semantic ASTs containing exact return types, parameter types, qualifiers (`const`), and canonical typedef resolutions.
+   - Outputs machine-readable JSON directly inspectable by Go.
 
 ## Decision
-**NOT YET DECIDED.**
-Final architectural decision will be made following Phase 0B empirical validation.
+**WON adopts the Clang Semantic AST strategy for Phase 0B C header binding generation.**
+
+The generator invokes `clang -Xclang -ast-dump=json -fsyntax-only <header.h>`, extracts matching `FunctionDecl` and `TypedefDecl` nodes, and emits verified binding metadata with header SHA-256 and target triple provenance.
+
+## Consequences
+- **Positive**: Absolute ABI precision; zero manual binding boilerplate; automatic typedef resolution (`Bytef` -> `unsigned char`, `uLong` -> `unsigned long`).
+- **Negative**: Requires Clang installed on the compilation host.
+- **Impact on Pillars**:
+  - *C Interoperability*: Delivers true, automated "Any C library" header-first integration.

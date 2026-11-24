@@ -1,0 +1,28 @@
+#import <zlib.h>
+
+fn main() -> i32 {
+    let message = "WON AI-Native Compiler Self-Repair Demonstration";
+    let input_bytes = message.as_bytes();
+    let input_len: u64 = 48;
+
+    // 故意引入缺陷：compressed_buf 应为可变变量，但此处声明为不可变 (let)
+    let compressed_buf: [u8; 256] = [0; 256];
+    let mut compressed_len: u64 = 256;
+
+    // 在借用 &mut compressed_buf 时将触发 WON-MUT-001 诊断错误
+    let compress_status = unsafe {
+        zlib::compress(
+            compressed_buf.as_mut_ptr(),
+            &mut compressed_len,
+            input_bytes.as_ptr(),
+            input_len
+        )
+    };
+
+    if compress_status != 0 {
+        return 1;
+    }
+
+    println("Repaired code executed successfully!");
+    return 0;
+}

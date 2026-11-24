@@ -76,3 +76,13 @@ jobs:
               sys.exit(1)
           print("All internal markdown links verified successfully.")
           '
+
+      - name: Set up Go Toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Run Go Unit & Integration Tests
+        run: |
+          cd compiler/poc
+          go test -v ./...
