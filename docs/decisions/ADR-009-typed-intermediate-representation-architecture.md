@@ -3,7 +3,7 @@
 ## Metadata
 - **Decision ID**: ADR-009
 - **Title**: Typed Intermediate Representation (TIR) Architecture
-- **Status**: PROPOSED (Requires KitiLab Owner Approval)
+- **Status**: ACCEPTED (KitiLab Owner Approval: November 24, 2026 — see [OWNER-APPROVAL-2026-11-24.md](OWNER-APPROVAL-2026-11-24.md))
 - **Date**: 2026-11-24
 - **Author**: KitiLab Engineering
 
@@ -26,4 +26,7 @@ Phase 0 lowered the AST directly to C source code. While effective for a proof o
 ## Consequences
 - **Positive**: Clean separation between language frontend and code generation backends; enables rigorous optimization passes (DCE, bounds check elimination, inlining).
 - **Negative**: Adds a translation pass between AST and codegen.
-- **Owner Approval**: REQUIRED before implementation in Phase 2.
+- **Owner Approval Clarifications (2026-11-24)**:
+  - The C11 backend remains the initial code-generation target; LLVM and QBE remain future backend evaluations.
+  - TIR details may evolve during implementation; no claim of completed TIR implementation is permitted prior to Phase 2 verification.
+  - TIR implementation is out of scope for Phase 1B.

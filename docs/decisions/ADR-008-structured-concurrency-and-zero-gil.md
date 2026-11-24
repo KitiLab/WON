@@ -3,7 +3,7 @@
 ## Metadata
 - **Decision ID**: ADR-008
 - **Title**: Structured Concurrency and Zero-GIL Concurrency Model
-- **Status**: PROPOSED (Requires KitiLab Owner Approval)
+- **Status**: ACCEPTED (KitiLab Owner Approval: November 24, 2026 — see [OWNER-APPROVAL-2026-11-24.md](OWNER-APPROVAL-2026-11-24.md))
 - **Date**: 2026-11-24
 - **Author**: KitiLab Engineering
 
@@ -26,5 +26,9 @@ Concurrent programming in systems software is notoriously prone to data races, d
 
 ## Consequences
 - **Positive**: Eliminates background thread leaks; enables zero-cost borrowing of stack variables into child tasks; provides clean cooperative cancellation.
-- **Negative**: Requires an M:N work-stealing runtime scheduler when concurrency features are linked.
-- **Owner Approval**: REQUIRED before implementation in Phase 3.
+- **Negative**: Requires runtime support when concurrency features are linked.
+- **Owner Approval Clarifications (2026-11-24)**:
+  - An M:N scheduler and work stealing are implementation strategies, not mandatory permanent language guarantees.
+  - WON does not promise 100% CPU utilization.
+  - Cross-task borrowing is strictly subject to lifetime, provenance, and `Sync` verification.
+  - Runtime implementation is deferred to Phase 3 and is out of scope for Phase 1B.

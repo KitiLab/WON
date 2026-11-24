@@ -3,7 +3,7 @@
 ## Metadata
 - **Decision ID**: ADR-007
 - **Title**: Formal Syntax and Indentation-Based Grammar Strategy
-- **Status**: PROPOSED (Requires KitiLab Owner Approval)
+- **Status**: ACCEPTED (KitiLab Owner Approval: November 24, 2026 — see [OWNER-APPROVAL-2026-11-24.md](OWNER-APPROVAL-2026-11-24.md))
 - **Date**: 2026-11-24
 - **Author**: KitiLab Engineering
 
@@ -31,4 +31,6 @@ The Phase 0 bootstrap compiler retains its brace parser as a provisional tool, w
 ## Consequences
 - **Positive**: Achieves the expressive, clean aesthetic envisioned in the master product specification.
 - **Negative**: Requires upgrading the bootstrap parser in Phase 1B.
-- **Owner Approval**: REQUIRED before merging Phase 1B compiler implementation.
+- **Owner Approval Clarifications (2026-11-24)**:
+  - Python-inspired indentation blocks with colon (`:`) block introducers, strict 4-space indentation, synthetic `INDENT`/`DEDENT`/`NEWLINE` tokens, `let` (immutable), and `var` (mutable) are accepted as canonical syntax.
+  - Interchangeable brace-delimited statement block syntax is rejected; braces remain valid strictly for expressions (struct literals, interpolation, sets/maps). Phase 0 brace fixtures must be migrated to canonical syntax.

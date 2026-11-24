@@ -269,10 +269,10 @@ The table below records the formal governance status of all canonical Architectu
 | **ADR-004** | AI-Independent Compiler Query Interface | Diagnostics | Neutral JSON-RPC and CLI diagnostic stream without vendor lock-in | `ACCEPTED` (Phase 0A) |
 | **ADR-005** | Public Benchmark Methodology and Integrity Rules | Governance | Fair, transparent, reproducible benchmarks against native baselines | `ACCEPTED` (Phase 0A) |
 | **ADR-006** | C Header Parsing Strategy | Toolchain | Direct `#import <header.h>`, libclang AST discovery and caching | `ACCEPTED` (Phase 0B.2) |
-| **ADR-007** | Formal Syntax and Indentation-Based Grammar | Grammar | Python-inspired `:`, 4-space indent, `let`/`var` | `PROPOSED` (Awaiting Owner Review) |
-| **ADR-008** | Structured Concurrency and Zero-GIL | Runtime | Lexical nursery scopes (`scope`/`spawn`), work-stealing, parallel tasks | `PROPOSED` (Awaiting Owner Review) |
-| **ADR-009** | Typed Intermediate Representation (TIR) Architecture | Compiler | Basic-block CFG TIR with `ComputeAddress`, multi-backend abstraction | `PROPOSED` (Awaiting Owner Review) |
-| **ADR-010** | Compiler Self-Hosting and Bootstrap Pipeline | Toolchain | 4-stage bootstrap pipeline, Go retirement criteria | `PROPOSED` (Awaiting Owner Review) |
+| **ADR-007** | Formal Syntax and Indentation-Based Grammar | Grammar | Python-inspired `:`, 4-space indent, `let`/`var` | `ACCEPTED` (Owner Approval: 2026-11-24) |
+| **ADR-008** | Structured Concurrency and Zero-GIL | Runtime | Lexical nursery scopes (`scope`/`spawn`), `Send`/`Sync`, Zero-GIL | `ACCEPTED` (Owner Approval: 2026-11-24) |
+| **ADR-009** | Typed Intermediate Representation (TIR) Architecture | Compiler | Basic-block CFG TIR with `ComputeAddress`, multi-backend abstraction | `ACCEPTED` (Owner Approval: 2026-11-24) |
+| **ADR-010** | Compiler Self-Hosting and Bootstrap Pipeline | Toolchain | 4-stage bootstrap pipeline, Go retirement criteria | `ACCEPTED` (Owner Approval: 2026-11-24) |
 
 ---
 

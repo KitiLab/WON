@@ -3,7 +3,7 @@
 ## Metadata
 - **Decision ID**: ADR-010
 - **Title**: Compiler Self-Hosting and Multi-Stage Bootstrap Pipeline
-- **Status**: PROPOSED (Requires KitiLab Owner Approval)
+- **Status**: ACCEPTED (KitiLab Owner Approval: November 24, 2026 — see [OWNER-APPROVAL-2026-11-24.md](OWNER-APPROVAL-2026-11-24.md))
 - **Date**: 2026-11-24
 - **Author**: KitiLab Engineering
 
@@ -27,4 +27,7 @@ Per ADR-002, Go was selected as the temporary bootstrap language for Phase 0. Ho
 ## Consequences
 - **Positive**: Delivers true language autonomy; dogfoods WON for large-scale systems software; removes Go from the final toolchain.
 - **Negative**: Requires maintaining the Go bootstrap compiler until self-hosting convergence is proven.
-- **Owner Approval**: REQUIRED before commencing Phase 2 compiler implementation.
+- **Owner Approval Clarifications (2026-11-24)**:
+  - Go must eventually cease to be a mandatory dependency of normal development workflows, while `wonc0` remains preserved until all 10 retirement criteria are satisfied.
+  - The first self-hosted WON compiler may continue emitting ISO C11; retiring Go and retiring GCC/Clang are separate milestones.
+  - Native backend development remains a future milestone.
