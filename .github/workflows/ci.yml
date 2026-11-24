@@ -1,0 +1,78 @@
+name: Repository Foundation CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-foundation:
+    name: Validate Structure & Documentation Integrity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify Core Governance Files
+        run: |
+          for file in README.md LICENSE_PENDING.md CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md GOVERNANCE.md AGENTS.md; do
+            if [ ! -f "$file" ]; then
+              echo "Error: Required file $file is missing"
+              exit 1
+            fi
+          done
+          echo "All core governance files verified."
+
+      - name: Verify Architecture Documentation
+        run: |
+          for doc in \
+            docs/vision.md \
+            docs/roadmap.md \
+            docs/language-design.md \
+            docs/compiler-architecture.md \
+            docs/performance-principles.md \
+            docs/memory-model.md \
+            docs/interoperability.md \
+            docs/ai-native-design.md \
+            docs/security-model.md \
+            docs/benchmarking.md \
+            docs/phase-0-proof-of-concept.md \
+            docs/decisions/ADR-000-template.md \
+            docs/decisions/ADR-001-c-codegen-backend.md \
+            docs/decisions/ADR-002-compiler-implementation-language.md \
+            docs/decisions/ADR-003-ownership-lite-memory-model.md \
+            docs/decisions/ADR-004-ai-independent-compiler-query-interface.md \
+            docs/decisions/ADR-005-public-benchmark-methodology.md \
+            docs/decisions/ADR-006-c-header-parsing-strategy.md; do
+            if [ ! -f "$doc" ]; then
+              echo "Error: Required documentation $doc is missing"
+              exit 1
+            fi
+          done
+          echo "All architectural documents verified."
+
+      - name: Verify Relative Markdown Links
+        run: |
+          python3 -c '
+          import os, re, sys
+          pattern = re.compile(r"\[.*?\]\((?!https?://|mailto:|#)(.*?)\)")
+          errors = 0
+          for root, _, files in os.walk("."):
+              if ".git" in root: continue
+              for f in files:
+                  if f.endswith(".md"):
+                      path = os.path.join(root, f)
+                      with open(path, "r", encoding="utf-8") as handle:
+                          content = handle.read()
+                      for link in pattern.findall(content):
+                          clean_link = link.split("#")[0]
+                          if not clean_link: continue
+                          target = os.path.normpath(os.path.join(root, clean_link))
+                          if not os.path.exists(target):
+                              print(f"Broken link in {path}: {link} -> {target}")
+                              errors += 1
+          if errors > 0:
+              sys.exit(1)
+          print("All internal markdown links verified successfully.")
+          '

@@ -1,0 +1,49 @@
+# Binaries and build outputs
+/bin/
+/build/
+/dist/
+/target/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Intermediate compiler artifacts
+*.c.out
+*.won.c
+*.won.h
+/out/
+/tmp/
+
+# Go artifacts
+/compiler/bin/
+/cli/bin/
+
+# Rust artifacts (if tools/subcomponents use Rust)
+/target/
+
+# Zig artifacts
+.zig-cache/
+zig-out/
+
+# IDE and Editor configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test and coverage outputs
+/coverage/
+*.profraw
+*.profdata
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key

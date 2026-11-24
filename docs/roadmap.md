@@ -1,0 +1,90 @@
+# WON Development Roadmap
+
+> **Document Status**: `SPECIFIED`  
+> **Author**: KitiLab Engineering  
+> **Last Updated**: Phase 0A
+
+---
+
+## Strategic Roadmap Overview
+
+WON follows an empirical, milestone-driven development process divided into eight sequential phases (Phase 0 through Phase 7). Progress between phases requires meeting strict acceptance criteria validated by automated test suites, memory verifiers, and reproducible benchmarks.
+
+```
+Phase 0A ──► Phase 0B ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 ──► Phase 6 ──► Phase 7
+  Repo       Vertical     Grammar     Core        Toolchain   Security    v1.0        Python      Ecosystem
+Foundation    Slice        & AST    Compiler     & AI CLI    & Fuzzing   Launch      Embedded    Maturation
+```
+
+---
+
+## Detailed Milestone Breakdown
+
+### Phase 0: Proof of Concept
+- **Sub-phase 0A (Current)**:
+  - *Objective*: Official repository initialization under KitiLab, environment inspection, architectural specifications, ADR foundation, and community governance.
+  - *Deliverables*: Official `KitiLab/WON` repository, complete `docs/` technical suite, initial ADRs, `AGENTS.md`.
+  - *Acceptance Criteria*: Repository clean, public, verified; zero unverified performance claims; complete documentation alignment.
+- **Sub-phase 0B**:
+  - *Objective*: Implement a minimal end-to-end vertical slice proving parser feasibility, C header binding (`zlib`), static executable generation, and an automated AI error-repair loop.
+  - *Deliverables*: Minimal prototype parser, zlib header binding generator, C codegen backend, benchmark harness vs C/Go, AI self-repair test.
+  - *Acceptance Criteria*: Statically linked executable compiles and decompresses a buffer; identical zlib workload measured against GCC -O3 and Go; automated agent repairs a structured syntax error using JSON compiler diagnostics.
+
+### Phase 1: Language Foundations
+- **Objective**: Establish the formal language grammar, abstract syntax tree (AST), lexical analyzer, and foundation data structures.
+- **Deliverables**:
+  - Formal EBNF / PEG grammar specification.
+  - High-throughput lexer and parser producing source-span-mapped AST nodes.
+  - Formatting and syntax validation tools.
+- **Acceptance Criteria**: Comprehensive syntax test suite covering valid and invalid language constructs with accurate error offsets.
+
+### Phase 2: Core Compiler & Ownership-Lite
+- **Objective**: Implement the type inference engine, typed intermediate representation (TIR), ownership-lite verification passes, and production C codegen backend.
+- **Deliverables**:
+  - Bidirectional local type inference.
+  - TIR transformations and control flow graph construction.
+  - Compile-time move and lexical borrow analysis.
+  - High-performance C99/C11 code generation.
+- **Acceptance Criteria**: Memory safety invariants enforced at compile time; zero use-after-free and double-free in safe test cases; C code compiles cleanly under GCC and Clang with zero warnings (`-Wall -Wextra -Werror`).
+
+### Phase 3: Toolchain & AI Agent Integration
+- **Objective**: Build the unified CLI driver (`won`) and machine-readable AI agent communication layer.
+- **Deliverables**:
+  - CLI commands: `won build`, `won run`, `won test`, `won check`, `won inspect`.
+  - Machine-readable `--format=json` compiler diagnostics.
+  - `--explain` and `--suggest-fix` agent interfaces.
+  - Automated `AGENTS.md` synchronization tool reflecting current compiler capabilities.
+- **Acceptance Criteria**: External AI agents can compile, inspect types, receive diagnostic payloads, and iteratively correct code without human intervention.
+
+### Phase 4: Security, Fuzzing & Static Validation
+- **Objective**: Harden the compiler, runtime, and standard library against memory safety regressions and security vulnerabilities.
+- **Deliverables**:
+  - Continuous libFuzzer and AFL++ integration for parser and compiler front-end.
+  - Compile-time capability tracking (I/O, network, memory allocations).
+  - Memory sanitizer (ASan, MSan, TSan) verification in CI.
+- **Acceptance Criteria**: Zero unresolved crashes or memory leaks across 100M+ fuzzing iterations; 100% of safe-mode test cases pass AddressSanitizer with zero errors.
+
+### Phase 5: Version 1.0 Public Release
+- **Objective**: Finalize syntax stability, complete core standard library, package official distribution binaries, and publish public benchmark suite.
+- **Deliverables**:
+  - Stabilized v1.0 language specification.
+  - Core standard library (`std::core`, `std::io`, `std::collections`, `std::sync`).
+  - Single-binary distribution for Linux (x86_64, aarch64), macOS (Apple Silicon, Intel), and Windows.
+  - Public reproducible benchmark repository and dashboard.
+- **Acceptance Criteria**: Production language stability guarantee; benchmark results independently verifiable by third parties.
+
+### Phase 6: Embedded Python Integration
+- **Objective**: Integrate zero-cost native CPython C-API embedding directly into WON programs.
+- **Deliverables**:
+  - Direct compilation against CPython headers without inter-process communication.
+  - Seamless data type conversion between WON primitives and Python PyObject pointers.
+  - High-performance native bindings for AI/ML libraries (e.g. PyTorch, NumPy).
+- **Acceptance Criteria**: WON programs can instantiate embedded Python runtimes, execute code, and exchange high-dimensional arrays with zero serialization copy overhead.
+
+### Phase 7: Long-Term Ecosystem & Alternative Backends
+- **Objective**: Expand compiler backend architecture to support dedicated code generation and grow language tooling.
+- **Deliverables**:
+  - Dedicated direct LLVM or QBE code generation backend options alongside the C backend.
+  - Package manager and dependency resolution engine.
+  - Official Language Server Protocol (LSP) server for editors.
+- **Acceptance Criteria**: Native LLVM backend generates comparable or superior machine code to the C backend; full ecosystem tooling operational.

@@ -1,0 +1,31 @@
+# End of line and character encoding consistency
+* text=auto eol=lf
+
+# Explicitly declare text files you want to always be normalized and converted to native line endings on checkout
+*.md text eol=lf
+*.won text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.go text eol=lf
+*.rs text eol=lf
+*.zig text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.sh text eol=lf
+.editorconfig text eol=lf
+.gitignore text eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.tar.gz binary
+*.wasm binary
+*.so binary
+*.dylib binary
+*.dll binary
+*.a binary
