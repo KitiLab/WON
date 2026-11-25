@@ -8,7 +8,7 @@
 
 ---
 
-[![Project Status](https://img.shields.io/badge/status-Phase%202A.1%20%28Semantic%20Hardening%29-brightgreen.svg)](#current-development-status)
+[![Project Status](https://img.shields.io/badge/status-Phase%202A.2%20%28C11%20Backend%20Contract%29-brightgreen.svg)](#current-development-status)
 [![License](https://img.shields.io/badge/license-Pending%20Decision-orange.svg)](LICENSE_PENDING.md)
 [![Organization](https://img.shields.io/badge/org-KitiLab-black.svg)](https://github.com/KitiLab)
 
@@ -131,7 +131,7 @@ cd compiler/poc && go build -o bin/wonc ./cmd/wonc
 | Structured Concurrency & Zero-GIL | `SPECIFIED` (Runtime Phase 3) | [docs/language-spec/concurrency-model.md](docs/language-spec/concurrency-model.md) |
 | Self-Hosting & Bootstrap Pipeline | `SPECIFIED` | [docs/language-spec/self-hosting-and-bootstrap.md](docs/language-spec/self-hosting-and-bootstrap.md) |
 | Typed Intermediate Rep (TIR) | `SPECIFIED` (Phase 2C) | [docs/language-spec/compiler-and-ir-requirements.md](docs/language-spec/compiler-and-ir-requirements.md) |
-| Initial C Codegen Strategy (ISO C11 Subset) | `IMPLEMENTED` (Phase 0B/1B Subset) | [ADR-001](docs/decisions/ADR-001-c-codegen-backend.md) |
+| Initial C Codegen Strategy (ISO C11 Subset) | `IMPLEMENTED` (Strict Contract Verified) | [ADR-001](docs/decisions/ADR-001-c-codegen-backend.md), [Phase 2A.2 Capability Matrix](docs/compiler/phase-2a.2-backend-capability-matrix.md) |
 | C Header Binding Engine (Clang AST) | `IMPLEMENTED` (zlib) | [ADR-006](docs/decisions/ADR-006-c-header-parsing-strategy.md) |
 | Phase 0B Proof of Concept | `IMPLEMENTED` | [docs/phase-0-proof-of-concept.md](docs/phase-0-proof-of-concept.md) |
 | AI Structured JSON Diagnostics | `IMPLEMENTED` | [docs/ai-native-design.md](docs/ai-native-design.md) |

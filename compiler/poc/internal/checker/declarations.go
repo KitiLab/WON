@@ -106,6 +106,7 @@ func (c *Checker) collectAndResolveDeclarations(prog *ast.Program) {
 			sym := c.symbols.AllocSymbol(symbols.SymFunc, d.Name, d.Span)
 			sym.IsPub = d.IsPub
 			sym.Decl = d
+			c.symbols.NodeSymbols[d] = sym
 			gScope := c.bindGenericParams(sym, d.GenericParams, scope)
 			if existing, ok := scope.Insert(sym); !ok {
 				c.emitDuplicateDecl(d.Name, d.Span, existing.Span)

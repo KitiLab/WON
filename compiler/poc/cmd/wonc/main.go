@@ -300,7 +300,7 @@ func runBuild(args []string) {
 	}
 
 	// 2. 生成 C 代码
-	gen := codegen.New(prog, bindings)
+	gen := codegen.NewTyped(prog, typedProg, bindings)
 	cSource, err := gen.Generate()
 	if err != nil {
 		report.AddDiagnostic(diagnostic.Diagnostic{

@@ -96,6 +96,10 @@ The implementation roadmap adheres to strict technical dependency ordering acros
   - *Objective*: Harden full-width `math/big.Int` integer literals (`i8..i128`, `u8..u128`, `isize`/`usize`), enforce `unsafe:` boundaries on raw-pointer dereferencing (`WON-SEC-002`), unify signature-first single-pass method checking, and replace bidirectional `CanAssign` hacks with strict `CommonType` type joins.
   - *Deliverables*: Arbitrary-precision literal AST/lexer/types validation, [phase-2a.1-correctness-hardening.md](compiler/phase-2a.1-correctness-hardening.md), and exhaustive regression & fuzz suites.
   - *Status*: `IMPLEMENTED` (Verified in CI).
+- **Sub-phase 2A.2 (C11 Backend Capability Contract & Numeric Lowering)**:
+  - *Objective*: Enforce fail-closed WON-to-C11 type mapping (`MapTypeToC`), complete pre-codegen `WON-GEN-002` capability gating, emit typed `<stdint.h>` integer constants (`INT64_MIN`, `UINT64_C`, etc.) from `TypedProgram`, and uphold strict ISO C11 hosted `main` ABI (`i32` and `unit` wrapper).
+  - *Deliverables*: [phase-2a.2-backend-capability-matrix.md](compiler/phase-2a.2-backend-capability-matrix.md), `internal/checker/backend_caps.go`, hardened `internal/codegen`, and GCC/Clang `-pedantic-errors -Werror` validation suites.
+  - *Status*: `IMPLEMENTED` (Verified in CI).
 - **Sub-phase 2B (Ownership-Lite Borrow Checker & Trait Solver — Planned)**:
   - *Objective*: Compile-time move tracking, lexical borrow & reference provenance (`WON-MEM-001`/`002`), trait coherence/impl checking, and `From`/`Into` conversion on `?`.
   - *Status*: `SPECIFIED` / `PLANNED`.

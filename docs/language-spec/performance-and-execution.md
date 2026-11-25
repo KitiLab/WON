@@ -1,7 +1,7 @@
 # WON Language Specification: Performance and Native Execution Semantics
 
 > **Specification Version**: Draft 0.1  
-> **Status**: `SPECIFIED` (Under Architectural Review)  
+> **Status**: `SPECIFIED` (Linux x86_64 LP64 C11 Subset Verified in [Phase 2A.2 Backend Matrix](../compiler/phase-2a.2-backend-capability-matrix.md))  
 > **Module**: Execution Engine, Memory Layouts & ABI  
 > **Date**: November 2026
 

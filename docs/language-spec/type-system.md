@@ -1,9 +1,9 @@
 # WON Language Specification: Type System
 
 > **Specification Version**: Draft 0.1  
-> **Status**: `IMPLEMENTED` (Core Type System, Full-Width `big.Int` Literal Checking, Bidirectional Inference, Strict `CommonType` Joins, Structs/Enums & Pattern Exhaustiveness in Phase 2A/2A.1; Trait Solver & Monomorphization `SPECIFIED` for Phase 2B/2C)  
+> **Status**: `IMPLEMENTED` (Core Type System, Full-Width `big.Int` Literal Checking, Bidirectional Inference, Strict `CommonType` Joins, Structs/Enums & Pattern Exhaustiveness in Phase 2A/2A.1; C11 Lowering Subset Governed by Phase 2A.2 Matrix; Trait Solver & Monomorphization `SPECIFIED` for Phase 2B/2C)  
 > **Module**: Core Type System & Trait Architecture  
-> **Phase 2A / 2A.1 Implementation**: [Typed Semantic Model](../compiler/phase-2a-typed-semantic-model.md), [Phase 2A.1 Correctness Hardening](../compiler/phase-2a.1-correctness-hardening.md)  
+> **Phase 2A–2A.2 Implementation**: [Typed Semantic Model](../compiler/phase-2a-typed-semantic-model.md), [Phase 2A.1 Correctness Hardening](../compiler/phase-2a.1-correctness-hardening.md), [Phase 2A.2 C11 Capability Matrix](../compiler/phase-2a.2-backend-capability-matrix.md)  
 > **Date**: November 2026
 
 ---

@@ -57,6 +57,11 @@ func (c *Checker) CheckProgram(prog *ast.Program) *TypedProgram {
 		}
 	}
 
+	// Stage 4: 若尚未存在语义/词法错误，执行严谨的 C11 后端能力契约审核 (WON-GEN-002 边界)
+	if !c.report.HasErrors() {
+		c.verifyBackendCapabilities(prog)
+	}
+
 	return c.typed
 }
 

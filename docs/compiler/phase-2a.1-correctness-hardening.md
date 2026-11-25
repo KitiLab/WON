@@ -2,7 +2,7 @@
 
 > **Document Status**: `IMPLEMENTED`  
 > **Milestone**: Phase 2A.1 — Semantic Correctness Hardening  
-> **Builds Upon**: [Phase 2A Semantic Analysis](phase-2a-semantic-analysis.md) & [Typed Semantic Model](phase-2a-typed-semantic-model.md)  
+> **Builds Upon**: [Phase 2A Semantic Analysis](phase-2a-semantic-analysis.md) & [Typed Semantic Model](phase-2a-typed-semantic-model.md) ([C11 Backend Contract](phase-2a.2-backend-capability-matrix.md))  
 > **Normative References**: [Type System](../language-spec/type-system.md), [Ownership and Memory Model](../language-spec/ownership-and-memory.md)
 
 ---

@@ -194,6 +194,9 @@ func (c *Checker) checkLetStmt(s *ast.LetStmt, scope *symbols.Scope) {
 	// 将模式内声明的局部绑定插入当前词法作用域
 	if s.Pattern != nil {
 		c.bindLetPattern(s.Pattern, varType, s.IsMut, s.LetTokenSpan, scope)
+		if sym, ok := c.symbols.NodeSymbols[s.Pattern]; ok {
+			c.symbols.NodeSymbols[s] = sym
+		}
 	} else if s.Name != "" && s.Name != "_" {
 		sym := c.symbols.AllocSymbol(symbols.SymVar, s.Name, s.Span)
 		sym.IsMut = s.IsMut
@@ -203,6 +206,7 @@ func (c *Checker) checkLetStmt(s *ast.LetStmt, scope *symbols.Scope) {
 		if existing, ok := scope.Insert(sym); !ok {
 			c.emitDuplicateDecl(s.Name, s.Span, existing.Span)
 		}
+		c.symbols.NodeSymbols[s] = sym
 	}
 }
 

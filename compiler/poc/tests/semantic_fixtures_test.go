@@ -154,6 +154,7 @@ func TestCLISemanticCheckAndCodegenGate(t *testing.T) {
 	// 1. wonc check 在规范合法用例与示例上应返回 0
 	for _, rel := range []string{
 		"examples/zlib_compression.won",
+		"tests/language-spec/valid/basics/hello.won",
 		"tests/language-spec/valid/types/struct_and_enum.won",
 		"tests/language-spec/valid/types/full_width_integers.won",
 		"tests/language-spec/valid/enums/option_result_try.won",
@@ -162,6 +163,15 @@ func TestCLISemanticCheckAndCodegenGate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("wonc check %s 失败: %v\n%s", rel, err, string(out))
 		}
+	}
+
+	// 1b. unit 返回值的 hello.won 通过 wonc build 生成标准 C11 并正常返回退出码 0
+	helloBin := filepath.Join(t.TempDir(), "hello_bin")
+	if out, err := exec.Command(woncBin, "build", "-o", helloBin, filepath.Join("..", "..", "..", "tests/language-spec/valid/basics/hello.won")).CombinedOutput(); err != nil {
+		t.Fatalf("wonc build hello.won 失败: %v\n%s", err, string(out))
+	}
+	if runOut, err := exec.Command(helloBin).CombinedOutput(); err != nil || !strings.Contains(string(runOut), "Hello, WON World!") {
+		t.Fatalf("hello_bin 运行失败: err=%v out=%s", err, string(runOut))
 	}
 
 	// 2. wonc check 在语义负例上返回非 0 并输出规范诊断码
@@ -183,17 +193,27 @@ func TestCLISemanticCheckAndCodegenGate(t *testing.T) {
 		}
 	}
 
-	// 3. wonc build 对尚无 C11 代码生成实现的 struct/enum/match 与 128 位整数程序必须以 WON-GEN-002 明确拒止而非错误生成 C 代码
+	// 3. wonc build 对尚无 C11 代码生成实现的程序必须以 WON-GEN-002 明确拒止且不得落盘产生任何 .won.c 文件
+	tmpWork := t.TempDir()
 	for _, rel := range []string{
 		"tests/language-spec/valid/types/struct_and_enum.won",
 		"tests/language-spec/valid/types/full_width_integers.won",
+		"tests/language-spec/valid/enums/option_result_try.won",
 	} {
-		buildOut, err := exec.Command(woncBin, "build", filepath.Join("..", "..", "..", rel)).CombinedOutput()
+		absPath, _ := filepath.Abs(filepath.Join("..", "..", "..", rel))
+		absBin, _ := filepath.Abs(woncBin)
+		cmd := exec.Command(absBin, "build", absPath)
+		cmd.Dir = tmpWork
+		buildOut, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatalf("wonc build 应当拒止暂未实现 C11 代码生成的 %s", rel)
 		}
 		if !strings.Contains(string(buildOut), "WON-GEN-002") {
 			t.Errorf("wonc build 拒止 %s 输出中应包含 WON-GEN-002, 实际: %s", rel, string(buildOut))
+		}
+		baseC := strings.TrimSuffix(filepath.Base(rel), ".won") + ".won.c"
+		if _, statErr := os.Stat(filepath.Join(tmpWork, baseC)); statErr == nil {
+			t.Errorf("wonc build 在发出 WON-GEN-002 后禁止生成残留 C 文件 %s", baseC)
 		}
 	}
 }

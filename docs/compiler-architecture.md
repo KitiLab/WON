@@ -1,10 +1,10 @@
 # WON Compiler Architecture
 
-> **Document Status**: `IMPLEMENTED` (Phase 0B–2A Frontend & Core Semantics) / `SPECIFIED` (Phase 2B+ TIR & Backends)  
+> **Document Status**: `IMPLEMENTED` (Phase 0B–2A.2 Frontend, Core Semantics & C11 Subset Contract) / `SPECIFIED` (Phase 2B+ TIR & Borrow Checker)  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 2A  
+> **Last Updated**: Phase 2A.2  
 > **Normative Specification**: [docs/language-spec/compiler-and-ir-requirements.md](language-spec/compiler-and-ir-requirements.md)  
-> **Phase 2A Details**: [Typed Semantic Model](compiler/phase-2a-typed-semantic-model.md), [Semantic Analysis Pipeline](compiler/phase-2a-semantic-analysis.md)
+> **Phase 2A–2A.2 Details**: [Typed Semantic Model](compiler/phase-2a-typed-semantic-model.md), [Semantic Analysis Pipeline](compiler/phase-2a-semantic-analysis.md), [C11 Backend Capability Matrix](compiler/phase-2a.2-backend-capability-matrix.md)
 
 ---
 
