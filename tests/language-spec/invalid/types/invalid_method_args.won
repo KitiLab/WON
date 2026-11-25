@@ -1,0 +1,9 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Strict Built-In Method Signature Validation
+## Violation: Passing unexpected argument to zero-argument .len() built-in method.
+## Expected Diagnostic: WON-TYP-001
+
+fn main():
+    let text = "hello"
+    let length = text.len(123)

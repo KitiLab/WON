@@ -762,7 +762,20 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr, expected types.TypeID, scope 
 	case "*":
 		sub := c.checkExpr(e.Expr, types.Invalid, scope)
 		sInfo := c.types.Info(sub)
-		if sInfo.Kind == types.KindRef || sInfo.Kind == types.KindRawPtr {
+		if sInfo.Kind == types.KindRawPtr {
+			if !c.inUnsafe {
+				c.report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:        "WON-SEC-002",
+					Severity:    "error",
+					Message:     fmt.Sprintf("解引用原生指针 '%s' 必须在显式 unsafe 代码块内", c.types.Format(sub)),
+					File:        e.Span.File,
+					Span:        e.Span,
+					Explanation: "构造原生指针是安全的，但解引用原生指针 (*const T / *mut T) 可能引发空指针或悬垂内存读取，必须置于 'unsafe:' 块内。",
+				})
+			}
+			return sInfo.Elem
+		}
+		if sInfo.Kind == types.KindRef {
 			return sInfo.Elem
 		}
 		c.report.AddDiagnostic(diagnostic.Diagnostic{
@@ -840,22 +853,36 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr, expected types.TypeID, scop
 	case "==", "!=", "<", "<=", ">", ">=":
 		// 若一侧为无后缀字面量，先推断非字面量侧并向下传播预期类型
 		lt, rt := c.checkComparableOperands(e.Left, e.Right, scope)
+		if lt == types.Invalid || rt == types.Invalid {
+			return c.types.Bool
+		}
+		common, ok := c.types.CommonType(lt, rt)
+		if !ok {
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-TYP-001",
+				Severity:    "error",
+				Message:     fmt.Sprintf("比较运算符 '%s' 两侧操作数类型不兼容: '%s' 与 '%s' (无合法公共类型)", e.Op, c.types.Format(lt), c.types.Format(rt)),
+				File:        e.Span.File,
+				Span:        e.Span,
+				Explanation: "比较运算要求两侧求得相同的规范公共类型，禁止隐式数值扩张或非线性引用可变性混用。",
+			})
+			return c.types.Bool
+		}
 		if e.Op != "==" && e.Op != "!=" {
-			if lt != types.Invalid && !c.types.IsNumeric(lt) && c.types.Info(lt).Kind != types.KindChar {
+			if !c.types.IsNumeric(common) && c.types.Info(common).Kind != types.KindChar {
 				c.report.AddDiagnostic(diagnostic.Diagnostic{
 					Code:     "WON-TYP-002",
 					Severity: "error",
-					Message:  fmt.Sprintf("关系比较运算符 '%s' 不支持类型 '%s'", e.Op, c.types.Format(lt)),
+					Message:  fmt.Sprintf("关系比较运算符 '%s' 不支持类型 '%s'", e.Op, c.types.Format(common)),
 					File:     e.Span.File,
 					Span:     e.Span,
 				})
 			}
-		}
-		if lt != types.Invalid && rt != types.Invalid && !c.types.CanAssign(rt, lt) && !c.types.CanAssign(lt, rt) {
+		} else if !c.isEqualityComparable(common) {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
-				Code:     "WON-TYP-001",
+				Code:     "WON-TYP-002",
 				Severity: "error",
-				Message:  fmt.Sprintf("比较运算符 '%s' 两侧操作数类型不兼容: '%s' 与 '%s'", e.Op, c.types.Format(lt), c.types.Format(rt)),
+				Message:  fmt.Sprintf("相等比较运算符 '%s' 不支持未实现等价关系的类型 '%s'", e.Op, c.types.Format(common)),
 				File:     e.Span.File,
 				Span:     e.Span,
 			})
@@ -864,6 +891,17 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr, expected types.TypeID, scop
 
 	case "+", "-", "*", "/", "%":
 		lt, rt := c.checkSymmetricOperands(e.Left, e.Right, expected, scope)
+		if (e.Op == "+" || e.Op == "-") && ((lt != types.Invalid && c.types.Info(lt).Kind == types.KindRawPtr) || (rt != types.Invalid && c.types.Info(rt).Kind == types.KindRawPtr)) {
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-TYP-002",
+				Severity:    "error",
+				Message:     fmt.Sprintf("不支持直接对原生指针执行二元指针算术 '%s' ('%s' %s '%s')", e.Op, c.types.Format(lt), e.Op, c.types.Format(rt)),
+				File:        e.Span.File,
+				Span:        e.Span,
+				Explanation: "WON 禁止隐式原生指针加减算术；如需地址偏移请在 unsafe 块内显式转换为 usize 计算。",
+			})
+			return types.Invalid
+		}
 		if lt != types.Invalid && !c.types.IsNumeric(lt) {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code:     "WON-TYP-002",
@@ -939,9 +977,31 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr, expected types.TypeID, scop
 	return types.Invalid
 }
 
+func (c *Checker) isEqualityComparable(t types.TypeID) bool {
+	if t == types.Invalid {
+		return true
+	}
+	if c.types.IsNumeric(t) {
+		return true
+	}
+	info := c.types.Info(t)
+	switch info.Kind {
+	case types.KindNever, types.KindUnit, types.KindBool, types.KindChar, types.KindStr, types.KindString, types.KindRawPtr, types.KindEnum:
+		return true
+	case types.KindRef:
+		elemInfo := c.types.Info(info.Elem)
+		return elemInfo.Kind == types.KindStr || elemInfo.Kind == types.KindSlice || c.isEqualityComparable(info.Elem)
+	default:
+		return false
+	}
+}
+
 func isUnsuffixedLiteral(e ast.Expr) bool {
 	if il, ok := e.(*ast.IntegerLiteral); ok && il.Suffix == "" {
 		return true
+	}
+	if u, ok := e.(*ast.UnaryExpr); ok && u.Op == "-" {
+		return isUnsuffixedLiteral(u.Expr)
 	}
 	if fl, ok := e.(*ast.FloatLiteral); ok && fl.Suffix == "" {
 		return true
@@ -1619,129 +1679,183 @@ func (c *Checker) isCanonicalTypeCompatibleWithC(wonType types.TypeID, expectedC
 
 func (c *Checker) checkMethodCallExpr(e *ast.MethodCallExpr, scope *symbols.Scope) types.TypeID {
 	recType := c.checkExpr(e.Receiver, types.Invalid, scope)
-	for _, arg := range e.Args {
-		_ = c.checkExpr(arg, types.Invalid, scope)
+	checkArgsOnceOnError := func() {
+		for _, arg := range e.Args {
+			_ = c.checkExpr(arg, types.Invalid, scope)
+		}
 	}
 
-	// 1. 内置基础类型方法支持 (&str, String, [T; N], &[T], *const u8)
-	switch e.Method {
-	case "as_mut_ptr":
-		if ident, ok := e.Receiver.(*ast.Identifier); ok {
-			sym := scope.Lookup(ident.Name)
-			if sym != nil && !sym.IsMut {
-				c.report.AddDiagnostic(diagnostic.Diagnostic{
-					Code:        "WON-MUT-001",
-					Severity:    "error",
-					Message:     fmt.Sprintf("无法对不可变变量 '%s' 调用可变指针方法 (as_mut_ptr)", ident.Name),
-					File:        e.Span.File,
-					Span:        e.Span,
-					Explanation: fmt.Sprintf("变量 '%s' 使用 'let' 声明为不可变。获取可变原生指针 (*mut) 要求使用 'var' 声明。", ident.Name),
-					Fixes: []diagnostic.Fix{
-						{
-							Description: fmt.Sprintf("将变量 '%s' 声明修改为可变 ('var')", ident.Name),
-							Edits: []diagnostic.Edit{
-								{
-									Start:       sym.LetTokenSpan.Start.Byte,
-									End:         sym.LetTokenSpan.End.Byte,
-									Replacement: "var",
-								},
-							},
-						},
-					},
-				})
-			}
-		}
-		return c.types.RawPtr(true, c.types.U8)
-
-	case "as_ptr":
-		return c.types.RawPtr(false, c.types.U8)
-
-	case "as_bytes":
-		return c.types.Ref(false, c.types.Slice(c.types.U8))
-
-	case "len":
-		return c.types.U64
-
-	case "is_empty":
-		return c.types.Bool
-
-	case "push_str":
-		if ident, ok := e.Receiver.(*ast.Identifier); ok {
-			sym := scope.Lookup(ident.Name)
-			if sym != nil && !sym.IsMut && !(c.types.Info(sym.Type).Kind == types.KindRef && c.types.Info(sym.Type).IsMut) {
-				c.report.AddDiagnostic(diagnostic.Diagnostic{
-					Code:     "WON-MUT-001",
-					Severity: "error",
-					Message:  fmt.Sprintf("不能在不可变绑定 '%s' 上调用可变方法 'push_str'", ident.Name),
-					File:     e.Span.File,
-					Span:     e.Span,
-				})
-			}
-		}
-		c.typed.markCodegenUnsupported("String::push_str 尚未在 C11 后端实现", e.Span)
-		return c.types.Unit
-	}
-
-	// 2. 解引用接收者查找用户自定义 struct / enum 上的固有 impl 方法
 	if recType == types.Invalid {
+		checkArgsOnceOnError()
 		return types.Invalid
 	}
+
 	baseID := recType
 	recInfo := c.types.Info(baseID)
 	if recInfo.Kind == types.KindRef {
 		baseID = recInfo.Elem
 		recInfo = c.types.Info(baseID)
 	}
-	if recInfo.Kind != types.KindStruct && recInfo.Kind != types.KindEnum {
-		c.report.AddDiagnostic(diagnostic.Diagnostic{
-			Code:     "WON-NAM-006",
-			Severity: "error",
-			Message:  fmt.Sprintf("类型 '%s' 上不存在名为 '%s' 的固有方法", c.types.Format(recType), e.Method),
-			File:     e.Span.File,
-			Span:     e.Span,
-		})
-		return types.Invalid
+
+	// 1. 若接收者为用户自定义 struct / enum（非内置 String）且定义了同名固有 impl 方法，优先匹配用户方法签名
+	if (recInfo.Kind == types.KindStruct || recInfo.Kind == types.KindEnum) && baseID != c.types.StringT {
+		ownerSym := c.symbols.ByID[symbols.SymbolID(recInfo.SymbolID)]
+		if ownerSym == nil {
+			checkArgsOnceOnError()
+			return types.Invalid
+		}
+		methodSym, ok := ownerSym.Methods[e.Method]
+		if !ok {
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:     "WON-NAM-006",
+				Severity: "error",
+				Message:  fmt.Sprintf("类型 '%s' 没有名为 '%s' 的固有方法", ownerSym.Name, e.Method),
+				File:     e.Span.File,
+				Span:     e.Span,
+			})
+			checkArgsOnceOnError()
+			return types.Invalid
+		}
+		if !methodSym.HasSelf {
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:     "WON-NAM-006",
+				Severity: "error",
+				Message:  fmt.Sprintf("'%s::%s' 为静态关联函数（无 self 接收者），不能作为实例方法调用", ownerSym.Name, e.Method),
+				File:     e.Span.File,
+				Span:     e.Span,
+			})
+			checkArgsOnceOnError()
+			return types.Invalid
+		}
+		if methodSym.SelfIsMut && !c.isReceiverMutable(e.Receiver, recType, scope) {
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:     "WON-MUT-001",
+				Severity: "error",
+				Message:  fmt.Sprintf("调用可变接收者 (&mut self) 方法 '%s' 需要可变接收者", e.Method),
+				File:     e.Span.File,
+				Span:     e.Span,
+			})
+		}
+
+		c.typed.CallTargets[e] = methodSym
+		c.typed.markCodegenUnsupported("固有实例方法调用尚未在 C11 后端实现", e.Span)
+		// 先解析方法签名再一次性按期望形参类型检查实参，防止重复诊断
+		c.checkCallArgsAgainstSignature(ownerSym.Name+"."+methodSym.Name, methodSym.ParamTypes, e.Args, scope, e.Span)
+		return methodSym.ReturnType
 	}
 
-	ownerSym := c.symbols.ByID[symbols.SymbolID(recInfo.SymbolID)]
-	if ownerSym == nil {
-		return types.Invalid
-	}
-	methodSym, ok := ownerSym.Methods[e.Method]
-	if !ok {
-		c.report.AddDiagnostic(diagnostic.Diagnostic{
-			Code:     "WON-NAM-006",
-			Severity: "error",
-			Message:  fmt.Sprintf("类型 '%s' 没有名为 '%s' 的固有方法", ownerSym.Name, e.Method),
-			File:     e.Span.File,
-			Span:     e.Span,
-		})
-		return types.Invalid
-	}
-	if !methodSym.HasSelf {
-		c.report.AddDiagnostic(diagnostic.Diagnostic{
-			Code:     "WON-NAM-006",
-			Severity: "error",
-			Message:  fmt.Sprintf("'%s::%s' 为静态关联函数（无 self 接收者），不能作为实例方法调用", ownerSym.Name, e.Method),
-			File:     e.Span.File,
-			Span:     e.Span,
-		})
-		return types.Invalid
-	}
-	if methodSym.SelfIsMut && !c.isReceiverMutable(e.Receiver, recType, scope) {
-		c.report.AddDiagnostic(diagnostic.Diagnostic{
-			Code:     "WON-MUT-001",
-			Severity: "error",
-			Message:  fmt.Sprintf("调用可变接收者 (&mut self) 方法 '%s' 需要可变接收者", e.Method),
-			File:     e.Span.File,
-			Span:     e.Span,
-		})
+	// 2. 内置受控方法签名契约检查 (as_ptr, as_mut_ptr, as_bytes, len, is_empty, push_str)
+	if sig, found := c.resolveBuiltinMethodSig(recType, baseID, recInfo, e.Method); found {
+		if sig.requiresMut && !c.isReceiverMutable(e.Receiver, recType, scope) {
+			c.emitReceiverMutabilityError(e, e.Method, scope)
+		}
+		if sig.unsupportedCodegen {
+			c.typed.markCodegenUnsupported(fmt.Sprintf("%s.%s 尚未在 C11 后端实现", c.types.Format(recType), e.Method), e.Span)
+		}
+		c.checkCallArgsAgainstSignature(c.types.Format(baseID)+"."+e.Method, sig.paramTypes, e.Args, scope, e.Span)
+		return sig.retType
 	}
 
-	c.typed.CallTargets[e] = methodSym
-	c.typed.markCodegenUnsupported("固有实例方法调用尚未在 C11 后端实现", e.Span)
-	c.checkCallArgsAgainstSignature(ownerSym.Name+"."+methodSym.Name, methodSym.ParamTypes, e.Args, scope, e.Span)
-	return methodSym.ReturnType
+	c.report.AddDiagnostic(diagnostic.Diagnostic{
+		Code:     "WON-NAM-006",
+		Severity: "error",
+		Message:  fmt.Sprintf("类型 '%s' 上不存在名为 '%s' 的方法", c.types.Format(recType), e.Method),
+		File:     e.Span.File,
+		Span:     e.Span,
+	})
+	checkArgsOnceOnError()
+	return types.Invalid
+}
+
+type builtinMethodSig struct {
+	paramTypes         []types.TypeID
+	retType            types.TypeID
+	requiresMut        bool
+	unsupportedCodegen bool
+}
+
+func (c *Checker) resolveBuiltinMethodSig(recType, baseID types.TypeID, baseInfo types.TypeInfo, method string) (builtinMethodSig, bool) {
+	isStringOrView := baseID == c.types.StringT || baseID == c.types.Str
+	isBuffer := baseInfo.Kind == types.KindArray || baseInfo.Kind == types.KindSlice
+
+	switch method {
+	case "as_ptr":
+		if isStringOrView {
+			return builtinMethodSig{retType: c.types.RawPtr(false, c.types.U8)}, true
+		}
+		if isBuffer {
+			return builtinMethodSig{retType: c.types.RawPtr(false, baseInfo.Elem)}, true
+		}
+	case "as_mut_ptr":
+		if baseID == c.types.StringT {
+			return builtinMethodSig{retType: c.types.RawPtr(true, c.types.U8), requiresMut: true}, true
+		}
+		if isBuffer {
+			return builtinMethodSig{retType: c.types.RawPtr(true, baseInfo.Elem), requiresMut: true}, true
+		}
+	case "as_bytes":
+		if isStringOrView {
+			return builtinMethodSig{retType: c.types.Ref(false, c.types.Slice(c.types.U8))}, true
+		}
+	case "len":
+		if isStringOrView || isBuffer {
+			return builtinMethodSig{retType: c.types.U64}, true
+		}
+	case "is_empty":
+		if isStringOrView || isBuffer {
+			return builtinMethodSig{retType: c.types.Bool}, true
+		}
+	case "push_str":
+		if baseID == c.types.StringT {
+			return builtinMethodSig{
+				paramTypes:         []types.TypeID{c.types.StrView},
+				retType:            c.types.Unit,
+				requiresMut:        true,
+				unsupportedCodegen: true,
+			}, true
+		}
+	}
+	return builtinMethodSig{}, false
+}
+
+func (c *Checker) emitReceiverMutabilityError(e *ast.MethodCallExpr, method string, scope *symbols.Scope) {
+	if ident, ok := e.Receiver.(*ast.Identifier); ok {
+		sym := scope.Lookup(ident.Name)
+		if sym != nil && !sym.IsMut && sym.LetTokenSpan.End.Byte > sym.LetTokenSpan.Start.Byte {
+			msg := fmt.Sprintf("不能在不可变绑定 '%s' 上调用可变方法 '%s'", ident.Name, method)
+			if method == "as_mut_ptr" {
+				msg = fmt.Sprintf("无法对不可变变量 '%s' 调用可变指针方法 (as_mut_ptr)", ident.Name)
+			}
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-MUT-001",
+				Severity:    "error",
+				Message:     msg,
+				File:        e.Span.File,
+				Span:        e.Span,
+				Explanation: fmt.Sprintf("变量 '%s' 使用 'let' 声明为不可变。获取可变原生指针或调用 &mut self 方法要求使用 'var' 声明。", ident.Name),
+				Fixes: []diagnostic.Fix{
+					{
+						Description: fmt.Sprintf("将变量 '%s' 声明修改为可变 ('var')", ident.Name),
+						Edits: []diagnostic.Edit{
+							{
+								Start:       sym.LetTokenSpan.Start.Byte,
+								End:         sym.LetTokenSpan.End.Byte,
+								Replacement: "var",
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+	}
+	c.report.AddDiagnostic(diagnostic.Diagnostic{
+		Code:     "WON-MUT-001",
+		Severity: "error",
+		Message:  fmt.Sprintf("调用可变接收者方法 '%s' 需要可变接收者", method),
+		File:     e.Span.File,
+		Span:     e.Span,
+	})
 }
 
 func (c *Checker) isReceiverMutable(recv ast.Expr, recType types.TypeID, scope *symbols.Scope) bool {

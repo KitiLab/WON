@@ -1,0 +1,10 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Match Branch Common-Type Join Enforcement
+## Violation: Attempting to assign match expression joining &mut i32 and &i32 to mutable &mut i32.
+## Expected Diagnostic: WON-MAT-003
+
+fn pick(flag: bool, a: &mut i32, b: &i32) -> &mut i32:
+    return match flag:
+        true => a
+        false => b

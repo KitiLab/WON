@@ -1,9 +1,9 @@
 # WON Language Specification: Type System
 
 > **Specification Version**: Draft 0.1  
-> **Status**: `IMPLEMENTED` (Core Type System, Bidirectional Inference, Structs/Enums & Pattern Exhaustiveness in Phase 2A; Trait Solver & Monomorphization `SPECIFIED` for Phase 2B/2C)  
+> **Status**: `IMPLEMENTED` (Core Type System, Full-Width `big.Int` Literal Checking, Bidirectional Inference, Strict `CommonType` Joins, Structs/Enums & Pattern Exhaustiveness in Phase 2A/2A.1; Trait Solver & Monomorphization `SPECIFIED` for Phase 2B/2C)  
 > **Module**: Core Type System & Trait Architecture  
-> **Phase 2A Implementation**: [Phase 2A Typed Semantic Model](../compiler/phase-2a-typed-semantic-model.md)  
+> **Phase 2A / 2A.1 Implementation**: [Typed Semantic Model](../compiler/phase-2a-typed-semantic-model.md), [Phase 2A.1 Correctness Hardening](../compiler/phase-2a.1-correctness-hardening.md)  
 > **Date**: November 2026
 
 ---

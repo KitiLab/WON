@@ -1,0 +1,8 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Raw Pointer Dereference Unsafe Boundary
+## Violation: Dereferencing *const i32 outside an explicit unsafe block.
+## Expected Diagnostic: WON-SEC-002
+
+fn read_value(pointer: *const i32) -> i32:
+    return *pointer

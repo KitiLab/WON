@@ -24,10 +24,8 @@ func (c *Checker) checkMatchExpr(m *ast.MatchExpr, expected types.TypeID, scope 
 	subjType := c.checkExpr(m.Subject, types.Invalid, scope)
 	cov := matchCoverage{variants: make(map[string]bool)}
 
-	var resultType = types.Invalid
-	if expected != types.Invalid {
-		resultType = expected
-	}
+	joined := types.Invalid
+	hadNonNever := false
 
 	for _, arm := range m.Arms {
 		armScope := symbols.NewScope(symbols.ScopeMatchArm, scope)
@@ -79,21 +77,50 @@ func (c *Checker) checkMatchExpr(m *ast.MatchExpr, expected types.TypeID, scope 
 			}
 		}
 
-		armType := c.checkBlock(arm.Body, resultType, armScope)
+		// 若外层提供 expected 类型则向下传播；否则在已确定前序非发散类型时传播上下文
+		armHint := expected
+		if armHint == types.Invalid {
+			armHint = joined
+		}
+		armType := c.checkBlock(arm.Body, armHint, armScope)
 		if c.types.Info(armType).Kind == types.KindNever {
 			continue
 		}
-		if resultType == types.Invalid {
-			resultType = armType
-		} else if armType != types.Invalid && !c.types.CanAssign(armType, resultType) && !c.types.CanAssign(resultType, armType) {
+
+		if expected != types.Invalid {
+			if armType != types.Invalid && !c.types.CanAssign(armType, expected) {
+				c.report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:        "WON-MAT-003",
+					Severity:    "error",
+					Message:     fmt.Sprintf("match 分支返回类型不兼容: 期望 '%s'，本分支返回 '%s'", c.types.Format(expected), c.types.Format(armType)),
+					File:        arm.Body.Span.File,
+					Span:        arm.Body.Span,
+					Explanation: "match 表达式所有非发散分支必须能够生成外层期望类型。",
+				})
+			}
+			hadNonNever = true
+			joined = expected
+			continue
+		}
+
+		if !hadNonNever {
+			joined = armType
+			hadNonNever = true
+			continue
+		}
+
+		common, ok := c.types.CommonType(joined, armType)
+		if !ok {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code:        "WON-MAT-003",
 				Severity:    "error",
-				Message:     fmt.Sprintf("match 分支返回类型不兼容: 期望 '%s'，本分支返回 '%s'", c.types.Format(resultType), c.types.Format(armType)),
+				Message:     fmt.Sprintf("match 分支结果类型无法求取公共类型: 先前公共类型为 '%s'，本分支返回 '%s'", c.types.Format(joined), c.types.Format(armType)),
 				File:        arm.Body.Span.File,
 				Span:        arm.Body.Span,
-				Explanation: "match 表达式所有非发散分支必须产生兼容的一致类型。",
+				Explanation: "match 表达式各分支必须拥有完全一致的类型或合法的严格公共超类型（例如 &mut T 与 &T 联结为 &T）。",
 			})
+		} else {
+			joined = common
 		}
 	}
 
@@ -102,10 +129,13 @@ func (c *Checker) checkMatchExpr(m *ast.MatchExpr, expected types.TypeID, scope 
 		c.verifyMatchExhaustiveness(subjType, cov, m.Span)
 	}
 
-	if resultType == types.Invalid {
-		return c.types.Unit
+	if !hadNonNever {
+		if expected != types.Invalid {
+			return expected
+		}
+		return c.types.Never
 	}
-	return resultType
+	return joined
 }
 
 // checkPatternAgainstType 检查模式是否与目标类型兼容并绑定变量；

@@ -376,6 +376,16 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt, scope *symbols.Scope) {
 			pInfo := c.types.Info(ptrType)
 			if pInfo.Kind == types.KindRef || pInfo.Kind == types.KindRawPtr {
 				targetType = pInfo.Elem
+				if pInfo.Kind == types.KindRawPtr && !c.inUnsafe {
+					c.report.AddDiagnostic(diagnostic.Diagnostic{
+						Code:        "WON-SEC-002",
+						Severity:    "error",
+						Message:     fmt.Sprintf("通过原生指针 '%s' 解引用写入内存必须在显式 unsafe 代码块内", c.types.Format(ptrType)),
+						File:        lhs.Span.File,
+						Span:        lhs.Span,
+						Explanation: "原生指针解引用读写脱离编译期生命周期保护，必须包裹在 'unsafe:' 块内。",
+					})
+				}
 				if !pInfo.IsMut {
 					c.report.AddDiagnostic(diagnostic.Diagnostic{
 						Code:     "WON-MUT-001",

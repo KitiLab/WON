@@ -46,6 +46,10 @@ func FuzzSemanticChecker(f *testing.F) {
 		"fn f(x: Result[i32, bool]) -> Result[i32, bool]:\n    let v = x?\n    return Result::Ok(v)\n",
 		"fn dup():\n    let x = 1\n    let x = 2\n",
 		"fn bad_utf8():\n    let x = \"\x80\"\n",
+		"fn big_ints():\n    let a: u128 = 340282366920938463463374607431768211455\n    let b: i128 = -170141183460469231731687303715884105728\n    let c = 0x\n",
+		"fn raw_ptr(p: *const i32) -> i32:\n    return *p\n",
+		"fn bad_method():\n    let s = \"hi\"\n    let l = s.len(123)\n",
+		"fn ref_join(b: bool, x: &mut i32, y: &i32) -> &i32:\n    return match b:\n        true => x\n        false => y\n",
 	}
 	for _, s := range seeds {
 		f.Add(s)

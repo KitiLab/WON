@@ -259,6 +259,8 @@ WON guarantees deterministic destruction of all resources:
 
 ## 7. Raw Pointers and Unsafe Operations
 
+> **Implementation Status (`Phase 2A.1`)**: Raw-pointer creation casts (`&x as *const T`, `&mut x as *mut T`, `usize as *const T`) are allowed outside `unsafe:`, while unary dereference reads (`*ptr`) and writes (`*ptr = v`) are strictly enforced inside `unsafe:` blocks (`WON-SEC-002`). Full move/borrow provenance (`WON-MEM-*`) remains `SPECIFIED` for Phase 2B.
+
 For low-level systems programming, operating system interfaces, and C library interop:
 - **Raw Pointers**: `*const T` (immutable raw pointer) and `*mut T` (mutable raw pointer).
 - **Properties**: Raw pointers may be null, unaligned, or dangling. The compiler does not track their lifetimes or aliasing.

@@ -171,3 +171,41 @@ func TestFitsBigIntLiteralExactBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestCommonTypeJoin(t *testing.T) {
+	ctx := NewContext()
+
+	if gt, ok := ctx.CommonType(ctx.I32, ctx.I32); !ok || gt != ctx.I32 {
+		t.Errorf("相同类型联结应返回自身: got (%v, %v)", gt, ok)
+	}
+	if gt, ok := ctx.CommonType(ctx.Never, ctx.U64); !ok || gt != ctx.U64 {
+		t.Errorf("Never 与 u64 联结应返回 u64")
+	}
+
+	mutRef := ctx.Ref(true, ctx.I32)
+	immRef := ctx.Ref(false, ctx.I32)
+	if gt, ok := ctx.CommonType(mutRef, immRef); !ok || gt != immRef {
+		t.Errorf("&mut i32 与 &i32 联结必须产生 &i32，实际为 (%s, %v)", ctx.Format(gt), ok)
+	}
+	if gt, ok := ctx.CommonType(immRef, mutRef); !ok || gt != immRef {
+		t.Errorf("&i32 与 &mut i32 对称联结必须产生 &i32")
+	}
+
+	// 元组逐元素公共类型联结
+	tMut := ctx.Tuple([]TypeID{mutRef, ctx.I32})
+	tImm := ctx.Tuple([]TypeID{immRef, ctx.I32})
+	if gt, ok := ctx.CommonType(tMut, tImm); !ok || gt != tImm {
+		t.Errorf("元组 (&mut i32, i32) 与 (&i32, i32) 应联结为 (&i32, i32)")
+	}
+
+	// 非法组合必须失败，不得依赖单向 CanAssign 误放行
+	if _, ok := ctx.CommonType(ctx.I32, ctx.I64); ok {
+		t.Errorf("不同位宽整数 i32 与 i64 不得产生隐式公共类型")
+	}
+	if _, ok := ctx.CommonType(ctx.Ref(false, mutRef), ctx.Ref(false, immRef)); ok {
+		t.Errorf("嵌套引用可变性 &(&mut i32) 与 &(&i32) 不兼容，不得产生公共类型")
+	}
+	if _, ok := ctx.CommonType(mutRef, ctx.Ref(false, ctx.U32)); ok {
+		t.Errorf("&mut i32 与 &u32 不得产生公共类型")
+	}
+}

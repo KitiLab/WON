@@ -231,6 +231,62 @@ func (c *Context) CanAssign(from, to TypeID) bool {
 	return false
 }
 
+// CommonType 计算两个类型在严格静态语义（无隐式数值宽度/符号转换）下的最小公共超类型 (Type Join)
+// 若两个类型之间不存在合法公共类型，返回 (Invalid, false)，绝不使用单向 CanAssign 充当对称联结。
+func (c *Context) CommonType(a, b TypeID) (TypeID, bool) {
+	if a == b {
+		return a, true
+	}
+	if a == Invalid {
+		return b, true
+	}
+	if b == Invalid {
+		return a, true
+	}
+
+	ai := c.Info(a)
+	bi := c.Info(b)
+
+	// 底类型 Never (!) 可安全统一为另一侧类型
+	if ai.Kind == KindNever {
+		return b, true
+	}
+	if bi.Kind == KindNever {
+		return a, true
+	}
+
+	// &mut T 与 &T 在同一内部元素类型下联结为只读公共类型 &T；元素类型不同则返回失败
+	if ai.Kind == KindRef && bi.Kind == KindRef {
+		if ai.Elem != bi.Elem {
+			return Invalid, false
+		}
+		return c.Ref(ai.IsMut && bi.IsMut, ai.Elem), true
+	}
+
+	// *mut T 与 *const T 在同一元素类型下联结为 *const T
+	if ai.Kind == KindRawPtr && bi.Kind == KindRawPtr {
+		if ai.Elem != bi.Elem {
+			return Invalid, false
+		}
+		return c.RawPtr(ai.IsMut && bi.IsMut, ai.Elem), true
+	}
+
+	// 元组逐元素递归求公共类型
+	if ai.Kind == KindTuple && bi.Kind == KindTuple && len(ai.Elems) == len(bi.Elems) {
+		joined := make([]TypeID, len(ai.Elems))
+		for i := range ai.Elems {
+			jt, ok := c.CommonType(ai.Elems[i], bi.Elems[i])
+			if !ok {
+				return Invalid, false
+			}
+			joined[i] = jt
+		}
+		return c.Tuple(joined), true
+	}
+
+	return Invalid, false
+}
+
 // CanCast 判断是否允许通过显式 `expr as target` 执行类型转换
 func (c *Context) CanCast(from, to TypeID) bool {
 	if from == Invalid || to == Invalid {

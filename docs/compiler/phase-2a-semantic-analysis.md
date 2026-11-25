@@ -1,9 +1,9 @@
 # WON Phase 2A — Semantic Analysis & Type Checking Architecture
 
-> **Document Status**: `IMPLEMENTED`  
-> **Milestone**: Phase 2A — Core Semantic Analysis & Type System Implementation  
+> **Document Status**: `IMPLEMENTED` (Hardened in [Phase 2A.1](phase-2a.1-correctness-hardening.md))  
+> **Milestone**: Phase 2A / 2A.1 — Core Semantic Analysis & Type System Implementation  
 > **Code Location**: `compiler/poc/internal/{lexer,types,symbols,checker}`  
-> **Companion Document**: [Typed Semantic Model (`TypedProgram`)](phase-2a-typed-semantic-model.md)
+> **Companion Documents**: [Typed Semantic Model (`TypedProgram`)](phase-2a-typed-semantic-model.md), [Phase 2A.1 Correctness Hardening](phase-2a.1-correctness-hardening.md)
 
 ---
 

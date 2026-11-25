@@ -46,7 +46,8 @@ Every structural type in a compilation unit is normalized and interned into a de
 ### Type Relations (`relations.go`)
 - **`IsSized`**: Returns `false` for bare `str`, `[T]`, and tuples containing unsized elements.
 - **`IsCopy`**: True for scalars, `bool`, `char`, raw pointers, immutable references `&T`, `fn`, `!`, and arrays/tuples of `Copy` elements; `false` for `&mut T` and `String`.
-- **`FitsIntegerLiteral`**: Validates unsuffixed literals (`i8`, `u8`, ..., `u64`/`i64` bounds including unary `-128` for `i8`) only within explicit or bidirectional contextual expectations (`WON-TYP-003`).
+- **`FitsBigIntLiteral` / `FitsIntegerLiteral`**: Validates arbitrary-precision `*big.Int` numeric literals against exact signed $[-2^{N-1}, 2^{N-1}-1]$ and unsigned $[0, 2^N-1]$ bit widths (`i8..i128`, `u8..u128`, 64-bit `isize`/`usize`) including unary signed minimums (`-128i8`, `-2^127` for `i128`) without truncation (`WON-TYP-003`). Malformed numeric tokens emit `WON-SYN-008` in parsing and are never silently replaced with `0`.
+- **`CommonType`**: Computes strict symmetric least-upper-bound joins across identical types, `Never`, reference mutability pairs (`&mut T` + `&T` -> `&T`), raw pointer mutability pairs (`*mut T` + `*const T` -> `*const T`), and tuples without permitting implicit width coercions (`WON-MAT-003` / `WON-TYP-001`).
 - **`CanAssign`**: Enforces identical `TypeID`, `Never` bottom coercion, safe `&mut T -> &T` / `*mut T -> *const T` covariant downgrade, and element-wise tuple compatibility. Implicit integer width coercion returns `false`.
 - **`CanCast`**: Permits explicit `as` casts across numeric primitives, `char <-> integer`, `bool -> integer`, raw pointers <-> `usize`, and `&T -> *const T` / `&mut T -> *mut T`; rejects incompatible casts (`WON-TYP-005`).
 

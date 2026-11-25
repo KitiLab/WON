@@ -92,6 +92,10 @@ The implementation roadmap adheres to strict technical dependency ordering acros
   - *Objective*: Implement canonical interned type representation, two-pass hierarchical symbol resolution, bidirectional local type inference, struct/enum/method semantics, `match` exhaustiveness checking, `Option`/`Result`/`?` propagation, UTF-8 validation (`WON-LEX-004`), and the backend-decoupled `TypedProgram` boundary (`WON-GEN-002`).
   - *Deliverables*: `internal/types`, `internal/symbols`, upgraded `internal/checker`, [phase-2a-typed-semantic-model.md](compiler/phase-2a-typed-semantic-model.md), [phase-2a-semantic-analysis.md](compiler/phase-2a-semantic-analysis.md), Go fuzz suite, and automated Phase 2A semantic fixture suite.
   - *Status*: `IMPLEMENTED` (Verified in CI).
+- **Sub-phase 2A.1 (Semantic Correctness Hardening)**:
+  - *Objective*: Harden full-width `math/big.Int` integer literals (`i8..i128`, `u8..u128`, `isize`/`usize`), enforce `unsafe:` boundaries on raw-pointer dereferencing (`WON-SEC-002`), unify signature-first single-pass method checking, and replace bidirectional `CanAssign` hacks with strict `CommonType` type joins.
+  - *Deliverables*: Arbitrary-precision literal AST/lexer/types validation, [phase-2a.1-correctness-hardening.md](compiler/phase-2a.1-correctness-hardening.md), and exhaustive regression & fuzz suites.
+  - *Status*: `IMPLEMENTED` (Verified in CI).
 - **Sub-phase 2B (Ownership-Lite Borrow Checker & Trait Solver — Planned)**:
   - *Objective*: Compile-time move tracking, lexical borrow & reference provenance (`WON-MEM-001`/`002`), trait coherence/impl checking, and `From`/`Into` conversion on `?`.
   - *Status*: `SPECIFIED` / `PLANNED`.

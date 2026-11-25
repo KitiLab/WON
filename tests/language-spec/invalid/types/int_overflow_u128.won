@@ -1,0 +1,9 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: 128-bit Integer Literal Overflow Protection
+## Violation: Exceeding maximum u128 bound (2^128) or minimum i128 bound (-2^127 - 1).
+## Expected Diagnostic: WON-TYP-003
+
+fn main():
+    let overflow_u128: u128 = 340282366920938463463374607431768211456
+    let underflow_i128: i128 = -170141183460469231731687303715884105729

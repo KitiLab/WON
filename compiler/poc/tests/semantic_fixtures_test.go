@@ -48,6 +48,7 @@ func TestPhase2ASemanticValidFixtures(t *testing.T) {
 		"tests/language-spec/valid/names/forward_calls_and_shadowing.won",
 		"tests/language-spec/valid/enums/option_result_try.won",
 		"tests/language-spec/valid/patterns/match_variants_and_bool.won",
+		"tests/language-spec/valid/types/full_width_integers.won",
 	}
 
 	bindings := mockZlibForFixtures()
@@ -91,11 +92,15 @@ func TestPhase2ASemanticInvalidFixtures(t *testing.T) {
 		{"tests/language-spec/invalid/types/implicit_coercion.won", false, []string{"WON-TYP-001"}},
 		{"tests/language-spec/invalid/types/non_bool_condition.won", false, []string{"WON-TYP-002"}},
 		{"tests/language-spec/invalid/types/integer_literal_overflow.won", false, []string{"WON-TYP-003"}},
+		{"tests/language-spec/invalid/types/int_overflow_u128.won", false, []string{"WON-TYP-003"}},
 		{"tests/language-spec/invalid/types/unsized_str_by_value.won", false, []string{"WON-TYP-006"}},
+		{"tests/language-spec/invalid/types/invalid_method_args.won", false, []string{"WON-TYP-001"}},
 		{"tests/language-spec/invalid/structs/missing_and_immutable_field.won", false, []string{"WON-ADT-002", "WON-ADT-004"}},
 		{"tests/language-spec/invalid/patterns/non_exhaustive_match.won", false, []string{"WON-MAT-001"}},
+		{"tests/language-spec/invalid/patterns/match_incompatible_join.won", false, []string{"WON-MAT-003"}},
 		{"tests/language-spec/invalid/errors/mismatched_try_error.won", false, []string{"WON-ERR-001"}},
 		{"tests/language-spec/invalid/ffi/foreign_call_outside_unsafe.won", false, []string{"WON-SEC-001"}},
+		{"tests/language-spec/invalid/ffi/raw_ptr_deref_outside_unsafe.won", false, []string{"WON-SEC-002"}},
 	}
 
 	bindings := mockZlibForFixtures()
@@ -150,6 +155,7 @@ func TestCLISemanticCheckAndCodegenGate(t *testing.T) {
 	for _, rel := range []string{
 		"examples/zlib_compression.won",
 		"tests/language-spec/valid/types/struct_and_enum.won",
+		"tests/language-spec/valid/types/full_width_integers.won",
 		"tests/language-spec/valid/enums/option_result_try.won",
 	} {
 		out, err := exec.Command(woncBin, "check", filepath.Join("..", "..", "..", rel)).CombinedOutput()
@@ -159,20 +165,35 @@ func TestCLISemanticCheckAndCodegenGate(t *testing.T) {
 	}
 
 	// 2. wonc check 在语义负例上返回非 0 并输出规范诊断码
-	negOut, err := exec.Command(woncBin, "check", "--format=json", filepath.Join("..", "..", "..", "tests/language-spec/invalid/patterns/non_exhaustive_match.won")).CombinedOutput()
-	if err == nil {
-		t.Fatalf("wonc check 在非穷尽 match 上应返回非 0 退出码")
-	}
-	if !strings.Contains(string(negOut), "WON-MAT-001") {
-		t.Errorf("JSON 输出中应包含 WON-MAT-001, 实际: %s", string(negOut))
+	for _, tc := range []struct {
+		rel  string
+		code string
+	}{
+		{"tests/language-spec/invalid/patterns/non_exhaustive_match.won", "WON-MAT-001"},
+		{"tests/language-spec/invalid/ffi/raw_ptr_deref_outside_unsafe.won", "WON-SEC-002"},
+		{"tests/language-spec/invalid/types/invalid_method_args.won", "WON-TYP-001"},
+		{"tests/language-spec/invalid/types/int_overflow_u128.won", "WON-TYP-003"},
+	} {
+		negOut, err := exec.Command(woncBin, "check", "--format=json", filepath.Join("..", "..", "..", tc.rel)).CombinedOutput()
+		if err == nil {
+			t.Fatalf("wonc check 在负例 %s 上应返回非 0 退出码", tc.rel)
+		}
+		if !strings.Contains(string(negOut), tc.code) {
+			t.Errorf("%s JSON 输出应包含 %s, 实际: %s", tc.rel, tc.code, string(negOut))
+		}
 	}
 
-	// 3. wonc build 对尚无 C11 代码生成实现的 struct/enum/match 程序必须以 WON-GEN-002 明确拒止而非错误生成 C 代码
-	buildOut, err := exec.Command(woncBin, "build", filepath.Join("..", "..", "..", "tests/language-spec/valid/types/struct_and_enum.won")).CombinedOutput()
-	if err == nil {
-		t.Fatalf("wonc build 应当拒止暂未实现 C11 代码生成的 struct_and_enum.won")
-	}
-	if !strings.Contains(string(buildOut), "WON-GEN-002") {
-		t.Errorf("wonc build 拒止输出中应包含 WON-GEN-002, 实际: %s", string(buildOut))
+	// 3. wonc build 对尚无 C11 代码生成实现的 struct/enum/match 与 128 位整数程序必须以 WON-GEN-002 明确拒止而非错误生成 C 代码
+	for _, rel := range []string{
+		"tests/language-spec/valid/types/struct_and_enum.won",
+		"tests/language-spec/valid/types/full_width_integers.won",
+	} {
+		buildOut, err := exec.Command(woncBin, "build", filepath.Join("..", "..", "..", rel)).CombinedOutput()
+		if err == nil {
+			t.Fatalf("wonc build 应当拒止暂未实现 C11 代码生成的 %s", rel)
+		}
+		if !strings.Contains(string(buildOut), "WON-GEN-002") {
+			t.Errorf("wonc build 拒止 %s 输出中应包含 WON-GEN-002, 实际: %s", rel, string(buildOut))
+		}
 	}
 }
