@@ -1,397 +1,452 @@
 # WON Language Specification: Ownership and Borrowing (Normative Proposal)
 
-> **Specification Version**: Draft 0.2 (Phase 2B.0 Normative Elaboration)  
+> **Specification Version**: Draft 0.2.1 (Phase 2B.0.1 Design Closure)  
 > **Status**: `SPECIFIED` (**Proposed / Awaiting Owner Approval** — see [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md))  
-> **Compiler Implementation Status**: `NOT IMPLEMENTED` (CFG & Borrow Checker scheduled for Phase 2B.1–2B.2; only shallow `WON-MUT-001` and `unsafe:` raw pointer `WON-SEC-002` are currently active in Phase 2A.2)  
-> **Governing Architecture**: [Phase 2B.0 Ownership Architecture](../compiler/phase-2b.0-ownership-architecture.md)  
-> **Related Core Spec**: [Ownership and Memory Overview](ownership-and-memory.md), [ADR-003](../decisions/ADR-003-ownership-lite-memory-model.md)
+> **Compiler Implementation Status**: `NOT IMPLEMENTED` (CFG, Move, Borrow, Provenance & Drop passes scheduled for Phases 2B.1–2B.3; only shallow `WON-MUT-001`, `WON-SEC-001`, and `WON-SEC-002` are `IMPLEMENTED` in Phase 2A.2.1)  
+> **Governing Architecture**: [Phase 2B.0 / 2B.0.1 Ownership Architecture](../compiler/phase-2b.0-ownership-architecture.md)  
+> **Related Core Spec**: [Ownership and Memory Overview](ownership-and-memory.md), [Syntax & Grammar](syntax-and-grammar.md), [ADR-003](../decisions/ADR-003-ownership-lite-memory-model.md)
 
 ---
 
 ## 1. Purpose & Normative Authority
 
-This document specifies the formal language-level ownership, move, mutability, borrowing, provenance, destruction, and concurrency-boundary rules for **WON Ownership-Lite**.
+This document specifies the formal language-level ownership, value-copy, initialization, move, mutability, borrowing, reference-provenance, destruction, and boundary rules for **WON Ownership-Lite**.
 
-Normative keywords **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **SHOULD**, and **MAY** follow [RFC 2119](https://tools.ietf.org/html/rfc2119). Every compile-time error rule carries its canonical diagnostic code (`WON-MEM-*`, `WON-MUT-*`, `WON-SEC-*`).
+Normative keywords **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **SHOULD**, and **MAY** follow [RFC 2119](https://tools.ietf.org/html/rfc2119). Every static error rule binds to a canonical diagnostic code (`WON-MEM-*`, `WON-MUT-*`, `WON-SEC-*`).
 
 > [!IMPORTANT]
-> **Status Boundary**: Nothing in this document claims these checks are already active in the `wonc` Phase 2A.2 Go compiler unless explicitly marked `IMPLEMENTED`. Activation occurs incrementally in Phase 2B.1–2B.2.
+> **Implementation Boundary**: All rules in Sections 2–9 are **Proposed (`Awaiting Owner Approval`)** unless explicitly marked `IMPLEMENTED`. No Phase 2B borrow-checker pass is active in `wonc` yet.
 
 ---
 
 ## 2. Single Ownership & Value Semantics (`Copy` vs `Move`)
 
-1. **Single Owner Invariant**: Every runtime value in safe WON has exactly one owning place (binding, struct field, enum payload, array/tuple slot) at any dynamic execution point.
-2. **`Copy` Types (`IsCopy == true`)**:
+1. **Single Owner Invariant**: Every runtime value in safe WON has a single owning place (local binding, struct field, enum payload, or array/tuple element) at any point in execution.
+2. **Builtin `Copy` Types (`IsCopy == true`)**:
    - The following types **SHALL** implement `Copy`:
      - All scalar integer (`i8..i128`, `u8..u128`, `isize`, `usize`), float (`f32`, `f64`), `bool`, `char`, `unit`, and `!` types.
      - Immutable shared references (`&T` for any `T`).
-     - Raw pointers (`*const T`, `*mut T`) and function pointers (`fn(...) -> R`).
-     - Fixed-size arrays `[T; N]` and tuples `(T1, ..., Tn)` if and only if all element types are `Copy`.
-   - Assigning, passing by value, or returning a `Copy` place copies its representation bitwise and leaves the source place initialized and readable.
+     - Raw pointers (`*const T`, `*mut T`) and function types (`fn(...) -> R`).
+     - Fixed-size arrays `[T; N]` and tuples `(T1, ..., Tn)` if and only if every element type implements `Copy`.
+   - Copying duplicates the representation bitwise without invalidating the source place.
 3. **Non-`Copy` Types (`IsCopy == false`)**:
-   - Mutable references (`&mut T`), owned heap containers (`String`, `Vec[T]`), RAII resource handles, `Shared[T]`, `Arc[T]`, and any type implementing `Drop` **MUST NOT** be `Copy`.
-   - User-defined `struct` and `enum` types default to **non-`Copy` (Move semantics)** unless explicitly opted in via `@derive(Copy)` *(proposed — requires all fields/variants to be `Copy` and no `Drop` impl)*.
-4. **Move Semantics (`WON-MEM-001`)**:
-   - Assigning or passing a non-`Copy` place transfers ownership to the destination and marks the source place `Moved`.
-   - Any subsequent read, move, or borrow of a `Moved` (or conditionally `MaybeInit`) place **MUST** fail compilation with **`WON-MEM-001`**.
+   - Mutable references (`&mut T`), owned heap types (`String`, future `Vec[T]`), `Shared[T]`, `Arc[T]`, synchronization/file handles, and any type defining or transitively containing a destructor **MUST NOT** be `Copy`.
+   - User-defined `struct` and `enum` types default to **Move-by-default (`IsCopy == false`)**.
+4. **Explicit `@derive(Copy)` for Structs & Enums (Proposed Grammar Extension)**:
+   - A `struct` or `enum` declaration **MAY** opt into `Copy` solely using the exact attribute syntax `@derive(Copy)` placed immediately above the declaration (`@copy` and alternative spellings **MUST NOT** be accepted).
+   - **Eligibility Requirements**: `@derive(Copy)` **SHALL** succeed if and only if:
+     1. Every field (for `struct`) or every variant payload (for `enum`) satisfies `IsCopy == true`.
+     2. The type neither implements `Drop` nor acquires a destructor.
+     3. *(Phase 2B Restriction)* All fields/variants are concrete (unconstrained generic type parameters `T` in `@derive(Copy)` are **rejected / deferred (`WON-SEM-010`)** until the general Trait Solver milestone introduces conditional bounds).
+   - **Violation**: Placing `@derive(Copy)` on a type with a non-`Copy` field/variant or a `Drop` impl **MUST** fail with **`WON-MEM-011`**.
+5. **Move Semantics (`WON-MEM-001`)**:
+   - Assigning, passing by value, or returning a non-`Copy` place transfers ownership to the destination and marks the source place `Moved`.
+   - Any subsequent read, move, or borrow of a `Moved` or conditionally moved (`MaybeInit`) place **MUST** fail with **`WON-MEM-001`**.
 
 ---
 
 ## 3. Definite Initialization & Reinitialization
 
-1. **Read-Before-Init (`WON-MEM-010`)**: A variable binding **MUST** be definitely initialized along every CFG path reaching a read, move, or borrow of that binding (`WON-MEM-010`).
-2. **Branch-Convergent Initialization**: If an uninitialized binding `let x: T` (or `var x: T`) is assigned along *every* reachable non-diverging branch of an `if`/`elif`/`else` or exhaustive `match`, `x` becomes definitely initialized after the merge point.
-3. **Reinitialization After Move**: If a `var` binding `x` of non-`Copy` type has been moved, assigning a new value (`x = new_val`) restores `x` to initialized state, after which `x` MAY be moved or borrowed again.
-   - Assigning to an immutable `let` binding that is already initialized is rejected (`WON-MUT-001`).
+1. **Read-Before-Init (`WON-MEM-010`)**: Every binding **MUST** be definitely initialized along all control-flow paths reaching a read, borrow, or move of that binding (`WON-MEM-010`).
+   - *(Grammar Note)* Deferred declaration without `=` (`let x: T` / `var x: T`) requires the proposed optional initializer extension in [syntax-and-grammar.md](syntax-and-grammar.md); current `wonc` parser requires `=` at declaration (`WON-SYN-009`).
+2. **Branch-Convergent Initialization**: Assigning an uninitialized binding along *every* non-diverging incoming branch of an `if`/`elif`/`else` or exhaustive `match` transitions the binding to `Init` at the merge block.
+3. **Reinitialization After Move**: Assigning a new value (`x = new_val`) to a moved `var` binding `x` restores `x` to `Init`. Reassigning an already-`Init` non-`Copy` `var` binding destroys the previous value before storing `new_val`. Assigning to `let` remains **`WON-MUT-001`** (`IMPLEMENTED`).
 
 ---
 
 ## 4. Partial Moves & Structural Integrity
 
-1. **Field-Level Partial Moves**: Moving a non-`Copy` field `s.field` out of a composite `struct` or tuple `s` marks only `s.field` as `Moved`. Unmoved sibling fields (`s.other`) remain accessible and borrowable.
-2. **Whole-Struct Lockout**: While any field of `s` is `Moved`, any read, move, or borrow of whole `s` **MUST** fail with **`WON-MEM-001`**. Reinitializing all moved fields restores `s` to whole initialized state.
-3. **`Drop` Container Restriction (`WON-MEM-007`)**: Moving any field out of a `struct` whose root type implements `Drop` **MUST** fail with **`WON-MEM-007`**, because `Drop::drop(&mut self)` requires every field to remain valid at destruction time.
+1. **Non-`Drop` Field-Level Partial Moves**: Moving a non-`Copy` field `s.field` out of a composite `struct` (without custom root `Drop`) marks only `s.field` as `Moved`. Disjoint sibling fields remain `Init` and usable.
+2. **Whole-Composite Lockout (`WON-MEM-001`)**: While any field of `s` is `Moved`, reading, moving, or borrowing whole `s` **MUST** fail with **`WON-MEM-001`**. Reinitializing every moved field restores whole `s` to `Init`.
+3. **Custom `Drop` Prohibition (`WON-MEM-007`)**: Moving any field out of a `struct` defining a custom root `Drop` destructor **MUST** fail with **`WON-MEM-007`**.
 
 ---
 
-## 5. Mutability Rules (`let` vs `var` vs `&mut`)
+## 5. Mutability Rules (`let`, `var`, `&mut`)
 
-1. **`let` vs `var` Bindings (`WON-MUT-001` — `IMPLEMENTED`)**:
-   - `let x = ...` forbids reassignment, field mutation through `x`, and taking `&mut x`.
-   - `var x = ...` permits reassignment, field mutation (where permitted by field visibility/mutability `var` in `WON-ADT-004`), and taking `&mut x`.
-   - Consuming `let x = owned_val` by **moving** (`let y = x`) is **ALLOWED**, because moving transfers ownership rather than mutating the original place.
-2. **Dereference Mutability**:
-   - Through `&T`: read-only access only. Writing `*r = v`, mutating fields `r.f = v`, or taking `&mut *r` **MUST** fail with `WON-MUT-001`.
-   - Through `&mut T`: reading and overwriting `*r = v` are permitted; moving a non-`Copy` field/target *out* of `*r` without immediate replacement **MUST** fail with **`WON-MEM-008`** (cannot move out of borrowed reference).
-
----
-
-## 6. Borrowing, Aliasing Exclusivity & Borrow Splitting
-
-At every point in a function's control flow:
-
-1. **Shared Borrows (`&T`)**: Multiple active immutable loans to the same place MAY coexist simultaneously.
-2. **Exclusive Borrows (`&mut T`)**: At most one active mutable loan to a place MAY exist at any program point, and **NO** shared loan to any overlapping place may be active concurrently.
-3. **Conflict Rules**:
-   - Creating `&mut p` while `&p` is active -> **`WON-MEM-004`** (immutable borrow conflicts with mutable borrow).
-   - Reading `p` or creating `&p` while `&mut p` is active -> **`WON-MEM-004`**.
-   - Creating `&mut p` while another `&mut p` is active -> **`WON-MEM-005`** (multiple mutable borrows).
-   - Mutating `p = ...`, moving `p`, or dropping `p` while any `&p` or `&mut p` loan is active -> **`WON-MEM-006`** (mutation/move while borrowed) or **`WON-MEM-003`** (drop while borrowed).
-4. **Disjoint Struct & Tuple Borrow Splitting**:
-   - Borrows on distinct fields `&mut s.a` and `&mut s.b` (or tuple slots `&mut t.0` and `&t.1`) target disjoint memory places and **SHALL** be permitted simultaneously.
-   - Simultaneous mutable indexing `&mut arr[i]` and `&mut arr[j]` conservatively conflicts (`WON-MEM-005`) because `i != j` is generally undecidable at compile time; slice-splitting standard library helpers SHALL be used when distinct slices are needed.
-5. **Non-Lexical Active Regions (NLL within Lexical Scope)**:
-   - A loan ends immediately after the **last CFG point where any reference carrying that loan's region is live (used)**.
-   - Reborrowing `&*r` or `&mut *r` freezes `r` only while the child reborrow's region remains live.
+1. **`let` vs `var` (`WON-MUT-001` — `IMPLEMENTED`)**:
+   - `let` prohibits reassignment, direct field mutation, and taking `&mut x`. Consuming `let x = owned` by **moving ownership** (`let y = x`) IS allowed.
+   - `var` permits reassignment, `var` field mutation (`WON-ADT-004`), and taking `&mut x`.
+2. **Dereference Boundaries (`WON-MEM-008`)**:
+   - Through `&T`: read-only; mutation or `&mut *r` emits `WON-MUT-001`.
+   - Through `&mut T`: `*r = new_val` is permitted; moving a non-`Copy` value *out* of `*r` or `r.field` without replacement **MUST** fail with **`WON-MEM-008`**.
 
 ---
 
-## 7. Zero-Annotation Return Provenance (`Prov(e)`)
+## 6. Borrowing, Aliasing Exclusivity & Method Evaluation
 
-WON intentionally omits named lifetime parameters (`'a`). Functions returning references obey strict provenance inference:
+At every CFG point:
 
-1. **No Stack Escapes (`WON-MEM-003`)**: A function **MUST NOT** return a reference (`&T`, `&mut T`, `&str`) whose provenance set $\text{Prov}(e_{\text{ret}})$ includes any local variable, local parameter value moved into the frame, or temporary allocated on that function's stack (`WON-MEM-003`).
-2. **Static Constants**: Returning `&'static str` string literals (or immutable module-static data) has provenance `Static`, which outlives every call frame and is unconditionally valid.
-3. **Single Provenance Propagation**:
-   - If a function's return reference is proven to derive exclusively from a **single** input reference parameter (`&self`, `&mut self`, or parameter `arg_i: &U` / `&mut U`), the caller implicitly ties the returned reference's region to `arg_i`.
-4. **Ambiguous Multi-Input Rejection (`WON-MEM-002`)**:
-   - If a function takes multiple reference parameters and can return a reference derived from more than one of them across control-flow paths (e.g., `if cond: return a else: return b`), the compiler **MUST** conservatively reject the function signature/body with **`WON-MEM-002`**.
-
----
-
-## 8. Deterministic Destruction (`Drop`)
-
-1. **Lexical Scope Destruction**: Every initialized non-`Copy` binding whose type has a destructor (`Drop` or transitive `Drop` field) is destroyed deterministically when control leaves its enclosing lexical block (via normal completion, `return`, `break`, `continue`, or `?`), in **exact reverse declaration order**.
-2. **Value vs Borrow Lifetime Separation**: A borrowed reference ends at its last use (Section 6.5), whereas owned values drop at lexical block exit (Section 8.1). If a variable holding a reference is dropped *after* the referenced owner would be dropped while still live at its drop/use point, the compiler **MUST** emit **`WON-MEM-003`**.
-3. **No Double-Free**: Moved bindings and uninitialized paths never execute destructors; path-conditional moves employ compiler-synthesized stack drop flags.
-
----
-
-## 9. Unsafe Boundaries, Raw Pointers & Structured Concurrency
-
-1. **Raw Pointers (`*const T`, `*mut T`)**:
-   - Raw pointers are `Copy` and untracked for aliasing/lifetime provenance.
-   - Dereferencing `*p` (`WON-SEC-002`) or calling direct C FFI without safe wrapper (`WON-SEC-001`) **MUST** occur inside `unsafe:`.
-   - Raw pointers **MUST NOT** implicitly coerce to `&T` or `&mut T`.
-2. **Explicit Sharing & Interior Mutability**:
-   - Graphs/shared ownership use `Shared[T]` / `Weak[T]` (single-thread) or `Arc[T]` (multi-thread).
-   - Interior mutation uses `Cell[T]`, `RefCell[T]`, `Mutex[T]`, or `RwLock[T]`.
-3. **Structured Concurrency (`scope s:` / `s.spawn:` — Phase 3)**:
-   - Values moved into `s.spawn:` MUST satisfy `T: Send`.
-   - Immutable stack borrows `&x` captured by `s.spawn:` MUST satisfy `T: Sync`, with loan held across the entire enclosing `scope s:`.
-   - Capturing `&mut x` directly into `s.spawn:` is prohibited (`WON-CON-001`).
+1. **Shared (`&T`) & Exclusive (`&mut T`) Rules**:
+   - Multiple `&T` loans on overlapping places MAY coexist.
+   - At most one active `&mut p` loan MAY exist, and it conflicts with any overlapping `&p` or `&mut p`.
+   - Overlapping `&mut p` while `&p` live (or read/`&p` while `&mut p` live) -> **`WON-MEM-004`**.
+   - Overlapping `&mut p` while `&mut p` live -> **`WON-MEM-005`**.
+   - Assigning/mutating/moving `p` while `&p` or `&mut p` live -> **`WON-MEM-006`**.
+2. **Disjoint Struct Field Splitting vs Conservative Array Indexing**:
+   - Distinct struct fields (`&mut s.a` and `&mut s.b`) are disjoint and **SHALL** be permitted concurrently.
+   - Dynamic array/slice indexing (`&mut arr[i]` and `&mut arr[j]`) conservatively treats indices as conflicting (`WON-MEM-005`).
+3. **Non-Lexical Active Regions (Within Scopes)**:
+   - A borrow loan terminates immediately after the **last CFG point** at which any reference carrying its region may still be read.
+   - Reborrowing (`&*r`, `&mut *r`) freezes parent `r` only over the child reborrow's live region.
+4. **Deterministic Method Receiver Borrowing (No Two-Phase Borrowing)**:
+   - For `recv.method(arg0, arg1, ...)`:
+     1. Receiver borrow (`&recv` for `&self`, `&mut recv` for `&mut self`, or `Move`/`Copy` for `self`) starts **immediately upon evaluating `recv`**.
+     2. Arguments `arg0, arg1, ...` evaluate strictly left-to-right **while the receiver borrow is active**.
+   - Therefore, nested self-borrowing patterns such as `vec.push(vec.len())` or `s.mutate_with(s.peek())` **MUST** fail deterministically with **`WON-MEM-004`**; callers bind the argument first (`let n = vec.len(); vec.push(n)`). Two-phase borrowing is explicitly deferred (`NOT in Phase 2B`).
 
 ---
 
-## 10. Canonical Normative Test Suite (Positive & Negative Specification Cases)
+## 7. Zero-Syntax Static & Candidate-Origin Reference Provenance (`Prov(e)`)
 
-Every conforming Phase 2B.1–2B.2 borrow checker **MUST** satisfy all 22 normative test scenarios below.
+Source-level WON uses **only** `&T` and `&mut T`. Named lifetime tokens (`'a`, `'static`) **MUST NOT** appear in WON source syntax or signatures. Internally, the compiler models provenance categories:
 
-### 10.1 Positive Cases (MUST Compile Cleanly in `wonc check`)
+$$\text{Prov}(e) \subseteq \{\text{Local}(p), \text{Param}(i), \text{Static}\}$$
 
-#### P1. `Copy` Primitive Reuse Across Assignments & Calls
+1. **Valid `Static` Provenance**:
+   - Today, **only string literals** carry compiler-internal `Static` provenance (`&str` backed by read-only binary data).
+   - Module-level `static` variable declarations do **not** exist in WON's canonical grammar (`syntax-and-grammar.md`) and are **not** assumed.
+2. **No Local Stack Escape (`WON-MEM-003`)**:
+   - Any return path where $\text{Local}(p) \in \text{Prov}(e_{\text{ret}})$ **MUST** fail with **`WON-MEM-003`**.
+   - Dropping or exiting scope of owner $x$ while a borrow loan on $x$ remains live **MUST** fail with **`WON-MEM-003`**.
+3. **Candidate-Origin Provenance Tracking (Strategy B)**:
+   - For checked functions with bodies whose return type is `&R` or `&mut R`, the compiler computes the union set of candidate input parameters $\text{RetProv}(f) = S \cup (\{\text{Static}\} \text{ if applicable})$ across all return paths (converging over finite recursion SCCs).
+   - **Single-Origin ($|S| \le 1$)**: Caller ties returned region $\rho_{\text{ret}}$ to that single parameter (e.g., `&self` or another single `&arg`), or none if purely `Static`.
+   - **Multi-Input Return ($|S| \ge 2$)**: If all paths return valid parameter/static origins (never `Local`), the function signature **is accepted**, and every call site `let r = f(args...)` binds $\rho_{\text{ret}}$ to **ALL** candidate argument loans $i \in S$ simultaneously ($\rho_{\text{arg}_i} \supseteq \rho_{\text{ret}}$):
+     - Shared returns (`-> &R`) keep all candidate arguments immutably borrowed across `r`'s live region.
+     - Mutable returns (`-> &mut R`) lock all candidate `&mut` arguments (proven disjoint at call entry by `WON-MEM-005`) exclusively across `r`'s live region.
+   - **Opaque / Abstract Boundary Rejection (`WON-MEM-002`)**: Where a callable has **no analyzable body** (such as a `fn(&T, &T) -> &T` function pointer type or future bodyless `trait` method) and accepts $\ge 2$ input references while returning a reference, candidate origins cannot be proven modularly, so the compiler **MUST** reject with **`WON-MEM-002`**.
+
+---
+
+## 8. Deterministic Destruction (`Drop`) & Safe Boundaries
+
+1. **Compiler-Managed Cleanup vs `impl Drop`**:
+   - Built-in resource types (`String`, future `Vec[T]`, `Shared[T]`, `Arc[T]`) and composites transitively containing them drop automatically at lexical scope exit in **exact reverse declaration order** (along normal fallthrough, `return`, `break`, `continue`, and `?`).
+   - User-defined `impl Drop for T:` is specified conceptually but deferred to the future Trait Solver Milestone (`WON-SEM-010` today).
+2. **No Double-Free & Conditional Drop Flags**:
+   - Moved bindings never drop. Conditionally moved bindings (`MaybeInit`) use compiler-synthesized stack drop flags (`Phase 2B.3`).
+3. **Raw Pointers & FFI Boundaries (`WON-SEC-001`, `WON-SEC-002` — `IMPLEMENTED`)**:
+   - Raw pointers `*const T`, `*mut T` are `Copy`, cannot coerce implicitly to `&T` or `&mut T`, and require `unsafe:` on dereference (`WON-SEC-002`) or raw C FFI calls (`WON-SEC-001`). Unknown FFI ownership cannot silently become safe.
+4. **Concurrency Captures (`scope` / `s.spawn` — Future Phase 3, currently `WON-SEM-010`)**:
+   - Owned moves into `s.spawn:` will require `T: Send`.
+   - Shared stack borrows `&v` into `s.spawn:` will require `T: Sync` and must remain bounded within the enclosing `scope s:` nursery. Mutable captures `&mut v` across tasks are forbidden (`WON-CON-001`).
+
+---
+
+## 9. Canonical Diagnostics Assigned to Ownership Rules
+
+*(Implemented in `wonc` today: `WON-MUT-001`, `WON-SEC-001`, `WON-SEC-002`, `WON-SEM-010`. Proposed Phases 2B.1–2B.3 / Phase 3: `WON-MEM-001`..`011`, `WON-CON-001`.)*
+
+- **`WON-MEM-001`**: Use of moved or partially moved value (`2B.1`).
+- **`WON-MEM-002`**: Ambiguous multi-reference provenance across opaque/bodyless signature (`2B.2`).
+- **`WON-MEM-003`**: Escape of local stack reference / borrowed owner dropped before last use (`2B.2`).
+- **`WON-MEM-004`**: Borrow exclusivity conflict (`&T` vs `&mut T`, including `v.push(v.len())`) (`2B.2`).
+- **`WON-MEM-005`**: Multiple simultaneous `&mut` borrows (`2B.2`).
+- **`WON-MEM-006`**: Mutating or moving a value while an active borrow exists (`2B.2`).
+- **`WON-MEM-007`**: Partial move out of a type implementing custom `Drop` (`2B.1` / Future `Drop`).
+- **`WON-MEM-008`**: Moving a non-`Copy` value out of a dereferenced borrow `&T` / `&mut T` (`2B.1`).
+- **`WON-MEM-009`**: Optional lint warning — unnecessary `var` binding (`2B.1`).
+- **`WON-MEM-010`**: Use of possibly uninitialized binding (`2B.1`).
+- **`WON-MEM-011`**: Invalid `@derive(Copy)` attribute (`2B.1`).
+
+---
+
+## 10. Normative Acceptance Examples & Implementation-Status Matrix
+
+Every case below explicitly states its **Proposed Normative Rule** alongside exact status against today's `wonc` compiler (`parser`, `checker`, `C11 backend`).
+
+> [!NOTE]
+> `String.len()` returns `u64` in `wonc` Phase 2A.2 (`expressions.go:1802`). Examples below use `u64` cleanly where testing current checker behavior.
+
+### 10.1 Copy Derivation (`A1`–`A4`)
+
+#### A1. `@derive(Copy)` on Struct Containing Only `Copy` Fields (Proposed `PASS` -> `2B.1`)
 ```won
-fn add_one(n: i32) -> i32:
-    return n + 1
+@derive(Copy)
+struct Point2D:
+    x: f64
+    y: f64
 
-fn p1_copy_reuse() -> i32:
-    let a: i32 = 41
-    let b = a
-    return add_one(a) + b
+fn main() -> i32:
+    let p1 = Point2D { x: 1.0, y: 2.0 }
+    let p2 = p1
+    if p1.x == p2.x:
+        return 0
+    return 1
 ```
-- **Expected**: `PASS` (no diagnostics). `i32` is `Copy`; `a` remains valid after `b = a` and `add_one(a)`.
+- **Proposed Behavior**: Valid (`PASS`). `f64` is `Copy`; `p1` remains readable after `let p2 = p1`.
+- **Current Compiler**: Parser rejects `@` (no `AT` token yet).
 
-#### P2. Rebinding Non-`Copy` Ownership Chain (`Move` + Drop Once)
+#### A2. `@derive(Copy)` on Struct Containing `String` (Proposed `REJECT: WON-MEM-011` -> `2B.1`)
 ```won
-fn p2_move_chain() -> usize:
-    let s1 = String::from("won")
-    let s2 = s1
-    return s2.len()
+@derive(Copy)
+struct NamedId:
+    label: String
+    id: i32
 ```
-- **Expected**: `PASS`. Ownership moves from `s1` to `s2`; `s2` is dropped once at return.
+- **Proposed Behavior**: Rejected with **`WON-MEM-011`** (`label: String` is non-`Copy`).
+- **Current Compiler**: Parser rejects `@`.
 
-#### P3. Multiple Simultaneous Shared Borrows (`&T`)
+#### A3. `@derive(Copy)` on Type Implementing `Drop` (Proposed `REJECT: WON-MEM-011` -> Future Trait Milestone)
 ```won
-fn measure(a: &String, b: &String) -> usize:
-    return a.len() + b.len()
+@derive(Copy)
+struct Handle:
+    fd: i32
 
-fn p3_shared_borrows() -> usize:
-    let msg = String::from("hello")
-    let r1 = &msg
-    let r2 = &msg
-    return measure(r1, r2)
+impl Drop for Handle:
+    fn drop(&mut self):
+        println(self.fd)
 ```
-- **Expected**: `PASS`. Any number of `&String` references may read concurrently.
+- **Proposed Behavior**: Rejected with **`WON-MEM-011`** (types with destructors cannot derive `Copy`).
+- **Current Compiler**: Parser rejects `@`; checker rejects `impl Drop` with `WON-SEM-010`.
 
-#### P4. Non-Lexical Borrow End Before Mutation
+#### A4. `@derive(Copy)` on Generic Struct with Unconstrained `T` (Proposed `REJECT / DEFERRED: WON-SEM-010` -> Trait Milestone)
 ```won
-fn p4_nll_release() -> i32:
-    var count: i32 = 10
-    let view = &count
-    let snapshot = *view
-    # Last use of `view` occurred on previous line; loan ends here.
-    count = snapshot + 5
-    return count
+@derive(Copy)
+struct Wrapper[T]:
+    value: T
 ```
-- **Expected**: `PASS`. `view` is dead before `count = snapshot + 5`, avoiding false lexical deadlock.
+- **Proposed Behavior**: Deferred in Phase 2B (`WON-SEM-010` / rejected until conditional `T: Copy` trait bounds exist in Trait Milestone).
+- **Current Compiler**: Parser rejects `@`.
 
-#### P5. Sequential Exclusive Borrows & Reborrows
+### 10.2 Static Provenance & Escapes (`A5`–`A7`)
+
+#### A5. Returning a String Literal Reference Without `'static` Syntax (Proposed `PASS` -> `2B.2`)
+```won
+fn greeting(formal: bool) -> &str:
+    if formal:
+        return "Good morning"
+    return "Hello"
+```
+- **Proposed Behavior**: Valid (`PASS`). Literals carry compiler-internal provenance `Static`, outliving all frames; source type is `&str` with zero lifetime syntax.
+- **Current Compiler**: Parses, typechecks cleanly (`Won` Phase 2A.2), rejected by `wonc build` with `WON-GEN-002` (`&str` return).
+
+#### A6. Returning a Reference to a Local Stack Variable (Proposed `REJECT: WON-MEM-003` -> `2B.2`)
+```won
+fn dangling() -> &String:
+    let local = String::from("stack")
+    return &local
+```
+- **Proposed Behavior**: Rejected with **`WON-MEM-003`** ($\text{Local}(local) \in \text{Prov}(\&local)$).
+- **Current Compiler**: Parses and typechecks today without borrow checking; rejected at `wonc build` (`WON-GEN-002`).
+
+#### A7. Reference to Module-Level Storage (`NOT IMPLEMENTED / UNSPECIFIED`)
+- **Rule**: Module-level `static` items do **not** exist in WON's canonical grammar (`token.go` / `syntax-and-grammar.md`). Static provenance applies **only to string literals** until a future ADR specifies global `static` storage rules.
+
+### 10.3 Multi-Input Return Provenance & Nested Propagation (`A8`–`A10`)
+
+#### A8. Returning a Reference from a Unique Input Parameter (Proposed `PASS` -> `2B.2`)
+```won
+fn pick_second(tag: i32, text: &String) -> &String:
+    return text
+
+fn test_unique() -> u64:
+    let msg = String::from("won")
+    let view = pick_second(1, &msg)
+    return view.len()
+```
+- **Proposed Behavior**: Valid (`PASS`). `RetProv(pick_second) = {Param(1)}` uniquely.
+- **Current Compiler**: Parses and typechecks today (`u64`); `WON-GEN-002` on `wonc build`.
+
+#### A9. Returning a Reference from Either of Two Input Parameters (Proposed `PASS` Under Strategy B; Locks Both Caller Args -> `2B.2`)
+```won
+fn choose(cond: bool, a: &String, b: &String) -> &String:
+    if cond:
+        return a
+    return b
+
+fn test_choose_ok(cond: bool) -> u64:
+    let s1 = String::from("alpha")
+    let s2 = String::from("beta")
+    let picked = choose(cond, &s1, &s2)
+    return picked.len()
+
+fn test_choose_conflict(cond: bool) -> u64:
+    var s1 = String::from("alpha")
+    var s2 = String::from("beta")
+    let picked = choose(cond, &s1, &s2)
+    s2.push_str("!")       # ERROR: s2 still candidate-borrowed while picked is live!
+    return picked.len()
+```
+- **Proposed Behavior (Strategy B)**:
+  - `choose` itself **compiles cleanly** with `RetProv(choose) = {Param(1), Param(2)}`.
+  - `test_choose_ok` is **valid (`PASS`)** because neither `s1` nor `s2` is mutated/dropped while `picked` is live.
+  - `test_choose_conflict` **MUST fail (`WON-MEM-006` / `WON-MEM-004`)** on `s2.push_str("!")` because conservative candidate binding keeps both `s1` and `s2` immutably borrowed across `picked`'s NLL region!
+  - *(Note: Calling an opaque function pointer `fn(&String, &String) -> &String` with `>= 2` input refs without analyzable body fails with **`WON-MEM-002`**.)*
+
+#### A10. Nested Propagation of Candidate Provenance (Proposed `PASS` + Constraint Propagation -> `2B.2`)
+```won
+fn outer_choose(c1: bool, c2: bool, x: &String, y: &String, z: &String) -> &String:
+    if c1:
+        return choose(c2, x, y)
+    return z
+```
+- **Proposed Behavior (Strategy B)**: $\text{RetProv}(outer\_choose) = \{Param(2), Param(3)\} \cup \{Param(4)\} = \{Param(2), Param(3), Param(4)\}$. Caller holds `x`, `y`, `z` borrowed for the lifetime region of the returned reference; returning a local alongside `choose` triggers `WON-MEM-003`.
+
+### 10.4 Method Borrowing, Reborrows & Evaluation Order (`A11`–`A14`)
+
+#### A11. Sequential Mutable Method Calls (Proposed `PASS` -> `2B.2`)
+```won
+fn test_seq_mut():
+    var s = String::from("start")
+    s.push_str("-mid")
+    s.push_str("-end")
+```
+- **Proposed Behavior**: Valid (`PASS`). First `&mut s` borrow expires at end of first call before second begins.
+- **Current Compiler**: Parses and typechecks cleanly today (`WON-GEN-002` at `wonc build`).
+
+#### A12. Read-Only Method Call Followed by Mutation When Borrow Is Dead (Proposed `PASS` -> `2B.2`)
+```won
+fn test_read_then_mut() -> u64:
+    var s = String::from("data")
+    let view = &s
+    let before = view.len()
+    s.push_str("-updated")
+    return before
+```
+- **Proposed Behavior**: Valid (`PASS`). `view`'s last use is `view.len()` (producing `Copy` `u64`); NLL releases `view` before `s.push_str(...)`.
+- **Current Compiler**: Parses and typechecks today (`WON-GEN-002` at `wonc build`).
+
+#### A13. Nested Receiver / Argument Borrowing (`s.push_str(...)` / `vec.push(vec.len())`) (Proposed `REJECT: WON-MEM-004` -> `2B.2`)
+```won
+fn borrow_len(s: &String) -> &str:
+    return "x"
+
+fn test_nested_borrow():
+    var s = String::from("abc")
+    s.push_str(borrow_len(&s))
+```
+*(Identical in rule to `vec.push(vec.len())` once `Vec[T]` exists in prelude/stdlib.)*
+- **Proposed Behavior**: Rejected with **`WON-MEM-004`** under deterministic left-to-right evaluation (`s.push_str` acquires `&mut s` before `borrow_len(&s)` attempts `&s`). Fix: bind `let suffix = borrow_len(&s)` (or `let n = vec.len()`) beforehand. Two-phase borrowing is `NOT in Phase 2B`.
+
+#### A14. Reborrow While Parent `&mut` Reference Is Live (Proposed `PASS` -> `2B.2`)
 ```won
 fn bump(x: &mut i32):
     *x += 1
 
-fn p5_seq_mut_borrows() -> i32:
-    var v: i32 = 0
-    bump(&mut v)
-    bump(&mut v)
-    return v
+fn test_reborrow() -> i32:
+    var n: i32 = 10
+    let r = &mut n
+    bump(r)        # auto-reborrows `&mut *r` cleanly for duration of call
+    *r += 5        # parent `r` usable again after reborrow ends
+    return n
 ```
-- **Expected**: `PASS`. Call 1's `&mut v` loan expires upon return before call 2 begins.
+- **Proposed Behavior**: Valid (`PASS`). `bump(r)` reborrows `&mut *r` (freezing `r` over call duration only); `*r += 5` succeeds; `n` reads after `r`'s last use (`NLL`).
 
-#### P6. Disjoint Struct Field Borrow Splitting
-```won
-struct Point:
-    var x: i32
-    var y: i32
+### 10.5 Destruction, Conditional Cleanup & Partial Moves (`A15`–`A19`)
 
-fn p6_split_fields() -> i32:
-    var pt = Point { x: 1, y: 2 }
-    let rx = &mut pt.x
-    let ry = &mut pt.y
-    *rx += 10
-    *ry += 20
-    return pt.x + pt.y
-```
-- **Expected**: `PASS`. `pt.x` and `pt.y` are disjoint projections (`FieldIndex 0 != 1`).
-
-#### P7. Reinitialization After Move (`var` Binding)
-```won
-fn take_str(s: String):
-    println(s)
-
-fn p7_reinit_after_move() -> usize:
-    var name = String::from("first")
-    take_str(name)
-    name = String::from("second")
-    return name.len()
-```
-- **Expected**: `PASS`. `name` becomes `Moved` at `take_str(name)` and returns to `Init` at `name = ...`.
-
-#### P8. Exhaustive Branch Initialization Before Read
-```won
-fn p8_branch_init(flag: bool) -> String:
-    let msg: String
-    if flag:
-        msg = String::from("yes")
-    else:
-        msg = String::from("no")
-    return msg
-```
-- **Expected**: `PASS`. Both arms initialize `msg`, so `msg` is definitely `Init` at `return`.
-
-#### P9. Unique-Parameter Return Provenance Propagation (Including Non-`self` Input)
-```won
-fn pick_str(unused: i32, text: &String) -> &String:
-    return text
-
-fn p9_return_prov() -> usize:
-    let s = String::from("provenance")
-    let ref_s = pick_str(7, &s)
-    return ref_s.len()
-```
-- **Expected**: `PASS`. Compiler proves `Prov(ret) = {Param(1)}` uniquely and ties `ref_s` to `s`.
-
-#### P10. Conditional `return` / `?` Cleanup Without Double-Free
-```won
-fn p10_early_return(abort: bool) -> i32:
-    let buf = String::from("resource")
-    if abort:
-        return 1
-    let moved = buf
-    return moved.len() as i32
-```
-- **Expected**: `PASS`. If `abort` is true, `buf` is dropped cleanly before returning `1`; on fallthrough, `buf` moves to `moved` so only `moved` drops.
-
----
-
-### 10.2 Negative Cases (MUST Reject with Exact Diagnostic Code)
-
-#### N1. Use-After-Move (`WON-MEM-001`)
-```won
-fn n1_use_after_move() -> usize:
-    let s1 = String::from("owned")
-    let s2 = s1
-    return s1.len()
-```
-- **Diagnostic**: `WON-MEM-001` at `s1.len()` (moved at `let s2 = s1`).
-
-#### N2. Move Inside Loop Back-Edge Without Reinit (`WON-MEM-001`)
+#### A15. Moved Value Does Not Drop Twice (Proposed `PASS` -> `2B.3`)
 ```won
 fn consume(s: String):
     println(s)
 
-fn n2_loop_move():
-    let s = String::from("once")
-    for i in 0..2:
-        consume(s)
+fn test_no_double_drop():
+    let s1 = String::from("once")
+    let s2 = s1
+    consume(s2)
 ```
-- **Diagnostic**: `WON-MEM-001` at `consume(s)` (second iteration may read already-moved `s`).
+- **Proposed Behavior**: `s1` marked `Moved` at `let s2 = s1`; `s2` moved into `consume`; `test_no_double_drop` drops zero times at scope exit (owned inside `consume` once).
 
-#### N3. Read of Whole Struct While Partially Moved (`WON-MEM-001`)
+#### A16. Initialized Value Drops on Normal Scope Exit (Proposed `PASS` -> `2B.3`)
 ```won
-struct PairStr:
-    a: String
-    b: String
-
-fn sink(p: PairStr):
-    let _x = p
-
-fn n3_partial_move_whole():
-    let p = PairStr { a: String::from("x"), b: String::from("y") }
-    let extracted = p.a
-    sink(p)
+fn test_normal_drop() -> u64:
+    let a = String::from("first")
+    let b = String::from("second")
+    return a.len() + b.len()
 ```
-- **Diagnostic**: `WON-MEM-001` at `sink(p)` (`p.a` moved at `let extracted = p.a`).
+- **Proposed Behavior**: Evaluates return `u64`, then drops `b` before `a` (strict reverse declaration order).
 
-#### N4. Partial Move Out of `Drop` Type (`WON-MEM-007`)
+#### A17. Initialized Value Drops on Early Return (Proposed `PASS` -> `2B.3`)
 ```won
-struct Guarded:
-    label: String
-    fd: i32
-
-impl Drop for Guarded:
-    fn drop(&mut self):
-        println(self.label)
-
-fn n4_partial_move_drop():
-    let g = Guarded { label: String::from("log"), fd: 3 }
-    let s = g.label
+fn test_early_return(abort: bool) -> i32:
+    let buf = String::from("owned")
+    if abort:
+        return 1       # Drops `buf` on early-return edge
+    consume(buf)       # Moves `buf` on fallthrough path
+    return 0           # No double-free here
 ```
-- **Diagnostic**: `WON-MEM-007` at `g.label` (cannot move field out of `Drop` type `Guarded`). *(Note: uses `WON-MEM-007` once `Drop` trait resolution is active).*
+- **Proposed Behavior**: Early-return edge runs `Drop(buf)`; fallthrough edge skips `Drop(buf)`.
 
-#### N5. Returning Reference to Local Variable (`WON-MEM-003`)
+#### A18. Partial-Move Aggregate Cleanup (Non-`Drop` Root Struct) (Proposed `PASS` -> `2B.1` / `2B.3`)
 ```won
-fn n5_return_local() -> &String:
-    let local = String::from("dangling")
-    return &local
-```
-- **Diagnostic**: `WON-MEM-003` at `return &local` ($\text{Prov} \cap \{\text{Local}\} \neq \emptyset$).
+struct TwoStrings:
+    first: String
+    second: String
 
-#### N6. Dropping Borrowed Owner Before Last Reference Use (`WON-MEM-003`)
-```won
-fn n6_outlive_scope() -> usize:
-    var r: &String
-    let fallback = String::from("ok")
-    r = &fallback
-    if true:
-        let inner = String::from("temp")
-        r = &inner
-    return r.len()
+fn test_partial_cleanup() -> u64:
+    let p = TwoStrings { first: String::from("a"), second: String::from("b") }
+    let moved = p.first
+    return moved.len() + p.second.len()
 ```
-- **Diagnostic**: `WON-MEM-003` (`inner` drops at end of `if` block while `r` remains live up to `return r.len()`).
+- **Proposed Behavior**: `p.first` moved to `moved`; at scope exit, `moved` drops and `p.second` drops individually (no drop on moved `p.first`, no `WON-MEM-007` since `TwoStrings` has no custom `impl Drop`). Reading whole `p` after `p.first` moved fails with `WON-MEM-001`.
 
-#### N7. Ambiguous Multi-Input Return Reference (`WON-MEM-002`)
+#### A19. Branch-Dependent Destruction (Drop Flag) (Proposed `PASS` -> `2B.3`)
 ```won
-fn n7_ambiguous_pick(cond: bool, a: &String, b: &String) -> &String:
-    if cond:
-        return a
-    return b
+fn test_cond_drop(flag: bool):
+    let s = String::from("maybe")
+    if flag:
+        consume(s)     # sets _drop_flag_s = false
+    # at scope exit: if _drop_flag_s: Drop(s)
 ```
-- **Diagnostic**: `WON-MEM-002` at `n7_ambiguous_pick` ($\text{Prov} = \{\text{Param}(1), \text{Param}(2)\}$ cannot be expressed without named lifetimes).
+- **Proposed Behavior**: Synthesizes stack drop flag `_drop_flag_s`; prevents leak when `!flag` and prevents double-free when `flag`.
 
-#### N8. Mutable Borrow While Shared Borrow Active (`WON-MEM-004`)
-```won
-fn n8_mut_while_shared():
-    var x: i32 = 1
-    let r1 = &x
-    let r2 = &mut x
-    println(*r1)
-    *r2 = 2
-```
-- **Diagnostic**: `WON-MEM-004` at `&mut x` (`r1` is still live at `println(*r1)`).
+### 10.6 Cross-Task & FFI Boundaries (`A20`–`A22`)
 
-#### N9. Double Mutable Borrow (`WON-MEM-005`)
+#### A20. Owned Transfer into Child Task Subject to Future `Send` (Proposed `SPECIFIED` -> Future Concurrency Milestone)
 ```won
-fn n9_double_mut():
-    var x: i32 = 1
-    let m1 = &mut x
-    let m2 = &mut x
-    *m1 += 1
-    *m2 += 1
+fn spawn_move_example():
+    let msg = String::from("task-payload")
+    scope s:
+        s.spawn:
+            println(msg)
 ```
-- **Diagnostic**: `WON-MEM-005` at `&mut x` (`m1` remains active across `*m2 += 1`).
+- **Proposed Behavior**: Valid when `String: Send`; `msg` is `Moved` at `s.spawn:`. Moving `!Send` (`Shared[T]`, `*const T`) into `s.spawn:` is rejected.
+- **Current Compiler**: Parsed by `parser.go`; rejected by `checker` with **`WON-SEM-010`** (`scope`/`spawn` not implemented yet).
 
-#### N10. Mutate or Move Owner While Borrowed (`WON-MEM-006`)
+#### A21. Borrowed Child-Task Data Cannot Outlive Parent Scope (Proposed `SPECIFIED` -> Future Concurrency Milestone)
 ```won
-fn n10_mutate_while_borrowed():
-    var s = String::from("abc")
-    let view = &s
-    s = String::from("xyz")
-    println(view.len())
+fn spawn_borrow_example():
+    let data = String::from("shared-read")
+    scope s:
+        s.spawn:
+            println(data.len())
+    # All child tasks join at end of `scope s:` before `data` drops!
 ```
-- **Diagnostic**: `WON-MEM-006` at `s = String::from("xyz")` (`view` still active until `println(view.len())`).
+- **Proposed Behavior**: Immutable `&data` allowed inside `s.spawn:` because `String: Sync` and `TermScopeJoin` at `scope` exit outlives child tasks; mutable `&mut data` inside `s.spawn:` rejected with `WON-CON-001`.
+- **Current Compiler**: Rejected with **`WON-SEM-010`**.
 
-#### N11. Move Out of Dereferenced Borrow (`WON-MEM-008`)
+#### A22. Unknown FFI Ownership Cannot Silently Become Safe (`IMPLEMENTED` Gate `WON-SEC-001`/`002` + Future `.wonbind` `2B.3`)
 ```won
-fn n11_move_out_of_ref(r: &String) -> String:
-    return *r
-```
-- **Diagnostic**: `WON-MEM-008` at `*r` (cannot move non-`Copy` `String` out of shared borrow `&String`).
+#import <stdlib.h>
 
-#### N12. Mutable Borrow / Mutation of Immutable `let` Binding (`WON-MUT-001` + `WON-SEC-002` Boundary)
-```won
-fn n12_immutable_mut_and_unsafe(p: *const i32):
-    let x: i32 = 5
-    let m = &mut x
-    let v = *p
+fn unsafe_ffi_example(sz: u64):
+    let p = stdlib::malloc(sz)    # Rejects WON-SEC-001 outside `unsafe:`
 ```
-- **Diagnostics**: `WON-MUT-001` at `&mut x` (`x` declared with `let`, not `var` — `IMPLEMENTED`) and `WON-SEC-002` at `*p` (raw pointer deref outside `unsafe:` — `IMPLEMENTED`).
+- **Proposed & Current Behavior**: Calling uncontracted `#import` C functions or dereferencing `*const T` / `*mut T` outside `unsafe:` **MUST** fail (**`WON-SEC-001`** / **`WON-SEC-002`** — **`IMPLEMENTED`** today in `wonc`!). Safe wrappers require explicit `.wonbind` ownership annotations (`SPECIFIED`, Phase 2B.3+) and `unsafe:` auditing.
+
+### 10.7 Additional Canonical Negative Checks (`N1`–`N8`)
+
+- **N1 (`WON-MEM-001` — Loop Back-Edge Move)**: Moving outer `s: String` inside `for i in 0..2: consume(s)` fails (`MaybeInit` at header). *(Parses & typechecks in 2A.2; caught in **Phase 2B.1**.)*
+- **N2 (`WON-MEM-001` — Whole Struct Read After Partial Move)**: Moving `p.a` then passing `p` fails at `p`. *(Parses & typechecks in 2A.2; caught in **Phase 2B.1**.)*
+- **N3 (`WON-MEM-007` — Partial Move Out of `Drop`)**: Moving `g.label` out of `impl Drop for Guarded` fails. *(`impl Drop` rejected `WON-SEM-010` today; checked in **Future Trait Milestone**.)*
+- **N4 (`WON-MEM-003` — Owner Drops Before Reference Last Use)**: Storing `&inner` from inner block into outer `var r = &fallback` and using `r` after inner block ends fails. *(Parses & typechecks in 2A.2; caught in **Phase 2B.2**.)*
+- **N5 (`WON-MEM-004` — `&mut` While `&` Live)**: `let r1 = &x; let r2 = &mut x; println(*r1); *r2 = 2` fails at `&mut x`. *(Parses & typechecks in 2A.2; caught in **Phase 2B.2**.)*
+- **N6 (`WON-MEM-005` — Double `&mut`)**: `let m1 = &mut x; let m2 = &mut x; *m1 += 1; *m2 += 1` fails at second `&mut x`. *(Parses & typechecks in 2A.2; caught in **Phase 2B.2**.)*
+- **N7 (`WON-MEM-008` — Move Out of Borrowed Ref)**: `fn f(r: &String) -> String: return *r` fails at `*r`. *(Parses & typechecks in 2A.2; caught in **Phase 2B.1**.)*
+- **N8 (`WON-MUT-001` + `WON-SEC-002` — Already Enforced Today)**: Mutating/taking `&mut` of `let x`, or `*p` outside `unsafe:` fails **`IMPLEMENTED`** checks in `wonc` today!
+- **N9 (`WON-MEM-010` — Use Before Init, Uninit Extension)**: `let x: i32; return x` fails (`WON-MEM-010`). *(Requires proposed optional `=` extension in **Phase 2B.1**.)*
 
 ---
 
-## 11. Deferred Items (Beyond Phase 2B Core)
-- **Closures & Capture Regions**: Defer `Fn` / `FnMut` / `FnOnce` capture inference until lambda syntax & closure traits are specified.
-- **Explicit Lifetime Parameters on User Structs**: Remain out of language design per ADR-003 unless future ADR revises policy.
-- **`.wonbind` Ownership Contract Checking**: Automated validation of `@owned` / `@borrow` C binding metadata deferred to FFI hardening sub-milestone.
-- **Structured Concurrency `scope` / `s.spawn` Activation**: Runtime and borrow-checker enforcement deferred to Phase 3 (`WON-SEM-010` remains active today).
+## 11. Implementation-Status Summary Across All Examples
+
+| Group / IDs | Normative Outcome | Current Parser (`wonc`) | Current Semantic Checker (`2A.2.1`) | Current C11 Backend | Target Enforcement Milestone |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `A1`, `A2`, `A4` (`@derive(Copy)`) | `PASS` (`A1`), `REJECT` (`A2` `011`, `A4` `010`) | Not parsable (no `@` token) | N/A | `WON-GEN-002` | Phase 2B.1 |
+| `A3`, `N3` (`impl Drop`) | `REJECT` (`WON-MEM-011` / `WON-MEM-007`) | Parses `impl Drop` | `WON-SEM-010` (`impl Trait`) | `WON-GEN-002` | Trait Milestone |
+| `A5`, `A6`, `A8`–`A10`, `A11`–`A14`, `N1`, `N2`, `N4`–`N7` | `PASS` / Exact `WON-MEM-*` | `IMPLEMENTED` (Parses cleanly) | Typechecks (`String`, `struct`, `&`/`&mut`, `u64` `.len()`) without borrow pass | `WON-GEN-002` (`String`/refs/`struct`) | Phase 2B.1 (`001`/`008`) & 2B.2 (`002`–`006`) |
+| `A15`–`A19` (Drop / Drop Flags) | `PASS` (exact cleanup order) | `IMPLEMENTED` (Parses cleanly) | Typechecks cleanly | `WON-GEN-002` | Phase 2B.3 & 2C |
+| `N9` (Uninit `let x: T`) | `REJECT: WON-MEM-010` | Rejected `WON-SYN-009` (needs `=` ext) | N/A | N/A | Phase 2B.1 |
+| `A20`, `A21` (`scope` / `s.spawn`) | `PASS` (guarded by `Send`/`Sync`) | `IMPLEMENTED` (Parses cleanly) | `WON-SEM-010` | `WON-GEN-002` | Separate Concurrency Milestone (Phase 3) |
+| `A22`, `N8` (`WON-MUT-001`, `WON-SEC-001/002`) | `REJECT` | `IMPLEMENTED` | **`IMPLEMENTED` (Active Today)** | Active Gate | Active Today (`2A.2.1`) |

@@ -8,7 +8,7 @@
 
 ---
 
-[![Project Status](https://img.shields.io/badge/status-Phase%202A.2%20%28C11%20Backend%20Contract%29-brightgreen.svg)](#current-development-status)
+[![Project Status](https://img.shields.io/badge/status-Phase%202B.0.1%20%28Ownership%20Design%20Closed%29-blue.svg)](#4-current-development-status)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Organization](https://img.shields.io/badge/org-KitiLab-black.svg)](https://github.com/KitiLab)
 
@@ -87,11 +87,11 @@ The initial backend generates standard C code, harnessing decades of mature opti
 ## 4. Current Development Status
 
 > [!NOTE]
-> **WON is in Phase 2 (Core Compiler). Phase 0B/0B.2, Phase 1A/1A.1 specifications, Phase 1B Canonical Frontend (Lexer & Parser), and Phase 2A Core Semantic Analysis & Type System are implemented and verified.**
+> **WON is in Phase 2 (Core Compiler). Phase 0B/0B.2, Phase 1A/1A.1–1A.2, Phase 1B Canonical Frontend (Lexer & Parser), Phase 2A–2A.2.1 Core Semantic Analysis & C11 Subset Contract are `IMPLEMENTED`; Phase 2B.0 / 2B.0.1 Ownership-Lite Design Closure is `SPECIFIED` (`Proposed / Awaiting Owner Approval` for ADR-011 before Phase 2B.1 implementation begins).**
 >
 > The bootstrap compiler (`wonc0` under `compiler/poc/`) now implements strict UTF-8 validation (`WON-LEX-004`), the canonical Python-inspired indentation lexer (`INDENT`/`DEDENT`/`NEWLINE` off-side rule), recursive-descent/Pratt parser (Draft 0.1 EBNF), canonical interned type system (`internal/types`), hierarchical two-pass symbol table (`internal/symbols`), bidirectional type checker with struct/enum/`match` exhaustiveness/`Option`/`Result`/`?` checking and `TypedProgram` boundary (`internal/checker`), C header ingestion, strict ISO C11 code generation with `-Werror`, and autonomous AI coding-agent repair (`let` -> `var`).
 >
-> *Note on Scope Boundary*: `wonc check` validates the complete Phase 2A semantic surface. `wonc build` enforces `TypedProgram.CodegenSupported` and refuses high-level constructs not yet lowered by the Phase 0B/1B C11 backend (`WON-GEN-002`). Ownership-lite borrow analysis (Phase 2B), full CFG TIR lowering (Phase 2C), trait constraint solving, and concurrency runtimes (Phase 3) remain `SPECIFIED`/`PLANNED`.
+> *Note on Scope Boundary*: `wonc check` validates the complete Phase 2A semantic surface. `wonc build` enforces `TypedProgram.CodegenSupported` and refuses high-level constructs not yet lowered by the Phase 0B/1B C11 backend (`WON-GEN-002`). Ownership-lite borrow analysis (Phases 2B.1–2B.3, designed in 2B.0 / 2B.0.1), full CFG TIR lowering (Phase 2C), trait constraint solving, and concurrency runtimes (Phase 3) remain `SPECIFIED`/`PLANNED`.
 >
 > *Note on Static Linking*: Standalone static binary generation remains classified as `BLOCKED (Environment)` on this host due to missing system development archives (`libc.a`, `libz.a`). Dynamic native builds link against `/lib64/libz.so.1` and pass 100% of functional gates.
 
@@ -123,11 +123,12 @@ cd compiler/poc && go build -o bin/wonc ./cmd/wonc
 | :--- | :--- | :--- |
 | Repository Architecture & Governance | `IMPLEMENTED` | [AGENTS.md](AGENTS.md), [GOVERNANCE.md](GOVERNANCE.md) |
 | Architecture Decision Records (ADRs 001–010) | `ACCEPTED` | [docs/decisions/](docs/decisions/) |
+| Ownership-Lite Architecture Decision (ADR-011) | `Proposed (Awaiting Owner Approval)` | [ADR-011](docs/decisions/ADR-011-ownership-and-borrow-checking-semantics.md) |
 | Language Specification (Draft 0.1) | `SPECIFIED` | [docs/language-spec/](docs/language-spec/README.md) |
 | Canonical Lexer (UTF-8 + Indentation EBNF) & Parser | `IMPLEMENTED` | [docs/language-spec/syntax-and-grammar.md](docs/language-spec/syntax-and-grammar.md) |
 | Core Semantic Analysis & Type System (Phase 2A / 2A.1) | `IMPLEMENTED` | [docs/compiler/phase-2a-semantic-analysis.md](docs/compiler/phase-2a-semantic-analysis.md), [docs/compiler/phase-2a.1-correctness-hardening.md](docs/compiler/phase-2a.1-correctness-hardening.md) |
 | Traits / Generic Monomorphization Solver | `SPECIFIED` (Phase 2B/2C) | [docs/language-spec/type-system.md](docs/language-spec/type-system.md) |
-| Ownership-Lite Memory Model (Borrow Checker) | `SPECIFIED` (2B.0 Design Ready; Impl Phase 2B.1+) | [docs/language-spec/ownership-and-memory.md](docs/language-spec/ownership-and-memory.md), [Phase 2B.0 Architecture](docs/compiler/phase-2b.0-ownership-architecture.md), [Normative Proposal](docs/language-spec/ownership-and-borrowing.md), [ADR-011 (Proposed)](docs/decisions/ADR-011-ownership-and-borrow-checking-semantics.md) |
+| Ownership-Lite Memory Model (Borrow Checker) | `SPECIFIED` (2B.0.1 Design Closed; Next: Phase 2B.1 Upon ADR-011 Approval) | [docs/language-spec/ownership-and-memory.md](docs/language-spec/ownership-and-memory.md), [Phase 2B.0.1 Architecture](docs/compiler/phase-2b.0-ownership-architecture.md), [Normative Proposal](docs/language-spec/ownership-and-borrowing.md), [ADR-011 (Proposed)](docs/decisions/ADR-011-ownership-and-borrow-checking-semantics.md) |
 | Structured Concurrency & Zero-GIL | `SPECIFIED` (Runtime Phase 3) | [docs/language-spec/concurrency-model.md](docs/language-spec/concurrency-model.md) |
 | Self-Hosting & Bootstrap Pipeline | `SPECIFIED` | [docs/language-spec/self-hosting-and-bootstrap.md](docs/language-spec/self-hosting-and-bootstrap.md) |
 | Typed Intermediate Rep (TIR) | `SPECIFIED` (Phase 2C) | [docs/language-spec/compiler-and-ir-requirements.md](docs/language-spec/compiler-and-ir-requirements.md) |

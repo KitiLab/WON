@@ -393,6 +393,27 @@ EnumPattern     = Path , [ "(" , [ Pattern , { "," , Pattern } ] , ")" ] ;
 SlicePattern    = "[" , [ Pattern , { "," , Pattern } ] , "]" ;
 ```
 
+### 4.1 Proposed Grammar Extensions (`SPECIFIED` — Proposed / Awaiting Owner Approval)
+
+> [!IMPORTANT]
+> The productions below are **Proposed Extensions** submitted with Phase 2B.0.1 ([ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md)) and are **`NOT IMPLEMENTED`** in the current `wonc` lexer (`token.go` lacks `@`) or parser (`parser.go` currently requires `=` in `let`/`var`).
+
+```ebnf
+(* Attribute syntax for @derive(Copy) and @repr(C) / @repr(packed) *)
+AttributeList    = { Attribute } ;
+Attribute        = "@" , ident , [ "(" , AttributeArgList , ")" ] , NEWLINE ;
+AttributeArgList = Path , { "," , Path } ;
+
+(* Extended top-level item permitting attributes *)
+ProposedItem     = AttributeList , [ "pub" ]
+                 , ( FunctionDecl | StructDecl | EnumDecl | TraitDecl | ImplBlock | TypeAliasDecl | ModuleDecl ) ;
+
+(* Optional initializer enabling CFG definite-initialization analysis (WON-MEM-010) *)
+ProposedLetStmt  = "let" , Pattern , [ ":" , Type ] , [ "=" , Expr ] , NEWLINE ;
+ProposedVarStmt  = "var" , Pattern , [ ":" , Type ] , [ "=" , Expr ] , NEWLINE ;
+```
+- Only `@derive(Copy)` on concrete `struct` and `enum` declarations is proposed for Phase 2B (`@copy` and alternative spellings are disallowed); generic `@derive(Copy)` waits for the Trait Solver milestone.
+
 ---
 
 ## 5. Comprehensive Canonical Syntax Examples

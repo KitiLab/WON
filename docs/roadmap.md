@@ -1,8 +1,8 @@
 # WON Development Roadmap
 
-> **Document Status**: `SPECIFIED` (Phase 0B–2A `IMPLEMENTED`; Phase 2B+ Planned)  
+> **Document Status**: `SPECIFIED` (Phase 0B–2A.2.1 `IMPLEMENTED`; Phase 2B.0 / 2B.0.1 Design Delivered; Phase 2B.1+ Planned)  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 2A
+> **Last Updated**: Phase 2B.0.1 (Design Closure)
 
 ---
 
@@ -96,20 +96,29 @@ The implementation roadmap adheres to strict technical dependency ordering acros
   - *Objective*: Harden full-width `math/big.Int` integer literals (`i8..i128`, `u8..u128`, `isize`/`usize`), enforce `unsafe:` boundaries on raw-pointer dereferencing (`WON-SEC-002`), unify signature-first single-pass method checking, and replace bidirectional `CanAssign` hacks with strict `CommonType` type joins.
   - *Deliverables*: Arbitrary-precision literal AST/lexer/types validation, [phase-2a.1-correctness-hardening.md](compiler/phase-2a.1-correctness-hardening.md), and exhaustive regression & fuzz suites.
   - *Status*: `IMPLEMENTED` (Verified in CI).
-- **Sub-phase 2A.2 (C11 Backend Capability Contract & Numeric Lowering)**:
-  - *Objective*: Enforce fail-closed WON-to-C11 type mapping (`MapTypeToC`), complete pre-codegen `WON-GEN-002` capability gating, emit typed `<stdint.h>` integer constants (`INT64_MIN`, `UINT64_C`, etc.) from `TypedProgram`, and uphold strict ISO C11 hosted `main` ABI (`i32` and `unit` wrapper).
+- **Sub-phase 2A.2 / 2A.2.1 (C11 Backend Capability Contract, Numeric Lowering & Unit Return Closure)**:
+  - *Objective*: Enforce fail-closed WON-to-C11 type mapping (`MapTypeToC`), complete pre-codegen `WON-GEN-002` capability gating, emit typed `<stdint.h>` integer constants (`INT64_MIN`, `UINT64_C`, etc.) from `TypedProgram`, support `return unit_call()`, and uphold strict ISO C11 hosted `main` ABI (`i32` and `unit` wrapper).
   - *Deliverables*: [phase-2a.2-backend-capability-matrix.md](compiler/phase-2a.2-backend-capability-matrix.md), `internal/checker/backend_caps.go`, hardened `internal/codegen`, and GCC/Clang `-pedantic-errors -Werror` validation suites.
   - *Status*: `IMPLEMENTED` (Verified in CI).
-- **Sub-phase 2B (Ownership-Lite Borrow Checker & Trait Solver)**:
-  - **2B.0 (Ownership Architecture & Borrow Analysis Design)**: Formal Ownership-CFG design (`Place`, `Loan`, NLL region liveness, `Prov(e)` provenance, drop flags, `WON-MEM-001..010`) and normative spec proposal (`ADR-011`).
+- **Sub-phase 2B (Ownership-Lite CFG & Borrow Checker)**:
+  - **2B.0 / 2B.0.1 (Ownership Architecture & Design Closure)**: Closed design for Ownership-CFG (`Place`, `Loan`, NLL region liveness, `@derive(Copy)` policy, `Static` literal provenance without `'a`/`'static` syntax, Strategy B candidate-origin return provenance, deterministic left-to-right method receiver borrowing, `WON-MEM-001`..`011` matrix, and Drop elaboration contract).
     - *Deliverables*: [phase-2b.0-ownership-architecture.md](compiler/phase-2b.0-ownership-architecture.md), [ownership-and-borrowing.md](language-spec/ownership-and-borrowing.md), [ADR-011](decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`Proposed / Awaiting Owner Approval`).
-    - *Status*: `SPECIFIED` (Design Delivered; Awaiting Owner Approval before 2B.1 coding).
-  - **2B.1–2B.2 (Ownership CFG, Borrow Checker & Trait Solver — Planned)**:
-    - *Objective*: Implement `internal/cfg` and `internal/borrow` enforcing moves, NLL borrows, return provenance (`WON-MEM-001`..`010`), `@derive(Copy)`, trait coherence/impl checking, and `From`/`Into` conversion on `?`.
+    - *Status*: `SPECIFIED` (Design Closed; **Awaiting Owner Approval of ADR-011 before Phase 2B.1 starts**).
+  - **2B.1 (Next Implementation Milestone — Ownership CFG, `@derive(Copy)` & Move/Init Analysis — Proposed)**:
+    - *Objective*: Parse optional `@derive(Copy)` / uninitialized binding extensions if approved, build `internal/cfg` (`Place`, `Projection`, `BasicBlock`), and enforce definite initialization, moves, reinitialization, non-`Drop` partial moves, and loop fixed-point checks (`WON-MEM-001`, `008`, `010`, `011`).
+    - *Status*: `PLANNED` (Next milestone upon ADR-011 approval).
+  - **2B.2 (Borrow, NLL Regions & Candidate Provenance — Proposed)**:
+    - *Objective*: Shared/exclusive loan conflict checking, disjoint field splitting, reborrowing, NLL liveness, Strategy B candidate-origin provenance, and abstract-boundary `WON-MEM-002..006`.
+    - *Status*: `PLANNED`.
+  - **2B.3 (Drop Elaboration & Resource Lifecycle Integration — Proposed)**:
+    - *Objective*: Lexical reverse-order cleanup, conditional drop flags, early-return / `?` cleanup edges, partial-move cleanup, and `.wonbind` ownership contract hooks (`WON-MEM-007` readiness).
     - *Status*: `PLANNED`.
 - **Sub-phase 2C (Typed Intermediate Representation & Expanded C11 Backend — Planned)**:
-  - *Objective*: Lower `TypedProgram` to explicit basic-block TIR (ADR-009), monomorphize generics, and generate ISO C11 code for algebraic data types and pattern matching.
+  - *Objective*: Lower verified Ownership CFG to explicit basic-block TIR (ADR-009), emit `Drop` lifecycle calls, monomorphize generics, and generate ISO C11 code for algebraic data types and pattern matching.
   - *Status*: `SPECIFIED` / `PLANNED`.
+- **Separate Future Milestone — General Trait Solver & Structured Concurrency Safety (`scope` / `Send` / `Sync`)**:
+  - *Objective*: User `trait` coherence, generic `Copy` conditional bounds, user `impl Drop`, `?` `From`/`Into` conversion (`WON-ERR-002`), auto-traits `Send`/`Sync`, and structured-concurrency task capture enforcement (`WON-CON-001`, Phase 3).
+  - *Status*: `PLANNED` (Explicitly separated from Phase 2B core borrow checker).
 - **Acceptance Criteria**: Memory safety invariants enforced at compile time; zero use-after-free and double-free in safe test cases; C code compiles cleanly under GCC and Clang with zero warnings (`-Wall -Wextra -Werror`).
 
 ### Phase 3: Toolchain & AI Agent Integration

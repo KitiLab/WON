@@ -43,7 +43,7 @@ Types that implement the `Copy` trait have cheap, bitwise-reproducible represent
 - Floating-point types (`f32`, `f64`), booleans (`bool`), and characters (`char`).
 - Raw pointers (`*const T`, `*mut T`).
 - Fixed-size arrays `[T; N]` and tuples where `T: Copy`.
-- Structs composed exclusively of fields implementing `Copy`.
+- Structs and enums remain **Move-by-default** unless explicitly annotated with `@derive(Copy)` (`Proposed / Awaiting Owner Approval` in [ownership-and-borrowing.md](ownership-and-borrowing.md); requires all concrete fields/variants to be `Copy` with no destructor).
 
 For `Copy` types, assignment and parameter passing duplicate the bits without invalidating the source variable.
 
@@ -83,18 +83,14 @@ Rather than transferring ownership, values can be temporarily accessed via refer
 
 Rust achieves soundness by requiring developers to explicitly name and link lifetime parameters across function signatures (`fn longest<'a>(x: &'a str, y: &'a str) -> &'a str`).
 
-WON specifies an alternative approach: eliminating explicit `'a` lifetime annotations from application and systems APIs by employing **Reference Provenance Tracking**, **Scope-Bounded Region Inference**, and **Strict Multi-Reference Rejection**.
+WON specifies an alternative approach: eliminating explicit `'a` or `'static` lifetime annotations from application and systems APIs by employing **Internal Reference Provenance Tracking**, **Flow-Sensitive Non-Lexical Region Inference**, and **Conservative Candidate-Origin / Abstract Rejection**.
 
 > [!NOTE]
-> **Soundness Obligations Under Investigation**:  
-> A formal specification and proposed algorithm do not by themselves constitute a formal proof of implementation soundness. The following technical verification obligations remain `UNDER INVESTIGATION` for Phase 2:
-> 1. *CFG Completeness*: Formalizing provenance set transformations across complex control flow graphs with loops, early breaks, and join points.
-> 2. *Re-borrowing Semantics*: Validating non-escape guarantees during nested field re-borrowing and method receiver chains.
-> 3. *Empirical Expressiveness*: Verifying that conservative multi-reference return rejection (`WON-MEM-002`) does not unduly restrict idiomatic systems programming patterns.
-> 4. *Pass Implementation*: Building, testing, and verifying the 6-phase borrow checker within the Typed Intermediate Representation (TIR) pipeline.
+> **Soundness & Design Closure Status**:  
+> Phase 2B.0 / 2B.0.1 closed the formal Ownership CFG architecture and conservative candidate-origin provenance design in [ownership-and-borrowing.md](ownership-and-borrowing.md) and [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`Proposed / Awaiting Owner Approval`). Implementation is scheduled across Phases 2B.1–2B.3; until complete, static borrow checking remains `SPECIFIED` (not yet active in `wonc`).
 
-### 4.1 Lexical Scope Bounding
-References in local variables are tracked via lexical intervals. A reference `&x` is bounded strictly by the scope of the owner `x`. A reference **MUST NOT** escape the scope of the referenced value.
+### 4.1 Non-Lexical Borrow Regions Within Scopes
+Rather than keeping references locked until closing indentation (`DEDENT`), borrows remain active from loan creation through the last Control-Flow Graph (CFG) point where the reference region is live, while owned values drop deterministically at lexical block exits. A reference **MUST NOT** escape the scope of the referenced value (`WON-MEM-003`).
 
 ### 4.2 Reference Provenance Tracking ($\text{Prov}(e)$)
 The compiler statically computes a **Provenance Set** $\text{Prov}(e)$ for every reference expression $e$:
@@ -131,65 +127,36 @@ $$\text{Prov}(e) \subseteq \text{Params} \cup \text{Globals} \cup \text{Locals}$
      fn choose(&self, other: &str) -> &str:
          other    # Prov = {other}; caller binds lifetime to `other`
      ```
-   - If the return provenance conditionally merges `self` and another reference parameter ($\text{Prov} = \{\text{self}, \text{other}\}$), the signature is ambiguous and **MUST** be rejected under Rule 4.
 
-4. **Rule 4: Conservative Multi-Reference Rejection**  
-   If a free function (or method) takes multiple reference parameters and its return expression conditionally originates from more than one input reference parameter ($\text{Prov}(r_{\text{ret}}) = \{p_1, p_2, \dots\}$), WON **conservatively rejects the signature at compile time** (`WON-MEM-002: Ambiguous multi-reference provenance`).
-   
-   To resolve the ambiguity without named lifetime annotations, developers **MUST** choose one of three safe designs:
-   - **Alternative A (Return Owned Value)**: Return an owned `String` or `Vec[T]`.
-   - **Alternative B (Return Selection Index)**: Return a numeric index (`usize`) or enum discriminator into the slice/collection.
-   - **Alternative C (Caller-Allocated Destination)**: Pass an explicit caller-allocated destination reference (`fn select(a: &str, b: &str, out: &mut &str)`), binding the output lifetime unambiguously at the caller's scope.
+4. **Rule 4: Conservative Candidate-Origin Sets & Abstract Boundary Rejection (`WON-MEM-002`)**  
+   *(Updated in Phase 2B.0.1 Proposal)* For intra-unit functions with analyzable bodies returning `&R` or `&mut R`, $\text{Prov}(r_{\text{ret}})$ tracks the candidate set of input reference parameters $S = \{p_1, p_2, \dots\}$ (plus `Static` for literals). At each call site, the caller conservatively keeps **all** candidate arguments $i \in S$ borrowed over the returned reference's live NLL region (preventing mutation or premature drop across every possible runtime branch). Where a callable has **no analyzable body** (such as `fn(&T, &T) -> &T` function pointers or future bodyless `trait` methods) and accepts $\ge 2$ input references, WON rejects with **`WON-MEM-002`**, requiring owned returns (`String`), indices (`u64`/`usize`), `Shared[T]`, or `&mut out` destinations.
 
-### 4.4 Formal Borrow Analysis Algorithm
+### 4.4 Conceptual Borrow Analysis Stages
 
-The borrow checker operates on the Control Flow Graph (CFG) in six sequential phases:
+The concrete Phase 2B.1–2B.3 CFG dataflow formulation (Places, Projections, Init/Move DFA, NLL Liveness, Candidate Provenance, and Drop Elaboration) is specified in [`docs/compiler/phase-2b.0-ownership-architecture.md`](../compiler/phase-2b.0-ownership-architecture.md). Conceptually:
 
 ```text
-Algorithm: Scope-Bounded Borrow and Provenance Checker
-Input: CFG of Function F = (BasicBlocks, Edges)
-Output: Valid CFG or Compile Diagnostic (WON-MEM-xxx)
+Algorithm: Ownership-CFG Move, Borrow, and Provenance Checker
+Input: FuncCFG = (BasicBlocks, Edges, Places, Loans)
+Output: Verified CFG or Structured Diagnostic (WON-MEM-001..011)
 
-1. [Initialization Tracking]
-   For each local variable v:
-     State(v) in { Uninitialized, Initialized, Moved }
-   Track Moves: When non-Copy variable v is moved, mark State(v) = Moved.
-   If read(v) occurs while State(v) == Moved:
-     Emit WON-MEM-001 (Use of moved value).
+1. [Initialization & Move Tracking (Phase 2B.1)]
+   State(p) in { Uninit, Init, Moved, MaybeInit }
+   Read/Move(p) while Uninit -> WON-MEM-010; while Moved/MaybeInit -> WON-MEM-001.
 
-2. [Provenance Analysis]
-   For each reference expression r = &x or r = &mut x:
-     Prov(r) = { x } if x in (Params U Locals U Globals)
-     If r = deref(p): Prov(r) = Prov(p)
-   At merge points: Prov(r_out) = Union(Prov(r_in1), Prov(r_in2))
+2. [Borrow Liveness & Exclusivity (Phase 2B.2)]
+   Track active shared (&p) and exclusive (&mut p) loans over NLL CFG regions:
+   &mut p while &p live (or read/&p while &mut p live) -> WON-MEM-004.
+   Second &mut p while &mut p live -> WON-MEM-005.
+   Mutate/Move p while borrowed -> WON-MEM-006.
 
-3. [Live Borrow Sets]
-   Maintain at each program point:
-     ActiveShared: Set of (target, borrow_id, scope_end)
-     ActiveMutable: Set of (target, borrow_id, scope_end)
-   
-   On `b = &x`:
-     If x in ActiveMutable:
-       Emit WON-MEM-004 (Cannot borrow x immutably while mutably borrowed).
-     Add (x, b, Scope(b)) to ActiveShared.
+3. [Provenance & Scope-Exit Verification (Phase 2B.2)]
+   Return Prov(ret) INTERSECT Locals != Empty -> WON-MEM-003.
+   StorageDead(x) while Loan(x) live -> WON-MEM-003.
+   Opaque multi-ref return boundary -> WON-MEM-002.
 
-   On `b = &mut x`:
-     If x in ActiveShared or x in ActiveMutable:
-       Emit WON-MEM-005 (Cannot borrow x mutably while borrowed).
-     Add (x, b, Scope(b)) to ActiveMutable.
-
-4. [Mutation Invalidation]
-   On write/assignment to x:
-     If x in ActiveShared or x in ActiveMutable:
-       Emit WON-MEM-006 (Cannot mutate x while borrowed).
-
-5. [Function Return Verification]
-   For return statement `return expr`:
-     If Type(expr) is reference `&T` or `&mut T`:
-       If Prov(expr) INTERSECT Locals != Empty:
-         Emit WON-MEM-003 (Escape of local stack reference).
-       If |Prov(expr) INTERSECT Params| > 1:
-         Emit WON-MEM-002 (Ambiguous multi-reference provenance).
+4. [Drop Elaboration (Phase 2B.3)]
+   Reverse-declaration Drop + conditional drop flags on MaybeInit / partial moves.
 ```
 
 ---
