@@ -55,7 +55,8 @@ jobs:
             docs/decisions/ADR-009-typed-intermediate-representation-architecture.md \
             docs/decisions/ADR-010-compiler-self-hosting-bootstrap-pipeline.md \
             docs/decisions/ADR-011-ownership-and-borrow-checking-semantics.md \
-            docs/decisions/OWNER-APPROVAL-2026-11-24.md; do
+            docs/decisions/OWNER-APPROVAL-2026-11-24.md \
+            docs/decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md; do
             if [ ! -f "$doc" ]; then
               echo "Error: Required documentation $doc is missing"
               exit 1

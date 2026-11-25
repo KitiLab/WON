@@ -393,10 +393,10 @@ EnumPattern     = Path , [ "(" , [ Pattern , { "," , Pattern } ] , ")" ] ;
 SlicePattern    = "[" , [ Pattern , { "," , Pattern } ] , "]" ;
 ```
 
-### 4.1 Proposed Grammar Extensions (`SPECIFIED` — Proposed / Awaiting Owner Approval)
+### 4.1 Ownership Grammar Extensions (`SPECIFIED` — Authorized for Phase 2B.1 via ADR-011)
 
-> [!IMPORTANT]
-> The productions below are **Proposed Extensions** submitted with Phase 2B.0.1 ([ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md)) and are **`NOT IMPLEMENTED`** in the current `wonc` lexer (`token.go` lacks `@`) or parser (`parser.go` currently requires `=` in `let`/`var`).
+> [!NOTE]
+> Approved in [OWNER-APPROVAL-ADR-011-2026-11-25.md](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md) for Phase 2B.1: exact `@derive(Copy)` attribute on concrete `struct`/`enum`, plus explicitly typed uninitialized simple-identifier `let`/`var`. `@repr(...)` and destructuring without `=` remain excluded from Phase 2B.1.
 
 ```ebnf
 (* Attribute syntax for @derive(Copy) and @repr(C) / @repr(packed) *)
@@ -408,11 +408,13 @@ AttributeArgList = Path , { "," , Path } ;
 ProposedItem     = AttributeList , [ "pub" ]
                  , ( FunctionDecl | StructDecl | EnumDecl | TraitDecl | ImplBlock | TypeAliasDecl | ModuleDecl ) ;
 
-(* Optional initializer enabling CFG definite-initialization analysis (WON-MEM-010) *)
-ProposedLetStmt  = "let" , Pattern , [ ":" , Type ] , [ "=" , Expr ] , NEWLINE ;
-ProposedVarStmt  = "var" , Pattern , [ ":" , Type ] , [ "=" , Expr ] , NEWLINE ;
+(* Explicitly typed uninitialized simple identifier OR initialized pattern binding *)
+LetStmt          = "let" , ( Pattern , [ ":" , Type ] , "=" , Expr
+                           | ident , ":" , Type ) , NEWLINE ;
+VarStmt          = "var" , ( Pattern , [ ":" , Type ] , "=" , Expr
+                           | ident , ":" , Type ) , NEWLINE ;
 ```
-- Only `@derive(Copy)` on concrete `struct` and `enum` declarations is proposed for Phase 2B (`@copy` and alternative spellings are disallowed); generic `@derive(Copy)` waits for the Trait Solver milestone.
+- Only `@derive(Copy)` on concrete `struct` and `enum` declarations is authorized in Phase 2B.1 (`@copy`, generic `@derive(Copy)`, `@repr(...)`, and untyped/destructuring uninitialized bindings remain disallowed).
 
 ---
 

@@ -3,8 +3,8 @@
 ## Metadata
 - **Decision ID**: ADR-011
 - **Title**: Ownership-Lite CFG Borrow Analysis, Non-Lexical Regions, Candidate Provenance & Copy/Drop Policy
-- **Status**: Proposed (Awaiting Owner Approval)
-- **Date**: 2026-11-25 (Closed in Phase 2B.0.1 Design Review)
+- **Status**: ACCEPTED (KitiLab Owner Approval: November 25, 2026 — see [OWNER-APPROVAL-ADR-011-2026-11-25.md](OWNER-APPROVAL-ADR-011-2026-11-25.md))
+- **Date**: 2026-11-25 (Proposed in 2B.0, Closed in 2B.0.1, Accepted Nov 25, 2026)
 - **Author**: KitiLab Engineering
 - **Builds Upon**: [ADR-003 (Ownership-Lite Memory Model)](ADR-003-ownership-lite-memory-model.md), [ADR-008 (Structured Concurrency)](ADR-008-structured-concurrency-and-zero-gil.md), [ADR-009 (Typed Intermediate Representation Architecture)](ADR-009-typed-intermediate-representation-architecture.md)
 
@@ -63,11 +63,15 @@ Phase 2A–2A.2.1 implemented `TypedProgram`, interned `types.TypeID`, `IsCopy`,
 
 ---
 
-## Proposed Decision
+## Decision
 
-**WON proposes adopting an Ownership-CFG static analyzer (`internal/cfg` + `internal/borrow`) featuring flow-sensitive NLL borrow regions, lexical reverse-order drops with conditional drop flags, explicit `@derive(Copy)` opt-in, internal `Static` provenance without `'a` or `'static` syntax, Strategy B candidate-origin return provenance, and deterministic left-to-right method borrowing (`WON-MEM-001`..`011`).**
+**WON adopts the Ownership-CFG static analyzer architecture (`internal/cfg` + `internal/borrow`) featuring flow-sensitive NLL borrow regions, lexical reverse-order drops with conditional drop flags, explicit `@derive(Copy)` opt-in for concrete structs/enums, internal `Static` provenance without `'a` or `'static` syntax, Strategy B candidate-origin return provenance, deterministic left-to-right method borrowing, and explicitly typed uninitialized `let`/`var` bindings (`WON-MEM-001`..`011`).**
 
-*(Note: This ADR remains **Proposed / Awaiting Owner Approval**. No Phase 2B borrow-checker implementation has begun.)*
+### Owner Approval Clarifications (2026-11-25)
+- **Staged Delivery Binding**: **Phase 2B.1** implements Ownership CFG, `Place`/`Projection`, `@derive(Copy)` + `IsCopy`, explicitly typed uninitialized simple-identifier `let`/`var`, definite initialization, move/reinitialization, and non-`Drop` partial moves. Borrow checking & provenance belong strictly to **Phase 2B.2**; drop elaboration belongs to **Phase 2B.3**; general traits and structured concurrency belong to a separate future milestone.
+- **Attribute Guard**: Adding `@` tokenization for `@derive(Copy)` MUST NOT enable `@copy` aliases, generic `@derive(Copy)`, or unratified attributes (`@repr(C)`, `@repr(packed)`).
+- **Module Static Boundary**: Static provenance applies to string literals; module-level `static` variable declarations must not be assumed until formally specified.
+- **No Unverified Safety Claims**: Acceptance authorizes implementation; Phase 2B.2 borrow safety and Phase 2B.3 RAII drop execution are not active prior to their verified milestones.
 
 ---
 
@@ -98,12 +102,10 @@ Explicitly excluded from Phase 2B and assigned to separate future milestones:
 
 ---
 
-## Explicit Owner Decisions Required Before Phase 2B.1
+## Staging & Subsequent Milestone Gates
 
-Before Phase 2B.1 implementation begins, owner confirmation is requested on:
-1. Ratify **explicit `@derive(Copy)`** on `struct`/`enum` (concrete types in 2B; generics deferred).
-2. Ratify **Strategy B (Conservative Candidate-Origin Sets)** for multi-input reference returns (retaining `WON-MEM-002` for abstract/bodyless callables).
-3. Ratify **deterministic left-to-right method receiver borrowing** (deferring two-phase borrows).
-4. Ratify **NLL borrow regions + lexical drops + stack drop flags**.
-5. Ratify **proposed grammar extensions** (`@derive(...)` attributes + optional `=` in `let`/`var`) in [syntax-and-grammar.md](../language-spec/syntax-and-grammar.md).
-6. Ratify **staged delivery (`2B.1 -> 2B.2 -> 2B.3`)** and **separation of Trait Solver / Concurrency** into a dedicated subsequent milestone.
+Implementation proceeds sequentially behind verified CI gates per [OWNER-APPROVAL-ADR-011-2026-11-25.md](OWNER-APPROVAL-ADR-011-2026-11-25.md):
+1. **Phase 2B.1 (Authorized)**: `@derive(Copy)` + uninitialized `let name: Type` / `var name: Type`, `internal/cfg`, `Place`/`Projection`, definite initialization, move/reinitialization, and non-`Drop` partial moves (`WON-MEM-001`, `008`, `010`, `011`).
+2. **Phase 2B.2 (Next After 2B.1)**: XOR borrow analysis, NLL regions, reborrowing, deterministic left-to-right method borrowing, Strategy B candidate-origin provenance, and abstract-boundary `WON-MEM-002..006`.
+3. **Phase 2B.3 (Next After 2B.2)**: Reverse-order lexical cleanup, conditional drop flags, early-return cleanup, partial-move cleanup, and `.wonbind` ownership lifecycle hooks (`WON-MEM-007` readiness).
+4. **Separate Future Milestone**: General trait solver, user `impl Drop`, generic `Copy`, `Send`/`Sync`, and structured concurrency runtime.

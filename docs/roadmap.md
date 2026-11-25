@@ -102,11 +102,11 @@ The implementation roadmap adheres to strict technical dependency ordering acros
   - *Status*: `IMPLEMENTED` (Verified in CI).
 - **Sub-phase 2B (Ownership-Lite CFG & Borrow Checker)**:
   - **2B.0 / 2B.0.1 (Ownership Architecture & Design Closure)**: Closed design for Ownership-CFG (`Place`, `Loan`, NLL region liveness, `@derive(Copy)` policy, `Static` literal provenance without `'a`/`'static` syntax, Strategy B candidate-origin return provenance, deterministic left-to-right method receiver borrowing, `WON-MEM-001`..`011` matrix, and Drop elaboration contract).
-    - *Deliverables*: [phase-2b.0-ownership-architecture.md](compiler/phase-2b.0-ownership-architecture.md), [ownership-and-borrowing.md](language-spec/ownership-and-borrowing.md), [ADR-011](decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`Proposed / Awaiting Owner Approval`).
-    - *Status*: `SPECIFIED` (Design Closed; **Awaiting Owner Approval of ADR-011 before Phase 2B.1 starts**).
-  - **2B.1 (Next Implementation Milestone — Ownership CFG, `@derive(Copy)` & Move/Init Analysis — Proposed)**:
-    - *Objective*: Parse optional `@derive(Copy)` / uninitialized binding extensions if approved, build `internal/cfg` (`Place`, `Projection`, `BasicBlock`), and enforce definite initialization, moves, reinitialization, non-`Drop` partial moves, and loop fixed-point checks (`WON-MEM-001`, `008`, `010`, `011`).
-    - *Status*: `PLANNED` (Next milestone upon ADR-011 approval).
+    - *Deliverables*: [phase-2b.0-ownership-architecture.md](compiler/phase-2b.0-ownership-architecture.md), [ownership-and-borrowing.md](language-spec/ownership-and-borrowing.md), [ADR-011](decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`ACCEPTED`), [OWNER-APPROVAL-ADR-011-2026-11-25.md](decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md).
+    - *Status*: `IMPLEMENTED` (Governance & Design Ratified Nov 25, 2026).
+  - **2B.1 (Next Implementation Milestone — Ownership CFG, `@derive(Copy)`, Uninitialized `let`/`var` & Move/Init Analysis — Authorized)**:
+    - *Objective*: Implement `@derive(Copy)` & uninitialized simple `let`/`var` extensions, `internal/cfg` (`Place`, `Projection`, `BasicBlock`), and definite-initialization, move, reinitialization, non-`Drop` partial-move, and loop fixed-point analysis (`WON-MEM-001`, `008`, `010`, `011`).
+    - *Status*: `SPECIFIED` (Authorized by ADR-011; Active Implementation Milestone).
   - **2B.2 (Borrow, NLL Regions & Candidate Provenance — Proposed)**:
     - *Objective*: Shared/exclusive loan conflict checking, disjoint field splitting, reborrowing, NLL liveness, Strategy B candidate-origin provenance, and abstract-boundary `WON-MEM-002..006`.
     - *Status*: `PLANNED`.

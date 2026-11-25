@@ -123,7 +123,7 @@ cd compiler/poc && go build -o bin/wonc ./cmd/wonc
 | :--- | :--- | :--- |
 | Repository Architecture & Governance | `IMPLEMENTED` | [AGENTS.md](AGENTS.md), [GOVERNANCE.md](GOVERNANCE.md) |
 | Architecture Decision Records (ADRs 001–010) | `ACCEPTED` | [docs/decisions/](docs/decisions/) |
-| Ownership-Lite Architecture Decision (ADR-011) | `Proposed (Awaiting Owner Approval)` | [ADR-011](docs/decisions/ADR-011-ownership-and-borrow-checking-semantics.md) |
+| Ownership-Lite Architecture Decision (ADR-011) | `ACCEPTED` (Authorizes Phase 2B.1) | [ADR-011](docs/decisions/ADR-011-ownership-and-borrow-checking-semantics.md), [Approval Record](docs/decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md) |
 | Language Specification (Draft 0.1) | `SPECIFIED` | [docs/language-spec/](docs/language-spec/README.md) |
 | Canonical Lexer (UTF-8 + Indentation EBNF) & Parser | `IMPLEMENTED` | [docs/language-spec/syntax-and-grammar.md](docs/language-spec/syntax-and-grammar.md) |
 | Core Semantic Analysis & Type System (Phase 2A / 2A.1) | `IMPLEMENTED` | [docs/compiler/phase-2a-semantic-analysis.md](docs/compiler/phase-2a-semantic-analysis.md), [docs/compiler/phase-2a.1-correctness-hardening.md](docs/compiler/phase-2a.1-correctness-hardening.md) |
