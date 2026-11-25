@@ -214,7 +214,11 @@ func (c *Checker) genericParamTypeIDs(sym *symbols.Symbol) []types.TypeID {
 }
 
 func (c *Checker) resolveAstType(tn ast.TypeNode, scope *symbols.Scope) types.TypeID {
-	return c.symbols.ResolveTypeNode(tn, scope, c.report)
+	id := c.symbols.ResolveTypeNode(tn, scope, c.report)
+	if tn != nil {
+		c.markCodegenIfUnsupportedType(id, tn.GetSpan())
+	}
+	return id
 }
 
 func (c *Checker) validateSizedType(id types.TypeID, span diagnostic.Span, ctxDesc string) {

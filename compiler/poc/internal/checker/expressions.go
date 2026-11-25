@@ -2,6 +2,7 @@ package checker
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/KitiLab/WON/compiler/poc/internal/ast"
@@ -64,11 +65,14 @@ func (c *Checker) evalExpr(expr ast.Expr, expected types.TypeID, scope *symbols.
 			expectedElem = c.types.Info(expected).Elem
 		}
 		elemType := c.checkExpr(e.Elem, expectedElem, scope)
+		if il, ok := e.CountExpr.(*ast.IntegerLiteral); ok && !il.Valid {
+			return types.Invalid
+		}
 		if e.Count < 0 {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code:     "WON-TYP-004",
 				Severity: "error",
-				Message:  fmt.Sprintf("定长数组重复长度不能为负数 (%d)", e.Count),
+				Message:  fmt.Sprintf("定长数组重复长度非法或超出有效范围 (%d)", e.Count),
 				File:     e.Span.File,
 				Span:     e.Span,
 			})
@@ -218,8 +222,15 @@ func (c *Checker) evalExpr(expr ast.Expr, expected types.TypeID, scope *symbols.
 
 	case *ast.CastExpr:
 		c.typed.markCodegenUnsupported("显式类型转换 'as' 尚未在 C11 后端实现代码生成", e.Span)
-		srcType := c.checkExpr(e.Expr, types.Invalid, scope)
 		targetType := c.resolveAstType(e.TargetType, scope)
+		srcHint := types.Invalid
+		if il, ok := e.Expr.(*ast.IntegerLiteral); ok && il.Valid && il.Suffix == "" && targetType != types.Invalid && c.types.IsInteger(targetType) {
+			if !c.types.FitsBigIntLiteral(il.Value, c.types.I64) && c.types.FitsBigIntLiteral(il.Value, targetType) {
+				srcHint = targetType
+			}
+		}
+		srcType := c.checkExpr(e.Expr, srcHint, scope)
+		c.markCodegenIfUnsupportedType(targetType, e.Span)
 		if srcType != types.Invalid && targetType != types.Invalid && !c.types.CanCast(srcType, targetType) {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code:     "WON-TYP-005",
@@ -290,38 +301,51 @@ func (c *Checker) evalExpr(expr ast.Expr, expected types.TypeID, scope *symbols.
 	}
 }
 
+func (c *Checker) markCodegenIfUnsupportedType(id types.TypeID, span diagnostic.Span) {
+	if id == c.types.I128 || id == c.types.U128 {
+		c.typed.markCodegenUnsupported(fmt.Sprintf("128 位整数类型 '%s' 尚未在当前 C11 后端实现可移植代码生成", c.types.Format(id)), span)
+	}
+}
+
 func (c *Checker) checkIntegerLiteral(e *ast.IntegerLiteral, expected types.TypeID) types.TypeID {
+	if !e.Valid || e.Value == nil {
+		return types.Invalid
+	}
 	if e.Suffix != "" {
 		tid := c.symbols.ResolveTypeString(e.Suffix, nil)
 		if tid == types.Invalid {
 			return c.types.I64
 		}
-		if !c.types.FitsIntegerLiteral(e.Value, tid) {
-			c.report.AddDiagnostic(diagnostic.Diagnostic{
-				Code:     "WON-TYP-003",
-				Severity: "error",
-				Message:  fmt.Sprintf("整数字面量 '%s' 溢出目标类型 '%s' 的表示范围", e.Raw, c.types.Format(tid)),
-				File:     e.Span.File,
-				Span:     e.Span,
-			})
-		}
-		return tid
-	}
-
-	if expected != types.Invalid && c.types.IsInteger(expected) {
-		if !c.types.FitsIntegerLiteral(e.Value, expected) {
+		c.markCodegenIfUnsupportedType(tid, e.Span)
+		if !c.types.FitsBigIntLiteral(e.Value, tid) {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code:        "WON-TYP-003",
 				Severity:    "error",
-				Message:     fmt.Sprintf("整数字面量 %d 超出上下文期望类型 '%s' 的合法取值范围", e.Value, c.types.Format(expected)),
+				Message:     fmt.Sprintf("整数字面量 '%s' 超出目标类型 '%s' 的表示范围", e.Raw, c.types.Format(tid)),
 				File:        e.Span.File,
 				Span:        e.Span,
 				Explanation: "常量溢出拒绝属于编译期静态安全保证 (WON-TYP-003)。",
 			})
 		}
-		return expected
+		return tid
 	}
-	return c.types.I64
+
+	target := c.types.I64
+	if expected != types.Invalid && c.types.IsInteger(expected) {
+		target = expected
+	}
+	c.markCodegenIfUnsupportedType(target, e.Span)
+	if !c.types.FitsBigIntLiteral(e.Value, target) {
+		c.report.AddDiagnostic(diagnostic.Diagnostic{
+			Code:        "WON-TYP-003",
+			Severity:    "error",
+			Message:     fmt.Sprintf("整数字面量 '%s' (%s) 超出目标类型 '%s' 的合法取值范围", e.Raw, e.Value.String(), c.types.Format(target)),
+			File:        e.Span.File,
+			Span:        e.Span,
+			Explanation: "常量溢出拒绝属于编译期静态安全保证 (WON-TYP-003)。",
+		})
+	}
+	return target
 }
 
 func (c *Checker) checkIdentifier(e *ast.Identifier, expected types.TypeID, scope *symbols.Scope) types.TypeID {
@@ -653,22 +677,36 @@ func (c *Checker) unwrapIndexElement(objType types.TypeID, span diagnostic.Span)
 func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr, expected types.TypeID, scope *symbols.Scope) types.TypeID {
 	switch e.Op {
 	case "-":
-		if intLit, isLit := e.Expr.(*ast.IntegerLiteral); isLit && intLit.Suffix == "" && expected != types.Invalid && c.types.IsInteger(expected) {
-			if c.types.IsSigned(expected) {
-				negVal := -intLit.Value
-				if !c.types.FitsIntegerLiteral(negVal, expected) {
-					c.report.AddDiagnostic(diagnostic.Diagnostic{
-						Code:        "WON-TYP-003",
-						Severity:    "error",
-						Message:     fmt.Sprintf("负整数字面量 -%d 超出上下文期望类型 '%s' 的合法取值范围", intLit.Value, c.types.Format(expected)),
-						File:        e.Span.File,
-						Span:        e.Span,
-						Explanation: "常量溢出拒绝属于编译期静态安全保证 (WON-TYP-003)。",
-					})
-				}
-				c.typed.ExprTypes[intLit] = expected
-				return expected
+		if intLit, isLit := e.Expr.(*ast.IntegerLiteral); isLit {
+			if !intLit.Valid || intLit.Value == nil {
+				return types.Invalid
 			}
+			target := c.types.I64
+			if intLit.Suffix != "" {
+				tid := c.symbols.ResolveTypeString(intLit.Suffix, nil)
+				if tid == types.Invalid {
+					return c.types.I64
+				}
+				target = tid
+			} else if expected != types.Invalid && c.types.IsInteger(expected) {
+				target = expected
+			}
+			negVal := new(big.Int).Neg(intLit.Value)
+			c.markCodegenIfUnsupportedType(target, e.Span)
+			if !c.types.FitsBigIntLiteral(negVal, target) {
+				c.report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:        "WON-TYP-003",
+					Severity:    "error",
+					Message:     fmt.Sprintf("负整数字面量 '-%s' 超出目标类型 '%s' 的合法取值范围", intLit.Raw, c.types.Format(target)),
+					File:        e.Span.File,
+					Span:        e.Span,
+					Explanation: "常量溢出及负值赋给无符号类型均在编译期拦截 (WON-TYP-003)。",
+				})
+			}
+			if c.typed != nil {
+				c.typed.ExprTypes[intLit] = target
+			}
+			return target
 		}
 		sub := c.checkExpr(e.Expr, expected, scope)
 		if sub != types.Invalid && !c.types.IsNumeric(sub) {

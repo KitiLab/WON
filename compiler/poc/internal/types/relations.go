@@ -1,6 +1,55 @@
 package types
 
-import "math"
+import (
+	"math"
+	"math/big"
+)
+
+// TargetPointerBits 表示当前目标平台的指针字长 (Linux/x86_64 LP64 为 64 位)
+const TargetPointerBits = 64
+
+var (
+	bigZero = big.NewInt(0)
+	bigOne  = big.NewInt(1)
+
+	minI8    = big.NewInt(math.MinInt8)
+	maxI8    = big.NewInt(math.MaxInt8)
+	minI16   = big.NewInt(math.MinInt16)
+	maxI16   = big.NewInt(math.MaxInt16)
+	minI32   = big.NewInt(math.MinInt32)
+	maxI32   = big.NewInt(math.MaxInt32)
+	minI64   = big.NewInt(math.MinInt64)
+	maxI64   = big.NewInt(math.MaxInt64)
+	minI128  = signedMinBound(128)
+	maxI128  = signedMaxBound(128)
+	minISize = signedMinBound(TargetPointerBits)
+	maxISize = signedMaxBound(TargetPointerBits)
+
+	maxU8    = big.NewInt(math.MaxUint8)
+	maxU16   = big.NewInt(math.MaxUint16)
+	maxU32   = big.NewInt(math.MaxUint32)
+	maxU64   = unsignedMaxBound(64)
+	maxU128  = unsignedMaxBound(128)
+	maxUSize = unsignedMaxBound(TargetPointerBits)
+)
+
+func signedMinBound(bits uint) *big.Int {
+	// -2^(bits-1)
+	v := new(big.Int).Lsh(bigOne, bits-1)
+	return v.Neg(v)
+}
+
+func signedMaxBound(bits uint) *big.Int {
+	// 2^(bits-1) - 1
+	v := new(big.Int).Lsh(bigOne, bits-1)
+	return v.Sub(v, bigOne)
+}
+
+func unsignedMaxBound(bits uint) *big.Int {
+	// 2^bits - 1
+	v := new(big.Int).Lsh(bigOne, bits)
+	return v.Sub(v, bigOne)
+}
 
 // Equal 通过唯一驻留 ID 执行 O(1) 类型严格相等判定（不依赖展示字符串）
 func (c *Context) Equal(a, b TypeID) bool {
@@ -88,29 +137,52 @@ func (c *Context) IsCopy(id TypeID) bool {
 	}
 }
 
-// FitsIntegerLiteral 验证无后缀整数字面量是否能安全表示在目标整数类型的值域范围内
+// FitsBigIntLiteral 使用精确任意精度边界判断整数字面量是否能安全表示在目标整数类型内
 // 注意：这是规范上下文推断 (Contextual Literal Typing)，而非通用隐式数值转换。
-func (c *Context) FitsIntegerLiteral(val int64, target TypeID) bool {
+func (c *Context) FitsBigIntLiteral(val *big.Int, target TypeID) bool {
+	if val == nil {
+		return false
+	}
+	inSigned := func(min, max *big.Int) bool {
+		return val.Cmp(min) >= 0 && val.Cmp(max) <= 0
+	}
+	inUnsigned := func(max *big.Int) bool {
+		return val.Cmp(bigZero) >= 0 && val.Cmp(max) <= 0
+	}
+
 	switch c.Info(target).Kind {
 	case KindI8:
-		return val >= math.MinInt8 && val <= math.MaxInt8
+		return inSigned(minI8, maxI8)
 	case KindI16:
-		return val >= math.MinInt16 && val <= math.MaxInt16
+		return inSigned(minI16, maxI16)
 	case KindI32:
-		return val >= math.MinInt32 && val <= math.MaxInt32
-	case KindI64, KindI128, KindISize:
-		return true
+		return inSigned(minI32, maxI32)
+	case KindI64:
+		return inSigned(minI64, maxI64)
+	case KindI128:
+		return inSigned(minI128, maxI128)
+	case KindISize:
+		return inSigned(minISize, maxISize)
 	case KindU8:
-		return val >= 0 && val <= math.MaxUint8
+		return inUnsigned(maxU8)
 	case KindU16:
-		return val >= 0 && val <= math.MaxUint16
+		return inUnsigned(maxU16)
 	case KindU32:
-		return val >= 0 && val <= math.MaxUint32
-	case KindU64, KindU128, KindUSize:
-		return val >= 0
+		return inUnsigned(maxU32)
+	case KindU64:
+		return inUnsigned(maxU64)
+	case KindU128:
+		return inUnsigned(maxU128)
+	case KindUSize:
+		return inUnsigned(maxUSize)
 	default:
 		return false
 	}
+}
+
+// FitsIntegerLiteral 验证 int64 值是否落在目标整数类型的精确取值区间内
+func (c *Context) FitsIntegerLiteral(val int64, target TypeID) bool {
+	return c.FitsBigIntLiteral(big.NewInt(val), target)
 }
 
 // CanAssign 检查类型 from 是否可以直接赋值给期望类型 to

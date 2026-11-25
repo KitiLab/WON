@@ -338,8 +338,11 @@ func (g *Generator) genExpr(expr ast.Expr) (string, error) {
 
 	switch e := expr.(type) {
 	case *ast.IntegerLiteral:
+		if !e.Valid || e.Value == nil {
+			return "", fmt.Errorf("非法的整数字面量 %q (第 %d 行, 第 %d 列)", e.Raw, e.Span.Start.Line, e.Span.Start.Column)
+		}
 		if e.Suffix != "" {
-			return fmt.Sprintf("%d", e.Value), nil
+			return e.Value.String(), nil
 		}
 		return e.Raw, nil
 	case *ast.StringLiteral:

@@ -1773,8 +1773,18 @@ func (p *Parser) parsePrimary() ast.Expr {
 	switch tok.Kind {
 	case token.INT:
 		p.advance()
-		val, suffix, _ := lexer.ParseIntLiteralWithSuffix(tok.Lexeme)
-		return &ast.IntegerLiteral{Value: val, Raw: tok.Lexeme, Suffix: suffix, Span: tok.Span}
+		val, suffix, err := lexer.ParseBigIntLiteralWithSuffix(tok.Lexeme)
+		if err != nil {
+			p.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:     "WON-SYN-008",
+				Severity: "error",
+				Message:  fmt.Sprintf("非法的整数字面量 %q: %v", tok.Lexeme, err),
+				File:     tok.Span.File,
+				Span:     tok.Span,
+			})
+			return &ast.IntegerLiteral{Value: nil, Raw: tok.Lexeme, Suffix: suffix, Valid: false, Span: tok.Span}
+		}
+		return &ast.IntegerLiteral{Value: val, Raw: tok.Lexeme, Suffix: suffix, Valid: true, Span: tok.Span}
 
 	case token.FLOAT:
 		p.advance()
@@ -2013,9 +2023,9 @@ func (p *Parser) parseArrayLiteral() ast.Expr {
 	if p.curIs(token.SEMICOLON) {
 		p.advance()
 		countExpr := p.parseExpression()
-		var countVal int64
-		if il, ok := countExpr.(*ast.IntegerLiteral); ok {
-			countVal = il.Value
+		var countVal int64 = -1
+		if il, ok := countExpr.(*ast.IntegerLiteral); ok && il.Valid && il.Value != nil && il.Value.IsInt64() {
+			countVal = il.Value.Int64()
 		}
 		end := p.cur().Span.End
 		p.expect(token.RBRACKET, "WON-SYN-007", "数组重复填充字面量缺少闭合 ']'")

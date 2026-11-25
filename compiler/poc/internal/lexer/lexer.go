@@ -4,6 +4,7 @@ package lexer
 
 import (
 	"fmt"
+	"math/big"
 	"strconv"
 	"strings"
 	"unicode"
@@ -1164,40 +1165,79 @@ func (l *Lexer) scanString(start diagnostic.Position) token.Token {
 	}
 }
 
-// ParseIntLiteral 将带有进制前缀与类型后缀的字符串数字转换为数值与类型后缀
+// ParseIntLiteral 将带有进制前缀与类型后缀的字符串数字转换为 int64（若超出 int64 则显式返回溢出错误）
 func ParseIntLiteral(raw string) (int64, error) {
 	val, _, err := ParseIntLiteralWithSuffix(raw)
 	return val, err
 }
 
-// ParseIntLiteralWithSuffix 提取整数字面量值与后缀
+// ParseIntLiteralWithSuffix 提取整数字面量值与后缀（兼容旧有 int64 调用，超出 int64 返回 ErrRange）
 func ParseIntLiteralWithSuffix(raw string) (int64, string, error) {
-	clean := strings.ReplaceAll(raw, "_", "")
+	bv, suffix, err := ParseBigIntLiteralWithSuffix(raw)
+	if err != nil {
+		return 0, suffix, err
+	}
+	if !bv.IsInt64() {
+		return 0, suffix, strconv.ErrRange
+	}
+	return bv.Int64(), suffix, nil
+}
+
+// ParseBigIntLiteralWithSuffix 将带有进制前缀与类型后缀的字符串整数精确解析为任意精度 *big.Int，绝不截断合法高位整数
+func ParseBigIntLiteralWithSuffix(raw string) (*big.Int, string, error) {
 	suffix := ""
-	// 检查已知后缀，优先匹配长后缀
+	withoutSuffix := raw
+	// 检查已知后缀，优先匹配长后缀以区分 u128/u8 与 i128/i8
 	orderedSuffixes := []string{"isize", "usize", "i128", "u128", "i16", "u16", "i32", "u32", "i64", "u64", "i8", "u8"}
 	for _, s := range orderedSuffixes {
-		if strings.HasSuffix(clean, s) {
+		if strings.HasSuffix(withoutSuffix, s) {
 			suffix = s
-			clean = strings.TrimSuffix(clean, s)
+			withoutSuffix = strings.TrimSuffix(withoutSuffix, s)
 			break
 		}
 	}
 
-	if strings.HasPrefix(clean, "0x") || strings.HasPrefix(clean, "0X") {
-		val, err := strconv.ParseInt(clean[2:], 16, 64)
-		return val, suffix, err
+	base := 10
+	digitsPart := withoutSuffix
+	if strings.HasPrefix(digitsPart, "0x") || strings.HasPrefix(digitsPart, "0X") {
+		base = 16
+		digitsPart = digitsPart[2:]
+	} else if strings.HasPrefix(digitsPart, "0o") || strings.HasPrefix(digitsPart, "0O") {
+		base = 8
+		digitsPart = digitsPart[2:]
+	} else if strings.HasPrefix(digitsPart, "0b") || strings.HasPrefix(digitsPart, "0B") {
+		base = 2
+		digitsPart = digitsPart[2:]
 	}
-	if strings.HasPrefix(clean, "0o") || strings.HasPrefix(clean, "0O") {
-		val, err := strconv.ParseInt(clean[2:], 8, 64)
-		return val, suffix, err
+
+	cleanDigits := strings.ReplaceAll(digitsPart, "_", "")
+	if len(cleanDigits) == 0 {
+		return nil, suffix, fmt.Errorf("整数字面量缺少有效数字")
 	}
-	if strings.HasPrefix(clean, "0b") || strings.HasPrefix(clean, "0B") {
-		val, err := strconv.ParseInt(clean[2:], 2, 64)
-		return val, suffix, err
+
+	// 严格校验每位数字是否属于对应进制，杜绝 SetString 接受非法符号或静默截断
+	for _, r := range cleanDigits {
+		validDigit := false
+		switch base {
+		case 16:
+			validDigit = isHexDigit(r)
+		case 8:
+			validDigit = isOctDigit(r)
+		case 2:
+			validDigit = isBinDigit(r)
+		default:
+			validDigit = r >= '0' && r <= '9'
+		}
+		if !validDigit {
+			return nil, suffix, fmt.Errorf("字符 %q 不是合法的 %d 进制数字", r, base)
+		}
 	}
-	val, err := strconv.ParseInt(clean, 10, 64)
-	return val, suffix, err
+
+	val, ok := new(big.Int).SetString(cleanDigits, base)
+	if !ok {
+		return nil, suffix, fmt.Errorf("无法将 %q 解析为 %d 进制整数", raw, base)
+	}
+	return val, suffix, nil
 }
 
 // ParseFloatLiteralWithSuffix 提取浮点字面量值与后缀

@@ -1,6 +1,9 @@
 package types
 
-import "testing"
+import (
+	"math/big"
+	"testing"
+)
 
 func TestTypeInterningIdentity(t *testing.T) {
 	ctx := NewContext()
@@ -121,5 +124,50 @@ func TestCanAssignAndCanCastAndSubstitute(t *testing.T) {
 	expected := ctx.Enum(BuiltinResultSymbolID, "Result", []TypeID{ctx.I32, ctx.StrView})
 	if resConcrete != expected {
 		t.Fatalf("泛型替换失败: 期望 Result[i32, &str] (%d), 实际为 %s (%d)", expected, ctx.Format(resConcrete), resConcrete)
+	}
+}
+
+func mustBig(s string) *big.Int {
+	v, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		panic("invalid test big.Int: " + s)
+	}
+	return v
+}
+
+func TestFitsBigIntLiteralExactBounds(t *testing.T) {
+	ctx := NewContext()
+
+	validPairs := []struct {
+		val string
+		tid TypeID
+	}{
+		{"18446744073709551615", ctx.U64},
+		{"340282366920938463463374607431768211455", ctx.U128},
+		{"170141183460469231731687303715884105727", ctx.I128},
+		{"-170141183460469231731687303715884105728", ctx.I128},
+		{"-9223372036854775808", ctx.ISize},
+		{"18446744073709551615", ctx.USize},
+	}
+	for _, p := range validPairs {
+		if !ctx.FitsBigIntLiteral(mustBig(p.val), p.tid) {
+			t.Errorf("期望 %s 符合 %s 合法范围", p.val, ctx.Format(p.tid))
+		}
+	}
+
+	invalidPairs := []struct {
+		val string
+		tid TypeID
+	}{
+		{"18446744073709551616", ctx.U64},
+		{"340282366920938463463374607431768211456", ctx.U128},
+		{"170141183460469231731687303715884105728", ctx.I128},
+		{"-170141183460469231731687303715884105729", ctx.I128},
+		{"-1", ctx.U128},
+	}
+	for _, p := range invalidPairs {
+		if ctx.FitsBigIntLiteral(mustBig(p.val), p.tid) {
+			t.Errorf("期望 %s 超出 %s 范围被拒绝", p.val, ctx.Format(p.tid))
+		}
 	}
 }

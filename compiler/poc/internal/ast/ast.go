@@ -4,6 +4,7 @@ package ast
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
@@ -436,11 +437,12 @@ func (e *ExprStmt) stmtNode()                {}
 
 // --- 表达式节点 ---
 
-// IntegerLiteral 表示整型字面量
+// IntegerLiteral 表示整型字面量，采用 *big.Int 保存无损任意精度整数值以支持完整 i128/u128 范围
 type IntegerLiteral struct {
-	Value  int64
+	Value  *big.Int
 	Raw    string
 	Suffix string
+	Valid  bool
 	Span   diagnostic.Span
 }
 
