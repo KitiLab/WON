@@ -216,4 +216,23 @@ func TestCLISemanticCheckAndCodegenGate(t *testing.T) {
 			t.Errorf("wonc build 在发出 WON-GEN-002 后禁止生成残留 C 文件 %s", baseC)
 		}
 	}
+
+	// 4. 验证不受支持的 unit 值 return 表达式在 wonc build 被 WON-GEN-002 拦截且不产生任何 .won.c 文件
+	badUnitWon := filepath.Join(tmpWork, "bad_unit_ret.won")
+	if err := os.WriteFile(badUnitWon, []byte("fn main() -> unit:\n    return ()\n"), 0644); err != nil {
+		t.Fatalf("写入临时文件失败: %v", err)
+	}
+	absBin, _ := filepath.Abs(woncBin)
+	cmdUnit := exec.Command(absBin, "build", badUnitWon)
+	cmdUnit.Dir = tmpWork
+	unitOut, err := cmdUnit.CombinedOutput()
+	if err == nil {
+		t.Fatalf("wonc build 应当以 WON-GEN-002 拒止不受支持的 unit 返回表达式")
+	}
+	if !strings.Contains(string(unitOut), "WON-GEN-002") {
+		t.Errorf("期望输出 WON-GEN-002, 实际: %s", string(unitOut))
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpWork, "bad_unit_ret.won.c")); statErr == nil {
+		t.Errorf("wonc build 在 WON-GEN-002 拦截 bad_unit_ret.won 后不得产生 .won.c 文件")
+	}
 }

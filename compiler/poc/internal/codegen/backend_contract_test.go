@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
 	"github.com/KitiLab/WON/compiler/poc/internal/checker"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
 	"github.com/KitiLab/WON/compiler/poc/internal/lexer"
@@ -236,6 +237,10 @@ func TestBackendUnsupportedCasesRejectBeforeCodegen(t *testing.T) {
 		{"ArrayReturn", "fn arr() -> [u8; 4]:\n    var b: [u8; 4] = [0; 4]\n    return b\nfn main() -> i32:\n    return 0\n"},
 		{"SliceParam", "fn take(s: &[u8]):\n    return\nfn main() -> i32:\n    return 0\n"},
 		{"ForLoop", "fn main() -> i32:\n    for i in 0..3:\n        return i as i32\n    return 0\n"},
+		{"UnsupportedUnitTupleLiteralReturn", "fn bad() -> unit:\n    return ()\nfn main() -> i32:\n    return 0\n"},
+		{"UnsupportedUnitMultiStmtUnsafeReturn", "fn cleanup() -> unit:\n    println(\"ok\")\nfn bad() -> unit:\n    return unsafe:\n        println(\"step1\")\n        cleanup()\nfn main() -> i32:\n    return 0\n"},
+		{"UnsupportedUnitPushStrReturn", "fn bad() -> unit:\n    var s = String::from(\"x\")\n    return s.push_str(\"y\")\nfn main() -> i32:\n    return 0\n"},
+		{"UnsupportedUnitEquality", "fn main() -> i32:\n    let eq = () == ()\n    return 0\n"},
 	}
 
 	for _, tc := range cases {
@@ -259,5 +264,126 @@ func TestBackendUnsupportedCasesRejectBeforeCodegen(t *testing.T) {
 				t.Errorf("用例 %s 缺少明确的拒止原因或源码位置: reason=%q span=%+v", tc.name, tp.UnsupportedReason, tp.UnsupportedCodegen)
 			}
 		})
+	}
+}
+
+func TestUnitReturnLoweringUserFFIBareAndMainABI(t *testing.T) {
+	// A + B + C + D: 用户 unit 函数返回、FFI void 返回 (两种写法)、裸 return、以及 main -> unit 包装，验证一次求值与严格 C11 编译执行
+	hdrDir := t.TempDir()
+	hdrContent := `
+static int g_won_ffi_void_calls = 0;
+static inline void void_hook(void) {
+    g_won_ffi_void_calls++;
+}
+static inline int get_hook_count(void) {
+    return g_won_ffi_void_calls;
+}
+`
+	if err := os.WriteFile(filepath.Join(hdrDir, "test_void_ffi.h"), []byte(hdrContent), 0644); err != nil {
+		t.Fatalf("写入 mock FFI 头文件失败: %v", err)
+	}
+
+	src := `
+#import "test_void_ffi.h"
+
+fn cleanup() -> unit:
+    println("cleanup_once")
+    return
+
+fn delegate() -> unit:
+    return cleanup()
+
+fn delegate_ffi_wrap() -> unit:
+    return unsafe:
+        test_void_ffi::void_hook()
+
+fn delegate_ffi_inside() -> unit:
+    unsafe:
+        return test_void_ffi::void_hook()
+
+fn main() -> unit:
+    delegate()
+    delegate_ffi_wrap()
+    delegate_ffi_inside()
+    let count = unsafe:
+        test_void_ffi::get_hook_count()
+    if count != 2:
+        println("FAIL_COUNT=", count)
+        return
+    println("VOID_CALLS=2")
+    return
+`
+	rep := diagnostic.NewReport()
+	lex := lexer.New("unit_return.won", src, rep)
+	p := parser.New(lex, rep, "unit_return.won")
+	prog := p.ParseProgram()
+	if rep.HasErrors() {
+		t.Fatalf("解析失败:\n%s", rep.String())
+	}
+
+	bindings := map[string]*bindgen.BindingMeta{
+		"test_void_ffi": {
+			HeaderPath: "test_void_ffi.h",
+			Functions: map[string]bindgen.FunctionSig{
+				"void_hook": {
+					Name:       "void_hook",
+					ReturnType: "void",
+					ParamTypes: nil,
+				},
+				"get_hook_count": {
+					Name:       "get_hook_count",
+					ReturnType: "int",
+					ParamTypes: nil,
+				},
+			},
+		},
+	}
+
+	chk := checker.New(rep, bindings)
+	tp := chk.CheckProgram(prog)
+	if rep.HasErrors() {
+		t.Fatalf("语义校验失败:\n%s", rep.String())
+	}
+	if !tp.CodegenSupported {
+		t.Fatalf("合法 unit 返回用例应通过 C11 能力检查，实际被拒止: %s", tp.UnsupportedReason)
+	}
+
+	gen := NewTyped(prog, tp, bindings)
+	cCode, err := gen.Generate()
+	if err != nil {
+		t.Fatalf("C 代码生成失败: %v", err)
+	}
+
+	// 严格断言绝对禁止生成 `return cleanup();` 或 `return void_hook();`
+	if strings.Contains(cCode, "return cleanup()") || strings.Contains(cCode, "return void_hook()") {
+		t.Fatalf("生成代码违背 ISO C11，在 void 函数中生成了带值 return:\n%s", cCode)
+	}
+	if !strings.Contains(cCode, "cleanup();\n") || !strings.Contains(cCode, "void_hook();\n") {
+		t.Fatalf("期望 unit 表达式降低为独立表达式语句后跟 return;:\n%s", cCode)
+	}
+	if !strings.Contains(cCode, "static void won_user_main(void)") || !strings.Contains(cCode, "int main(void)") {
+		t.Fatalf("main -> unit 包装器缺失:\n%s", cCode)
+	}
+
+	cFile := filepath.Join(hdrDir, "unit_return.c")
+	if err := os.WriteFile(cFile, []byte(cCode), 0644); err != nil {
+		t.Fatalf("写入 C 文件失败: %v", err)
+	}
+
+	flags := []string{"-std=c11", "-pedantic-errors", "-Wall", "-Wextra", "-Werror", "-I", hdrDir}
+	for _, cc := range []string{"gcc", "clang"} {
+		binPath := filepath.Join(hdrDir, "unit_bin_"+cc)
+		args := append(append([]string{}, flags...), cFile, "-o", binPath)
+		if out, err := exec.Command(cc, args...).CombinedOutput(); err != nil {
+			t.Fatalf("%s 严格 C11 编译 unit return 测试失败: %v\n输出:\n%s\n源码:\n%s", cc, err, string(out), cCode)
+		}
+		runOut, err := exec.Command(binPath).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s unit return 可执行文件运行失败: %v\n输出:\n%s", cc, err, string(runOut))
+		}
+		outStr := string(runOut)
+		if strings.Count(outStr, "cleanup_once") != 1 || !strings.Contains(outStr, "VOID_CALLS=2") {
+			t.Fatalf("%s 运行输出验证副作用次数失败 (期望 cleanup_once 出现 1 次且 VOID_CALLS=2):\n%s", cc, outStr)
+		}
 	}
 }

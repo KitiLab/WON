@@ -30,7 +30,7 @@ Every WON type and language construct accepted by the Phase 2A/2A.1 semantic che
 | `f64` | Full | Arithmetic (`+`, `-`, `*`, `/`) & comparisons; modulo `%` invalid in C11 | **Map** -> `double`; **Gate `%` (`WON-GEN-002`)** |
 | `bool` | Full | Full (`<stdbool.h>` `bool`, `true`/`false`, `and`->`&&`, `or`->`\|\|`, `not`->`!`) | **Map** -> `bool` |
 | `char` | Full | Full (`<stdint.h>` `uint32_t` UTF-32 code point) | **Map** -> `uint32_t`; literals `((uint32_t)UINT32_C(rune))` |
-| `unit` | Full | **Return position only** (`void`); invalid as C object type | **Map** `void` in fn returns & wrap `fn main() -> unit` via `int main(void)`; **Gate (`WON-GEN-002`)** in params/locals/exprs |
+| `unit` | Full | **Return position & unit-return statement lowering** (`void`); invalid as C object type | **Map** `void` in fn returns; lower supported `return unit_expr` (e.g. `return cleanup()` or `return unsafe: ffi::void_fn()`) as single-eval `<expr>; return;` via `TypedProgram.ExprTypes`; wrap `fn main() -> unit` via `int main(void)`; **Gate (`WON-GEN-002`)** in params/locals/non-return exprs & unsupported unit exprs (e.g. `return ()`) |
 | `str` (DST) | Rejected by value (`WON-TYP-006`) | Unsupported | **Gate** (`WON-TYP-006` / `WON-GEN-002`) |
 | `&str` | Full | Subset: C string literal view (`const char*`), FFI, `println`; content `==` / `.len()` / `.is_empty()` unlowered | **Map** `const char*` in C-string view & FFI; **Gate (`WON-GEN-002`)** `.len()`, `.is_empty()`, `&str == &str` |
 | `String` | Partial (`String::from`, `push_str`) | Deferred (no heap string runtime lowering) | **Gate (`WON-GEN-002`)** |
@@ -53,7 +53,7 @@ Every WON type and language construct accepted by the Phase 2A/2A.1 semantic che
 The C11 generator never falls back to raw WON type names or `void` defaults:
 
 1. **Explicit Positional Context (`TypePos`)**:
-   - `PosReturn`: Permits `unit` (`void`) and any C11-supported value/pointer/scalar-ref return type; rejects fixed arrays `[T; N]` (invalid C return type) and unsupported types.
+   - `PosReturn`: Permits `unit` (`void`) and any C11-supported value/pointer/scalar-ref return type; rejects fixed arrays `[T; N]` (invalid C return type) and unsupported types. When a `ReturnStmt` carries a value whose resolved semantic `TypedProgram.ExprTypes` equals `unit` (such as a `unit`-returning WON call or `void` C FFI call), the generator evaluates `<expr>;` as a statement once and emits bare `return;`, never emitting invalid ISO C11 `return <void_expr>;`. Supported unit-return expressions pass `wonc check` and `wonc build`; unsupported unit-valued expressions (e.g., `return ()`, multi-statement nested `unsafe`) are gated with `WON-GEN-002` before `.won.c` creation.
    - `PosParam`: Rejects `unit`, fixed arrays `[T; N]`, `&[T]` fat slices, and unsupported types.
    - `PosLocal`: Permits C11 scalars, scalar pointers/references, `&str`, and local fixed arrays `[T; N]` with scalar elements (or Phase 0B `.as_bytes()` alias); rejects `unit`, `String`, `&[T]` (except `.as_bytes().as_ptr()`), structs, enums, tuples.
 2. **Error Propagation**: Unmappable types are caught before C emission during backend capability verification (`WON-GEN-002`) and also return explicit `error` values inside `codegen` (`WON-GEN-001` defense-in-depth).

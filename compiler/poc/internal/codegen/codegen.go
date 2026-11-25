@@ -324,9 +324,22 @@ func (g *Generator) genStatement(stmt ast.Stmt) error {
 
 	case *ast.ReturnStmt:
 		if s.Value != nil {
+			retT := g.exprType(s.Value)
+			if g.typed == nil || g.typed.Types == nil || retT == types.Invalid {
+				return fmt.Errorf("return 表达式缺少已解析语义类型，无法安全生成 C11 代码 (第 %d 行, 第 %d 列)", s.Span.Start.Line, s.Span.Start.Column)
+			}
 			valStr, err := g.genExpr(s.Value)
 			if err != nil {
 				return err
+			}
+			// 若返还表达式类型为 unit (C 中为 void)，必须拆分为表达式求值语句 + 裸 return;，
+			// 确保副作用求值一次且严格满足 ISO C11 §6.8.6.4 (void 函数不得带值 return)。
+			if retT == g.typed.Types.Unit {
+				if valStr != "" {
+					g.writeLine(fmt.Sprintf("%s;", valStr))
+				}
+				g.writeLine("return;")
+				return nil
 			}
 			g.writeLine(fmt.Sprintf("return %s;", valStr))
 		} else {

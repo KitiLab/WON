@@ -312,7 +312,10 @@ func (c *Checker) verifyExprBackendCaps(expr ast.Expr, sliceAliasVars map[symbol
 			return
 		}
 		if e.Op == "==" || e.Op == "!=" {
-			if lt == c.types.StrView || rt == c.types.StrView || c.types.Info(lt).Kind == types.KindString || c.types.Info(lt).Kind == types.KindEnum {
+			if lt == c.types.StrView || rt == c.types.StrView ||
+				c.types.Info(lt).Kind == types.KindUnit ||
+				c.types.Info(lt).Kind == types.KindString ||
+				c.types.Info(lt).Kind == types.KindEnum {
 				c.typed.markCodegenUnsupported(fmt.Sprintf("类型 '%s' 的值相等比较 '%s' 尚未在当前 C11 后端实现", c.types.Format(lt), e.Op), e.Span)
 				return
 			}
