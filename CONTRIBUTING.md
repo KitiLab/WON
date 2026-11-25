@@ -29,3 +29,7 @@ Thank you for your interest in contributing to the WON programming language. We 
 - **Source Code Comments**: Simplified Chinese (`简体中文`) for internal docstrings, type documentation, and algorithm explanations.
 - **Dependencies**: Keep external dependencies minimal. Prioritize standard libraries and zero-dependency designs.
 - **Formatting**: Adhere to `.editorconfig` settings (UTF-8, LF line endings, 4-space indent for code, 2-space for configuration).
+
+## Licensing of Contributions
+
+All contributions submitted to the WON repository are provided under the terms of the [Apache License, Version 2.0](LICENSE) (`Apache-2.0`), in accordance with Section 5 (Submission of Contributions) of that license. Unless explicitly stated otherwise in a separate written notice, external third-party code under incompatible or undisclosed licenses must not be copied directly into this repository.

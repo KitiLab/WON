@@ -9,7 +9,7 @@
 ---
 
 [![Project Status](https://img.shields.io/badge/status-Phase%202A.2%20%28C11%20Backend%20Contract%29-brightgreen.svg)](#current-development-status)
-[![License](https://img.shields.io/badge/license-Pending%20Decision-orange.svg)](LICENSE_PENDING.md)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Organization](https://img.shields.io/badge/org-KitiLab-black.svg)](https://github.com/KitiLab)
 
 </div>
@@ -182,4 +182,13 @@ Comprehensive technical documentation is maintained under [`docs/`](docs/):
 - **[CONTRIBUTING.md](CONTRIBUTING.md)**: Contribution guidelines and workflow.
 - **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)**: Community standards and expectations.
 - **[SECURITY.md](SECURITY.md)**: Vulnerability disclosure policy.
-- **[LICENSE_PENDING.md](LICENSE_PENDING.md)**: Licensing deliberation and policy.
+- **[LICENSE](LICENSE)**: Apache License, Version 2.0 (`SPDX-License-Identifier: Apache-2.0`).
+
+---
+
+## 8. License
+
+This repository is licensed under the **Apache License, Version 2.0** (`SPDX-License-Identifier: Apache-2.0`). See [`LICENSE`](LICENSE) for the full, unmodified legal text.
+
+- **Trademarks (Section 6)**: This license does not grant permission to use the trade names, trademarks, service marks, or product names of **KitiLab** or **WON**, except as required for reasonable and customary use in describing the origin of the Work.
+- **Third-Party Libraries & Toolchains**: External libraries and compiler/system toolchains referenced or invoked externally by WON examples or host builds (such as `zlib`, `GCC`, and `Clang`) remain subject to their own respective upstream licenses and are not relicensed under Apache-2.0.

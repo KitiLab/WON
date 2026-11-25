@@ -16,7 +16,7 @@ jobs:
 
       - name: Verify Core Governance Files
         run: |
-          for file in README.md LICENSE_PENDING.md CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md GOVERNANCE.md AGENTS.md; do
+          for file in README.md LICENSE CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md GOVERNANCE.md AGENTS.md; do
             if [ ! -f "$file" ]; then
               echo "Error: Required file $file is missing"
               exit 1
