@@ -42,6 +42,7 @@ jobs:
             docs/compiler/phase-2a-semantic-analysis.md \
             docs/compiler/phase-2a.1-correctness-hardening.md \
             docs/compiler/phase-2a.2-backend-capability-matrix.md \
+            docs/compiler/phase-2b.0-ownership-architecture.md \
             docs/decisions/ADR-000-template.md \
             docs/decisions/ADR-001-c-codegen-backend.md \
             docs/decisions/ADR-002-compiler-implementation-language.md \
@@ -53,6 +54,7 @@ jobs:
             docs/decisions/ADR-008-structured-concurrency-and-zero-gil.md \
             docs/decisions/ADR-009-typed-intermediate-representation-architecture.md \
             docs/decisions/ADR-010-compiler-self-hosting-bootstrap-pipeline.md \
+            docs/decisions/ADR-011-ownership-and-borrow-checking-semantics.md \
             docs/decisions/OWNER-APPROVAL-2026-11-24.md; do
             if [ ! -f "$doc" ]; then
               echo "Error: Required documentation $doc is missing"
@@ -68,6 +70,7 @@ jobs:
             docs/language-spec/syntax-and-grammar.md \
             docs/language-spec/type-system.md \
             docs/language-spec/ownership-and-memory.md \
+            docs/language-spec/ownership-and-borrowing.md \
             docs/language-spec/concurrency-model.md \
             docs/language-spec/error-handling.md \
             docs/language-spec/c-interop-and-unsafe.md \

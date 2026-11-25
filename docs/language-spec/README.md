@@ -40,6 +40,7 @@ The WON language specification is organized into modular topic specifications:
 | **[syntax-and-grammar.md](syntax-and-grammar.md)** | Lexical structure, indentation tokenization, formal EBNF grammar, and canonical examples | `SPECIFIED` |
 | **[type-system.md](type-system.md)** | Primitive types, composite types, local type inference, generics, traits, and dispatch | `SPECIFIED` |
 | **[ownership-and-memory.md](ownership-and-memory.md)** | Value semantics, borrowing, lifetime-annotation-free safety, explicit sharing, and destruction | `SPECIFIED` |
+| **[ownership-and-borrowing.md](ownership-and-borrowing.md)** | Phase 2B.0 normative ownership, CFG borrowing, NLL region & provenance rules, and test matrix | `SPECIFIED` (Proposed; Awaiting Owner Approval) |
 | **[concurrency-model.md](concurrency-model.md)** | Structured concurrency, task scopes, channel/data transfer, thread safety, and synchronization | `SPECIFIED` |
 | **[error-handling.md](error-handling.md)** | `Option[T]`, `Result[T, E]`, `?` operator, panic/trap semantics, and cleanup determinism | `SPECIFIED` |
 | **[c-interop-and-unsafe.md](c-interop-and-unsafe.md)** | C header imports, ABI type mappings, pointer annotations, and unsafe code boundaries | `SPECIFIED` |

@@ -3,7 +3,8 @@
 > **Specification Version**: Draft 0.1  
 > **Status**: `SPECIFIED` (Under Architectural Review)  
 > **Module**: Ownership-Lite & Memory Safety  
-> **Date**: November 2026
+> **Date**: November 2026  
+> **Phase 2B.0 Normative Elaboration**: [Ownership and Borrowing Normative Proposal](ownership-and-borrowing.md) (`Proposed / Awaiting Owner Approval`), [Phase 2B.0 Ownership Architecture](../compiler/phase-2b.0-ownership-architecture.md)
 
 ---
 

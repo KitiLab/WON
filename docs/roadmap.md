@@ -100,9 +100,13 @@ The implementation roadmap adheres to strict technical dependency ordering acros
   - *Objective*: Enforce fail-closed WON-to-C11 type mapping (`MapTypeToC`), complete pre-codegen `WON-GEN-002` capability gating, emit typed `<stdint.h>` integer constants (`INT64_MIN`, `UINT64_C`, etc.) from `TypedProgram`, and uphold strict ISO C11 hosted `main` ABI (`i32` and `unit` wrapper).
   - *Deliverables*: [phase-2a.2-backend-capability-matrix.md](compiler/phase-2a.2-backend-capability-matrix.md), `internal/checker/backend_caps.go`, hardened `internal/codegen`, and GCC/Clang `-pedantic-errors -Werror` validation suites.
   - *Status*: `IMPLEMENTED` (Verified in CI).
-- **Sub-phase 2B (Ownership-Lite Borrow Checker & Trait Solver — Planned)**:
-  - *Objective*: Compile-time move tracking, lexical borrow & reference provenance (`WON-MEM-001`/`002`), trait coherence/impl checking, and `From`/`Into` conversion on `?`.
-  - *Status*: `SPECIFIED` / `PLANNED`.
+- **Sub-phase 2B (Ownership-Lite Borrow Checker & Trait Solver)**:
+  - **2B.0 (Ownership Architecture & Borrow Analysis Design)**: Formal Ownership-CFG design (`Place`, `Loan`, NLL region liveness, `Prov(e)` provenance, drop flags, `WON-MEM-001..010`) and normative spec proposal (`ADR-011`).
+    - *Deliverables*: [phase-2b.0-ownership-architecture.md](compiler/phase-2b.0-ownership-architecture.md), [ownership-and-borrowing.md](language-spec/ownership-and-borrowing.md), [ADR-011](decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`Proposed / Awaiting Owner Approval`).
+    - *Status*: `SPECIFIED` (Design Delivered; Awaiting Owner Approval before 2B.1 coding).
+  - **2B.1–2B.2 (Ownership CFG, Borrow Checker & Trait Solver — Planned)**:
+    - *Objective*: Implement `internal/cfg` and `internal/borrow` enforcing moves, NLL borrows, return provenance (`WON-MEM-001`..`010`), `@derive(Copy)`, trait coherence/impl checking, and `From`/`Into` conversion on `?`.
+    - *Status*: `PLANNED`.
 - **Sub-phase 2C (Typed Intermediate Representation & Expanded C11 Backend — Planned)**:
   - *Objective*: Lower `TypedProgram` to explicit basic-block TIR (ADR-009), monomorphize generics, and generate ISO C11 code for algebraic data types and pattern matching.
   - *Status*: `SPECIFIED` / `PLANNED`.

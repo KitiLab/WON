@@ -127,7 +127,7 @@ cd compiler/poc && go build -o bin/wonc ./cmd/wonc
 | Canonical Lexer (UTF-8 + Indentation EBNF) & Parser | `IMPLEMENTED` | [docs/language-spec/syntax-and-grammar.md](docs/language-spec/syntax-and-grammar.md) |
 | Core Semantic Analysis & Type System (Phase 2A / 2A.1) | `IMPLEMENTED` | [docs/compiler/phase-2a-semantic-analysis.md](docs/compiler/phase-2a-semantic-analysis.md), [docs/compiler/phase-2a.1-correctness-hardening.md](docs/compiler/phase-2a.1-correctness-hardening.md) |
 | Traits / Generic Monomorphization Solver | `SPECIFIED` (Phase 2B/2C) | [docs/language-spec/type-system.md](docs/language-spec/type-system.md) |
-| Ownership-Lite Memory Model (Borrow Checker) | `SPECIFIED` (Phase 2B) | [docs/language-spec/ownership-and-memory.md](docs/language-spec/ownership-and-memory.md) |
+| Ownership-Lite Memory Model (Borrow Checker) | `SPECIFIED` (2B.0 Design Ready; Impl Phase 2B.1+) | [docs/language-spec/ownership-and-memory.md](docs/language-spec/ownership-and-memory.md), [Phase 2B.0 Architecture](docs/compiler/phase-2b.0-ownership-architecture.md), [Normative Proposal](docs/language-spec/ownership-and-borrowing.md), [ADR-011 (Proposed)](docs/decisions/ADR-011-ownership-and-borrow-checking-semantics.md) |
 | Structured Concurrency & Zero-GIL | `SPECIFIED` (Runtime Phase 3) | [docs/language-spec/concurrency-model.md](docs/language-spec/concurrency-model.md) |
 | Self-Hosting & Bootstrap Pipeline | `SPECIFIED` | [docs/language-spec/self-hosting-and-bootstrap.md](docs/language-spec/self-hosting-and-bootstrap.md) |
 | Typed Intermediate Rep (TIR) | `SPECIFIED` (Phase 2C) | [docs/language-spec/compiler-and-ir-requirements.md](docs/language-spec/compiler-and-ir-requirements.md) |
