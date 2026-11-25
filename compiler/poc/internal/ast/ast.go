@@ -551,6 +551,8 @@ type FieldInit struct {
 	Span  diagnostic.Span
 }
 
+func (f *FieldInit) GetSpan() diagnostic.Span { return f.Span }
+
 // StructLiteral 表示结构体构造字面量: Point { x: 1.0, y: 2.0 }
 type StructLiteral struct {
 	TypePath []string

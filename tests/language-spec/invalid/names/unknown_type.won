@@ -1,0 +1,8 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Unknown Type Annotation Rejection
+## Violation: Referencing an undeclared type in function parameter annotation.
+## Expected Diagnostic: WON-NAM-003
+
+fn take(x: NonExistentType):
+    return

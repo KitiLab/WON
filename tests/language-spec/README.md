@@ -1,7 +1,7 @@
 # WON Language Specification Test Fixtures
 
 > **Specification Version**: Draft 0.1  
-> **Status**: `IMPLEMENTED` (Canonical Frontend Lexer & Parser Verified; Semantic Passes Deferred to Phase 2/3)  
+> **Status**: `IMPLEMENTED` (Canonical Lexer/Parser + Phase 2A Core Semantics Verified; Borrow Checker, Traits & Concurrency Deferred to Phase 2B/3)  
 > **Date**: November 2026
 
 ---
@@ -11,9 +11,8 @@
 The files in this directory tree define the **normative behavioral contracts** of the WON programming language as specified in [`docs/language-spec/`](../../docs/language-spec/README.md).
 
 > [!NOTE]
-> **Phase 1B Verification Scope**:  
-> As of **Phase 1B**, the canonical WON lexer and recursive-descent/Pratt parser (`wonc0` under `compiler/poc/`) parse **100% of valid syntax fixtures** and reject **100% of invalid syntax fixtures** via automated CI tests (`TestSpecFixturesValid`, `TestSpecFixturesInvalidSyntax`, `TestSpecFixturesSemanticNegativeClassification`, and `TestCanonicalSyntaxExamplesFromSpec`).  
-> Semantic-negative fixtures (implicit numeric coercion, use-after-move, concurrency data races) are verified as syntactically valid in Phase 1B; their full semantic enforcement passes will be implemented in Phase 2/3 (while FFI unsafe boundary enforcement `WON-SEC-001` is already active and verified).
+> **Phase 2A Verification Scope**:  
+> As of **Phase 2A**, `wonc` enforces strict UTF-8 lexing (`WON-LEX-004`), canonical Draft 0.1 AST parsing, two-pass hierarchical symbol resolution (`WON-NAM-001`..`006`), bidirectional type inference without implicit coercions (`WON-TYP-001`..`007`), struct/enum/method validation (`WON-ADT-001`..`007`), exhaustive pattern matching (`WON-MAT-001`..`004`), `Option`/`Result`/`?` checking (`WON-ERR-001`/`003`), and C FFI boundary enforcement (`WON-SEC-001`, `WON-FFI-*`) across `TestPhase2ASemanticValidFixtures` and `TestPhase2ASemanticInvalidFixtures`. Ownership-lite move/borrow (`WON-MEM-*`) and concurrency checks (`WON-CON-*`) remain deferred to Phase 2B/3.
 
 ---
 

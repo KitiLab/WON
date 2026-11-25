@@ -1,0 +1,8 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Unsized Dynamically-Sized Type (DST) Rejection
+## Violation: Using bare unsized str as a local variable or parameter type by value without &.
+## Expected Diagnostic: WON-TYP-006
+
+fn main():
+    let raw: str = "hello"

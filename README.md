@@ -8,7 +8,7 @@
 
 ---
 
-[![Project Status](https://img.shields.io/badge/status-Phase%200B%20%28Proof%20of%20Concept%29-brightgreen.svg)](#current-development-status)
+[![Project Status](https://img.shields.io/badge/status-Phase%202A%20%28Core%20Semantics%20%26%20Type%20System%29-brightgreen.svg)](#current-development-status)
 [![License](https://img.shields.io/badge/license-Pending%20Decision-orange.svg)](LICENSE_PENDING.md)
 [![Organization](https://img.shields.io/badge/org-KitiLab-black.svg)](https://github.com/KitiLab)
 
@@ -87,11 +87,11 @@ The initial backend generates standard C code, harnessing decades of mature opti
 ## 4. Current Development Status
 
 > [!NOTE]
-> **WON is in Phase 1 (Language Foundations). Phase 0B/0B.2, Phase 1A/1A.1 specifications, and Phase 1B Canonical Frontend (Lexer & Parser) are implemented and verified.**
+> **WON is in Phase 2 (Core Compiler). Phase 0B/0B.2, Phase 1A/1A.1 specifications, Phase 1B Canonical Frontend (Lexer & Parser), and Phase 2A Core Semantic Analysis & Type System are implemented and verified.**
 >
-> The bootstrap compiler (`wonc0` under `compiler/poc/`) now implements the canonical Python-inspired indentation lexer (`INDENT`/`DEDENT`/`NEWLINE` off-side rule), recursive-descent/Pratt parser (Draft 0.1 EBNF), C header ingestion, strict ISO C11 code generation with `-Werror`, and autonomous AI coding-agent repair (`let` -> `var`).
+> The bootstrap compiler (`wonc0` under `compiler/poc/`) now implements strict UTF-8 validation (`WON-LEX-004`), the canonical Python-inspired indentation lexer (`INDENT`/`DEDENT`/`NEWLINE` off-side rule), recursive-descent/Pratt parser (Draft 0.1 EBNF), canonical interned type system (`internal/types`), hierarchical two-pass symbol table (`internal/symbols`), bidirectional type checker with struct/enum/`match` exhaustiveness/`Option`/`Result`/`?` checking and `TypedProgram` boundary (`internal/checker`), C header ingestion, strict ISO C11 code generation with `-Werror`, and autonomous AI coding-agent repair (`let` -> `var`).
 >
-> *Note on Scope Boundary*: Phase 1B delivers lexical analysis and AST parsing for the canonical Draft 0.1 grammar while preserving Phase 0 C FFI / zlib execution. Complete type checking, ownership/borrow analysis, concurrency runtime, and TIR passes remain `SPECIFIED` for Phase 2/3.
+> *Note on Scope Boundary*: `wonc check` validates the complete Phase 2A semantic surface. `wonc build` enforces `TypedProgram.CodegenSupported` and refuses high-level constructs not yet lowered by the Phase 0B/1B C11 backend (`WON-GEN-002`). Ownership-lite borrow analysis (Phase 2B), full CFG TIR lowering (Phase 2C), trait constraint solving, and concurrency runtimes (Phase 3) remain `SPECIFIED`/`PLANNED`.
 >
 > *Note on Static Linking*: Standalone static binary generation remains classified as `BLOCKED (Environment)` on this host due to missing system development archives (`libc.a`, `libz.a`). Dynamic native builds link against `/lib64/libz.so.1` and pass 100% of functional gates.
 
@@ -102,17 +102,18 @@ The initial backend generates standard C code, harnessing decades of mature opti
 cd compiler/poc && go build -o bin/wonc ./cmd/wonc
 
 # Parse canonical WON syntax (lexical + AST only)
-./bin/wonc parse tests/language-spec/valid/types/struct_and_enum.won
+./bin/wonc parse ../../tests/language-spec/valid/types/struct_and_enum.won
 
-# Check syntax and semantics (with terminal or JSON output)
-./bin/wonc check examples/zlib_compression.won
-./bin/wonc check --format=json examples/zlib_compression.won
+# Check syntax and full Phase 2A semantics (with terminal or JSON output)
+./bin/wonc check ../../examples/zlib_compression.won
+./bin/wonc check ../../tests/language-spec/valid/types/struct_and_enum.won
+./bin/wonc check --format=json ../../tests/language-spec/invalid/patterns/non_exhaustive_match.won
 
 # Generate bindings directly from /usr/include/zlib.h
 ./bin/wonc bindings zlib
 
 # Compile to native executable and execute (with optional --lto)
-./bin/wonc build -o zlib_demo examples/zlib_compression.won
+./bin/wonc build -o zlib_demo ../../examples/zlib_compression.won
 ./zlib_demo
 ```
 
@@ -123,13 +124,14 @@ cd compiler/poc && go build -o bin/wonc ./cmd/wonc
 | Repository Architecture & Governance | `IMPLEMENTED` | [AGENTS.md](AGENTS.md), [GOVERNANCE.md](GOVERNANCE.md) |
 | Architecture Decision Records (ADRs 001–010) | `ACCEPTED` | [docs/decisions/](docs/decisions/) |
 | Language Specification (Draft 0.1) | `SPECIFIED` | [docs/language-spec/](docs/language-spec/README.md) |
-| Canonical Lexer & Parser (Indentation EBNF) | `IMPLEMENTED` (Frontend) | [docs/language-spec/syntax-and-grammar.md](docs/language-spec/syntax-and-grammar.md) |
-| Primitive & Composite Type System | `SPECIFIED` (Parsed; Semantics Phase 2) | [docs/language-spec/type-system.md](docs/language-spec/type-system.md) |
-| Ownership-Lite Memory Model | `SPECIFIED` (Parsed; Semantics Phase 2) | [docs/language-spec/ownership-and-memory.md](docs/language-spec/ownership-and-memory.md) |
-| Structured Concurrency & Zero-GIL | `SPECIFIED` (Parsed; Runtime Phase 3) | [docs/language-spec/concurrency-model.md](docs/language-spec/concurrency-model.md) |
+| Canonical Lexer (UTF-8 + Indentation EBNF) & Parser | `IMPLEMENTED` | [docs/language-spec/syntax-and-grammar.md](docs/language-spec/syntax-and-grammar.md) |
+| Core Semantic Analysis & Interned Type System (Phase 2A) | `IMPLEMENTED` | [docs/compiler/phase-2a-semantic-analysis.md](docs/compiler/phase-2a-semantic-analysis.md), [docs/compiler/phase-2a-typed-semantic-model.md](docs/compiler/phase-2a-typed-semantic-model.md) |
+| Traits / Generic Monomorphization Solver | `SPECIFIED` (Phase 2B/2C) | [docs/language-spec/type-system.md](docs/language-spec/type-system.md) |
+| Ownership-Lite Memory Model (Borrow Checker) | `SPECIFIED` (Phase 2B) | [docs/language-spec/ownership-and-memory.md](docs/language-spec/ownership-and-memory.md) |
+| Structured Concurrency & Zero-GIL | `SPECIFIED` (Runtime Phase 3) | [docs/language-spec/concurrency-model.md](docs/language-spec/concurrency-model.md) |
 | Self-Hosting & Bootstrap Pipeline | `SPECIFIED` | [docs/language-spec/self-hosting-and-bootstrap.md](docs/language-spec/self-hosting-and-bootstrap.md) |
-| Typed Intermediate Rep (TIR) | `SPECIFIED` | [docs/language-spec/compiler-and-ir-requirements.md](docs/language-spec/compiler-and-ir-requirements.md) |
-| Initial C Codegen Strategy (ISO C11) | `IMPLEMENTED` | [ADR-001](docs/decisions/ADR-001-c-codegen-backend.md) |
+| Typed Intermediate Rep (TIR) | `SPECIFIED` (Phase 2C) | [docs/language-spec/compiler-and-ir-requirements.md](docs/language-spec/compiler-and-ir-requirements.md) |
+| Initial C Codegen Strategy (ISO C11 Subset) | `IMPLEMENTED` (Phase 0B/1B Subset) | [ADR-001](docs/decisions/ADR-001-c-codegen-backend.md) |
 | C Header Binding Engine (Clang AST) | `IMPLEMENTED` (zlib) | [ADR-006](docs/decisions/ADR-006-c-header-parsing-strategy.md) |
 | Phase 0B Proof of Concept | `IMPLEMENTED` | [docs/phase-0-proof-of-concept.md](docs/phase-0-proof-of-concept.md) |
 | AI Structured JSON Diagnostics | `IMPLEMENTED` | [docs/ai-native-design.md](docs/ai-native-design.md) |

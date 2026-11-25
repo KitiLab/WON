@@ -1,0 +1,16 @@
+## [SPEC-FIXTURE]
+## Category: Valid
+## Feature: Forward Function Resolution and Lexical Block Shadowing
+## Spec Reference: docs/language-spec/modules-and-visibility.md
+## Expected Behavior: Two-pass resolver handles forward calls; child scopes allow variable shadowing without colliding with outer bindings.
+
+fn main() -> i32:
+    let value: i32 = double_plus_one(20)
+    if value > 0:
+        let value: bool = true
+        if !value:
+            return 1
+    return value
+
+fn double_plus_one(n: i32) -> i32:
+    return n * 2 + 1

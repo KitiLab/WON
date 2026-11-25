@@ -1,0 +1,8 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Integer Literal Overflow Protection
+## Violation: Assigning an integer literal that exceeds the target i8/u8 bounds.
+## Expected Diagnostic: WON-TYP-003
+
+fn main():
+    let byte_val: u8 = 300

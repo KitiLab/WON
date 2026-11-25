@@ -1,8 +1,8 @@
 # WON Development Roadmap
 
-> **Document Status**: `SPECIFIED`  
+> **Document Status**: `SPECIFIED` (Phase 0B–2A `IMPLEMENTED`; Phase 2B+ Planned)  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 0A
+> **Last Updated**: Phase 2A
 
 ---
 
@@ -88,12 +88,16 @@ The implementation roadmap adheres to strict technical dependency ordering acros
 ```
 
 ### Phase 2: Core Compiler & Ownership-Lite
-- **Objective**: Implement the type inference engine, typed intermediate representation (TIR), ownership-lite verification passes, and production C codegen backend.
-- **Deliverables**:
-  - Bidirectional local type inference.
-  - TIR transformations and control flow graph construction.
-  - Compile-time move and lexical borrow analysis.
-  - High-performance C99/C11 code generation.
+- **Sub-phase 2A (Core Semantic Analysis & Type System)**:
+  - *Objective*: Implement canonical interned type representation, two-pass hierarchical symbol resolution, bidirectional local type inference, struct/enum/method semantics, `match` exhaustiveness checking, `Option`/`Result`/`?` propagation, UTF-8 validation (`WON-LEX-004`), and the backend-decoupled `TypedProgram` boundary (`WON-GEN-002`).
+  - *Deliverables*: `internal/types`, `internal/symbols`, upgraded `internal/checker`, [phase-2a-typed-semantic-model.md](compiler/phase-2a-typed-semantic-model.md), [phase-2a-semantic-analysis.md](compiler/phase-2a-semantic-analysis.md), Go fuzz suite, and automated Phase 2A semantic fixture suite.
+  - *Status*: `IMPLEMENTED` (Verified in CI).
+- **Sub-phase 2B (Ownership-Lite Borrow Checker & Trait Solver — Planned)**:
+  - *Objective*: Compile-time move tracking, lexical borrow & reference provenance (`WON-MEM-001`/`002`), trait coherence/impl checking, and `From`/`Into` conversion on `?`.
+  - *Status*: `SPECIFIED` / `PLANNED`.
+- **Sub-phase 2C (Typed Intermediate Representation & Expanded C11 Backend — Planned)**:
+  - *Objective*: Lower `TypedProgram` to explicit basic-block TIR (ADR-009), monomorphize generics, and generate ISO C11 code for algebraic data types and pattern matching.
+  - *Status*: `SPECIFIED` / `PLANNED`.
 - **Acceptance Criteria**: Memory safety invariants enforced at compile time; zero use-after-free and double-free in safe test cases; C code compiles cleanly under GCC and Clang with zero warnings (`-Wall -Wextra -Werror`).
 
 ### Phase 3: Toolchain & AI Agent Integration

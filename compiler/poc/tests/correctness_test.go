@@ -90,7 +90,7 @@ fn main() -> i32:
         return 3
     let is_eq = unsafe:
         bytes_equal(input_bytes.as_ptr(), decomp_buf.as_ptr(), input_len)
-    if is_eq == 0:
+    if !is_eq:
         return 4
     println("Normal payload round-trip: PASS")
     return 0
@@ -141,7 +141,7 @@ fn main() -> i32:
         return 3
     let is_eq = unsafe:
         bytes_equal(input_bytes.as_ptr(), decomp_buf.as_ptr(), input_len)
-    if is_eq == 0:
+    if !is_eq:
         return 4
     println("Embedded NUL bytes round-trip: PASS")
     return 0
@@ -192,7 +192,7 @@ fn main() -> i32:
         return 3
     let is_eq = unsafe:
         bytes_equal(input_bytes.as_ptr(), decomp_buf.as_ptr(), input_len)
-    if is_eq == 0:
+    if !is_eq:
         return 4
     println("Non-ASCII UTF-8 payload round-trip: PASS")
     return 0
@@ -242,7 +242,7 @@ fn main() -> i32:
         return 3
     let is_eq = unsafe:
         bytes_equal(input_buf.as_ptr(), decomp_buf.as_ptr(), input_len)
-    if is_eq == 0:
+    if !is_eq:
         return 4
     println("Larger 4KB payload round-trip: PASS")
     return 0

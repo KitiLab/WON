@@ -1,0 +1,26 @@
+## [SPEC-FIXTURE]
+## Category: Valid
+## Feature: Option, Result, Exhaustive Match, and Try Error Propagation (?)
+## Spec Reference: docs/language-spec/error-handling.md
+## Expected Behavior: ? operator unwraps matching Result/Option types cleanly and match enforces variant exhaustiveness.
+
+fn parse_positive(x: i32) -> Result[i32, &str]:
+    if x <= 0:
+        return Result::Err("expected positive integer")
+    return Result::Ok(x)
+
+fn process_pair(a: i32, b: i32) -> Result[i32, &str]:
+    let va = parse_positive(a)?
+    let vb = parse_positive(b)?
+    return Result::Ok(va + vb)
+
+fn unwrap_or_zero(opt: Option[i32]) -> i32:
+    return match opt:
+        Option::Some(v) => v
+        Option::None => 0
+
+fn main() -> i32:
+    let res = process_pair(3, 4)
+    return match res:
+        Result::Ok(sum) => sum
+        Result::Err(_) => -1

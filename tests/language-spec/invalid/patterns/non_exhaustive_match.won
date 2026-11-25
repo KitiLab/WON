@@ -1,0 +1,15 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Exhaustive Pattern Matching Enforcement
+## Violation: Matching an enum without covering all variants or providing a fallback '_' arm.
+## Expected Diagnostic: WON-MAT-001
+
+enum Mode:
+    Fast
+    Safe
+    Strict
+
+fn label(m: Mode) -> i32:
+    return match m:
+        Mode::Fast => 1
+        Mode::Safe => 2

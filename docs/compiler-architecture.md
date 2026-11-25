@@ -1,9 +1,10 @@
 # WON Compiler Architecture
 
-> **Document Status**: `SPECIFIED`  
+> **Document Status**: `IMPLEMENTED` (Phase 0B–2A Frontend & Core Semantics) / `SPECIFIED` (Phase 2B+ TIR & Backends)  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 1A  
-> **Normative Specification**: [docs/language-spec/compiler-and-ir-requirements.md](language-spec/compiler-and-ir-requirements.md)
+> **Last Updated**: Phase 2A  
+> **Normative Specification**: [docs/language-spec/compiler-and-ir-requirements.md](language-spec/compiler-and-ir-requirements.md)  
+> **Phase 2A Details**: [Typed Semantic Model](compiler/phase-2a-typed-semantic-model.md), [Semantic Analysis Pipeline](compiler/phase-2a-semantic-analysis.md)
 
 ---
 

@@ -1,0 +1,178 @@
+package tests
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
+	"github.com/KitiLab/WON/compiler/poc/internal/checker"
+	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
+	"github.com/KitiLab/WON/compiler/poc/internal/lexer"
+	"github.com/KitiLab/WON/compiler/poc/internal/parser"
+)
+
+func mockZlibForFixtures() map[string]*bindgen.BindingMeta {
+	return map[string]*bindgen.BindingMeta{
+		"zlib": {
+			HeaderPath: "/usr/include/zlib.h",
+			Functions: map[string]bindgen.FunctionSig{
+				"compressBound": {
+					Name:       "compressBound",
+					ReturnType: "unsigned long",
+					ParamTypes: []string{"unsigned long"},
+				},
+				"compress": {
+					Name:       "compress",
+					ReturnType: "int",
+					ParamTypes: []string{"unsigned char *", "unsigned long *", "const unsigned char *", "unsigned long"},
+				},
+				"uncompress": {
+					Name:       "uncompress",
+					ReturnType: "int",
+					ParamTypes: []string{"unsigned char *", "unsigned long *", "const unsigned char *", "unsigned long"},
+				},
+			},
+		},
+	}
+}
+
+// TestPhase2ASemanticValidFixtures 验证全部 Phase 2A 规范合法用例均可通过完整 Lexer -> Parser -> Semantic Checker 管线
+func TestPhase2ASemanticValidFixtures(t *testing.T) {
+	validSemantic := []string{
+		"tests/language-spec/valid/basics/hello.won",
+		"tests/language-spec/valid/types/struct_and_enum.won",
+		"tests/language-spec/valid/ffi/zlib_interop.won",
+		"tests/language-spec/valid/names/forward_calls_and_shadowing.won",
+		"tests/language-spec/valid/enums/option_result_try.won",
+		"tests/language-spec/valid/patterns/match_variants_and_bool.won",
+	}
+
+	bindings := mockZlibForFixtures()
+	for _, relPath := range validSemantic {
+		t.Run(filepath.Base(relPath), func(t *testing.T) {
+			fullPath := filepath.Join("..", "..", "..", relPath)
+			content, err := os.ReadFile(fullPath)
+			if err != nil {
+				t.Fatalf("读取合法夹具失败: %v", err)
+			}
+			report := diagnostic.NewReport()
+			lex := lexer.New(relPath, string(content), report)
+			p := parser.New(lex, report, relPath)
+			prog := p.ParseProgram()
+			if report.HasErrors() {
+				t.Fatalf("合法语义夹具 %s 解析阶段意外报错:\n%s", relPath, report.String())
+			}
+			chk := checker.New(report, bindings)
+			tp := chk.CheckProgram(prog)
+			if report.HasErrors() {
+				t.Fatalf("合法语义夹具 %s 语义校验报错:\n%s", relPath, report.String())
+			}
+			if tp == nil || tp.Types == nil || tp.Symbols == nil {
+				t.Fatalf("CheckProgram 未返回完整的 TypedProgram 语义模型")
+			}
+		})
+	}
+}
+
+// TestPhase2ASemanticInvalidFixtures 验证全部语义与 UTF-8 负例在正确编译阶段产出准确诊断码与非零坐标
+func TestPhase2ASemanticInvalidFixtures(t *testing.T) {
+	cases := []struct {
+		file      string
+		expectLex bool // 若为 true 则应在词法阶段拦截，否则应无错通过 parse 而在 check 阶段拦截
+		wantCodes []string
+	}{
+		{"tests/language-spec/invalid/utf8/invalid_utf8.won", true, []string{"WON-LEX-004"}},
+		{"tests/language-spec/invalid/names/undefined_identifier.won", false, []string{"WON-NAM-001"}},
+		{"tests/language-spec/invalid/names/duplicate_declaration.won", false, []string{"WON-NAM-002"}},
+		{"tests/language-spec/invalid/names/unknown_type.won", false, []string{"WON-NAM-003"}},
+		{"tests/language-spec/invalid/types/implicit_coercion.won", false, []string{"WON-TYP-001"}},
+		{"tests/language-spec/invalid/types/non_bool_condition.won", false, []string{"WON-TYP-002"}},
+		{"tests/language-spec/invalid/types/integer_literal_overflow.won", false, []string{"WON-TYP-003"}},
+		{"tests/language-spec/invalid/types/unsized_str_by_value.won", false, []string{"WON-TYP-006"}},
+		{"tests/language-spec/invalid/structs/missing_and_immutable_field.won", false, []string{"WON-ADT-002", "WON-ADT-004"}},
+		{"tests/language-spec/invalid/patterns/non_exhaustive_match.won", false, []string{"WON-MAT-001"}},
+		{"tests/language-spec/invalid/errors/mismatched_try_error.won", false, []string{"WON-ERR-001"}},
+		{"tests/language-spec/invalid/ffi/foreign_call_outside_unsafe.won", false, []string{"WON-SEC-001"}},
+	}
+
+	bindings := mockZlibForFixtures()
+	for _, tc := range cases {
+		t.Run(filepath.Base(tc.file), func(t *testing.T) {
+			fullPath := filepath.Join("..", "..", "..", tc.file)
+			content, err := os.ReadFile(fullPath)
+			if err != nil {
+				t.Fatalf("读取负例夹具失败: %v", err)
+			}
+			report := diagnostic.NewReport()
+			lex := lexer.New(tc.file, string(content), report)
+			p := parser.New(lex, report, tc.file)
+			prog := p.ParseProgram()
+
+			if tc.expectLex {
+				if !report.HasErrors() {
+					t.Fatalf("词法负例 %s 应当在词法阶段报错", tc.file)
+				}
+			} else {
+				if report.HasErrors() {
+					t.Fatalf("语义负例 %s 应当无错通过 parse 阶段后再在 check 阶段报错，实际 parse 错误:\n%s", tc.file, report.String())
+				}
+				chk := checker.New(report, bindings)
+				chk.CheckProgram(prog)
+				if !report.HasErrors() {
+					t.Fatalf("语义负例 %s 在 check 阶段未报出预期错误", tc.file)
+				}
+			}
+
+			gotCodes := make(map[string]bool)
+			for _, d := range report.Diagnostics {
+				gotCodes[d.Code] = true
+				if d.Span.Start.Line < 1 || d.Span.Start.Column < 1 {
+					t.Errorf("%s 诊断 %s 缺少有效的源码行列坐标: %+v", tc.file, d.Code, d.Span)
+				}
+			}
+			for _, want := range tc.wantCodes {
+				if !gotCodes[want] {
+					t.Errorf("%s 期望捕获诊断码 %s，实际诊断:\n%s", tc.file, want, report.String())
+				}
+			}
+		})
+	}
+}
+
+// TestCLISemanticCheckAndCodegenGate 验证 wonc check 与 wonc build 的阶段性拒止边界
+func TestCLISemanticCheckAndCodegenGate(t *testing.T) {
+	woncBin := filepath.Join("..", "bin", "wonc")
+
+	// 1. wonc check 在规范合法用例与示例上应返回 0
+	for _, rel := range []string{
+		"examples/zlib_compression.won",
+		"tests/language-spec/valid/types/struct_and_enum.won",
+		"tests/language-spec/valid/enums/option_result_try.won",
+	} {
+		out, err := exec.Command(woncBin, "check", filepath.Join("..", "..", "..", rel)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("wonc check %s 失败: %v\n%s", rel, err, string(out))
+		}
+	}
+
+	// 2. wonc check 在语义负例上返回非 0 并输出规范诊断码
+	negOut, err := exec.Command(woncBin, "check", "--format=json", filepath.Join("..", "..", "..", "tests/language-spec/invalid/patterns/non_exhaustive_match.won")).CombinedOutput()
+	if err == nil {
+		t.Fatalf("wonc check 在非穷尽 match 上应返回非 0 退出码")
+	}
+	if !strings.Contains(string(negOut), "WON-MAT-001") {
+		t.Errorf("JSON 输出中应包含 WON-MAT-001, 实际: %s", string(negOut))
+	}
+
+	// 3. wonc build 对尚无 C11 代码生成实现的 struct/enum/match 程序必须以 WON-GEN-002 明确拒止而非错误生成 C 代码
+	buildOut, err := exec.Command(woncBin, "build", filepath.Join("..", "..", "..", "tests/language-spec/valid/types/struct_and_enum.won")).CombinedOutput()
+	if err == nil {
+		t.Fatalf("wonc build 应当拒止暂未实现 C11 代码生成的 struct_and_enum.won")
+	}
+	if !strings.Contains(string(buildOut), "WON-GEN-002") {
+		t.Errorf("wonc build 拒止输出中应包含 WON-GEN-002, 实际: %s", string(buildOut))
+	}
+}

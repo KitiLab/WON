@@ -1,8 +1,9 @@
 # WON Language Design Specification
 
-> **Document Status**: `SPECIFIED`  
+> **Document Status**: `SPECIFIED` (Phase 1B–2A Frontend & Core Type Checker `IMPLEMENTED`)  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 0A
+> **Last Updated**: Phase 2A  
+> **Note**: Phase 0A exploratory brace examples below are historical; normative indentation syntax is specified in [`docs/language-spec/syntax-and-grammar.md`](language-spec/syntax-and-grammar.md) and implemented semantics are documented in [`docs/compiler/phase-2a-semantic-analysis.md`](compiler/phase-2a-semantic-analysis.md).
 
 ---
 

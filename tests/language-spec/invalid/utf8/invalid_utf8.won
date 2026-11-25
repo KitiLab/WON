@@ -1,0 +1,7 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Strict UTF-8 Source Encoding Enforcement
+## Expected Diagnostic: WON-LEX-004
+
+fn main():
+    let s = "ÿþ"

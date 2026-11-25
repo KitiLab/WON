@@ -1,0 +1,12 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Try Error Propagation (?) Compatibility
+## Violation: Propagating Result[i32, i32] inside a function returning Result[i32, bool].
+## Expected Diagnostic: WON-ERR-001
+
+fn read_code() -> Result[i32, i32]:
+    return Result::Err(42)
+
+fn bad_caller() -> Result[i32, bool]:
+    let code = read_code()?
+    return Result::Ok(code)

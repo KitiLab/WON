@@ -38,6 +38,8 @@ jobs:
             docs/security-model.md \
             docs/benchmarking.md \
             docs/phase-0-proof-of-concept.md \
+            docs/compiler/phase-2a-typed-semantic-model.md \
+            docs/compiler/phase-2a-semantic-analysis.md \
             docs/decisions/ADR-000-template.md \
             docs/decisions/ADR-001-c-codegen-backend.md \
             docs/decisions/ADR-002-compiler-implementation-language.md \
@@ -117,8 +119,11 @@ jobs:
           cd compiler/poc
           go test -v ./...
 
-      - name: Verify Canonical Frontend CLI Parse
+      - name: Verify Canonical Frontend CLI Parse and Check
         run: |
           cd compiler/poc
           go run ./cmd/wonc parse ../../examples/zlib_compression.won
           go run ./cmd/wonc parse ../../tests/language-spec/valid/types/struct_and_enum.won
+          go run ./cmd/wonc check ../../examples/zlib_compression.won
+          go run ./cmd/wonc check ../../tests/language-spec/valid/types/struct_and_enum.won
+          go run ./cmd/wonc check ../../tests/language-spec/valid/enums/option_result_try.won

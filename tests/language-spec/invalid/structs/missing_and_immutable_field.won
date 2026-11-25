@@ -1,0 +1,14 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Struct Field Completeness and Mutability Enforcement
+## Violation: Omitting required struct field and attempting to mutate an immutable struct field.
+## Expected Diagnostic: WON-ADT-002, WON-ADT-004
+
+struct Pair:
+    a: i32
+    b: i32
+
+fn main():
+    let incomplete = Pair { a: 1 }
+    let ok = Pair { a: 1, b: 2 }
+    ok.a = 9

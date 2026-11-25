@@ -1,8 +1,9 @@
 # WON Language Specification: Type System
 
 > **Specification Version**: Draft 0.1  
-> **Status**: `SPECIFIED` (Under Architectural Review)  
+> **Status**: `IMPLEMENTED` (Core Type System, Bidirectional Inference, Structs/Enums & Pattern Exhaustiveness in Phase 2A; Trait Solver & Monomorphization `SPECIFIED` for Phase 2B/2C)  
 > **Module**: Core Type System & Trait Architecture  
+> **Phase 2A Implementation**: [Phase 2A Typed Semantic Model](../compiler/phase-2a-typed-semantic-model.md)  
 > **Date**: November 2026
 
 ---

@@ -1,0 +1,8 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Undefined Identifier Detection
+## Violation: Reference to undeclared variable.
+## Expected Diagnostic: WON-NAM-001
+
+fn main() -> i32:
+    return missing_symbol + 1

@@ -261,6 +261,7 @@ func runBuild(args []string) {
 	prog := p.ParseProgram()
 
 	var bindings map[string]*bindgen.BindingMeta
+	var typedProg *checker.TypedProgram
 	if !report.HasErrors() {
 		var bindErr error
 		bindings, bindErr = resolveBindings(prog)
@@ -274,7 +275,18 @@ func runBuild(args []string) {
 			})
 		}
 		chk := checker.New(report, bindings)
-		chk.CheckProgram(prog)
+		typedProg = chk.CheckProgram(prog)
+	}
+
+	if !report.HasErrors() && typedProg != nil && !typedProg.CodegenSupported {
+		report.AddDiagnostic(diagnostic.Diagnostic{
+			Code:        "WON-GEN-002",
+			Severity:    "error",
+			Message:     typedProg.UnsupportedReason,
+			File:        srcFile,
+			Span:        typedProg.UnsupportedCodegen,
+			Explanation: "当前代码生成器仅覆盖 Phase 0B/1B 基准 C11 子集；请使用 wonc check 验证完整 Phase 2A 语义。",
+		})
 	}
 
 	if report.HasErrors() {

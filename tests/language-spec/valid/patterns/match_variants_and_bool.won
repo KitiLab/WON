@@ -1,0 +1,23 @@
+## [SPEC-FIXTURE]
+## Category: Valid
+## Feature: Exhaustive Pattern Matching on Enums and Bool
+## Spec Reference: docs/language-spec/type-system.md
+## Expected Behavior: Exhaustive matches over tuple, struct, unit enum variants and bool pass with compatible arm types.
+
+enum Event:
+    Quit
+    KeyPress(i32)
+    Move:
+        dx: i32
+        dy: i32
+
+fn handle_event(ev: Event) -> i32:
+    return match ev:
+        Event::Quit => 0
+        Event::KeyPress(code) => code
+        Event::Move { dx, dy } => dx + dy
+
+fn bool_to_int(b: bool) -> i32:
+    return match b:
+        true => 1
+        false => 0

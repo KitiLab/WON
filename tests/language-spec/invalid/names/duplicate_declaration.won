@@ -1,0 +1,9 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Same-Scope Duplicate Declaration Prevention
+## Violation: Re-declaring a local variable with the same name in the same lexical scope.
+## Expected Diagnostic: WON-NAM-002
+
+fn main():
+    let count: i32 = 1
+    let count: i32 = 2

@@ -58,7 +58,7 @@ fn main() -> i32:
     let is_equal = unsafe:
         bytes_equal(input_bytes.as_ptr(), decompressed_buf.as_ptr(), input_len)
 
-    if is_equal == 0:
+    if !is_equal:
         println("Byte-for-byte content mismatch!")
         return 4
 

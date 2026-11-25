@@ -1,0 +1,10 @@
+## [SPEC-FIXTURE]
+## Category: Invalid
+## Feature: Boolean Control-Flow Condition Enforcement
+## Violation: Using non-boolean integer expression in an if condition.
+## Expected Diagnostic: WON-TYP-002
+
+fn main() -> i32:
+    if 123:
+        return 1
+    return 0
