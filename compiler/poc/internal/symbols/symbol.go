@@ -68,7 +68,8 @@ type Symbol struct {
 	LetTokenSpan diagnostic.Span // 用于针对 let 声明生成 var 自动修复建议
 	IsMut        bool
 	IsPub        bool
-	Defined      bool // 局部变量是否已完成声明并初始化
+	Defined      bool // 局部变量是否已完成声明并初始化（语义层作用域有效）
+	DeclHasInit  bool // 局部变量是否在声明语句处即带有初始值 (= init)
 
 	// 函数与方法签名详情
 	ParamNames []string

@@ -306,8 +306,84 @@ func (p *Parser) parseDotOrColonPath() []string {
 	return parts
 }
 
-// parseItem 解析顶层项 [pub] (fn | struct | enum | trait | impl | type | mod)
+// parseAttributes 解析声明前置属性注解，例如 @derive(Copy)
+func (p *Parser) parseAttributes() []*ast.Attribute {
+	var attrs []*ast.Attribute
+	for p.curIs(token.AT) {
+		atTok := p.advance() // '@'
+		if !p.curIs(token.IDENT) {
+			p.emitError("WON-SYN-005", "'@' 后期望属性标识符名称 (如 @derive(Copy))", p.cur().Span)
+			p.synchronizeToLineEnd()
+			p.skipNewlines()
+			continue
+		}
+		name := p.cur().Lexeme
+		nameSpan := p.cur().Span
+		p.advance()
+
+		var args []string
+		var argSpans []diagnostic.Span
+		if p.curIs(token.LPAREN) {
+			p.advance()
+			for !p.curIs(token.RPAREN) && !p.curIs(token.NEWLINE) && !p.curIs(token.EOF) {
+				if !p.curIs(token.IDENT) {
+					p.emitError("WON-SYN-005", "属性参数列表期望标识符 (如 Copy)", p.cur().Span)
+					for !p.curIs(token.RPAREN) && !p.curIs(token.COMMA) && !p.curIs(token.NEWLINE) && !p.curIs(token.EOF) {
+						p.advance()
+					}
+					if p.curIs(token.COMMA) {
+						p.advance()
+						continue
+					}
+					break
+				}
+				args = append(args, p.cur().Lexeme)
+				argSpans = append(argSpans, p.cur().Span)
+				p.advance()
+				if p.curIs(token.COMMA) {
+					p.advance()
+				} else {
+					break
+				}
+			}
+			p.expect(token.RPAREN, "WON-SYN-007", "属性参数列表缺少闭合 ')'")
+		}
+		endPos := p.prevEnd()
+		p.expectNewlineOrEnd("WON-SYN-005", "属性声明后期望换行")
+		p.skipNewlines()
+
+		attrSpan := diagnostic.Span{File: p.srcFile, Start: atTok.Span.Start, End: endPos}
+		switch name {
+		case "copy":
+			p.emitError("WON-MEM-011", "不允许使用非标准别名 '@copy'，请显式使用 '@derive(Copy)'", attrSpan)
+		case "derive":
+			if len(args) != 1 || args[0] != "Copy" {
+				p.emitError("WON-MEM-011", fmt.Sprintf("Phase 2B.1 仅支持精确形式 '@derive(Copy)'，不支持 '@derive(%s)'", strings.Join(args, ", ")), attrSpan)
+			} else {
+				attrs = append(attrs, &ast.Attribute{
+					Name:     name,
+					Args:     args,
+					ArgSpans: argSpans,
+					Span:     attrSpan,
+				})
+			}
+		default:
+			_ = nameSpan
+			p.emitError("WON-SEM-010", fmt.Sprintf("声明属性 '@%s' 尚未在当前里程碑启用 (仅支持 '@derive(Copy)')", name), attrSpan)
+		}
+	}
+	return attrs
+}
+
+// parseItem 解析顶层项 [AttributeList] [pub] (fn | struct | enum | trait | impl | type | mod)
 func (p *Parser) parseItem() ast.Decl {
+	attrs := p.parseAttributes()
+	if p.curIs(token.EOF) {
+		if len(attrs) > 0 {
+			p.emitError("WON-MEM-011", "'@derive(Copy)' 必须紧邻 struct 或 enum 声明之前", attrs[0].Span)
+		}
+		return nil
+	}
 	startSpan := p.cur().Span
 	isPub := false
 	if p.curIs(token.PUB) {
@@ -315,30 +391,42 @@ func (p *Parser) parseItem() ast.Decl {
 		p.advance()
 	}
 
+	rejectMisplacedAttr := func() {
+		for _, a := range attrs {
+			p.emitError("WON-MEM-011", "'@derive(Copy)' 仅允许用于具体 struct 或 enum 声明", a.Span)
+		}
+	}
+
 	switch p.cur().Kind {
 	case token.FN:
+		rejectMisplacedAttr()
 		fn := p.parseFunction(isPub)
 		if fn == nil {
 			return nil
 		}
 		return fn
 	case token.STRUCT:
-		return p.parseStruct(isPub, startSpan.Start)
+		return p.parseStruct(isPub, startSpan.Start, attrs)
 	case token.ENUM:
-		return p.parseEnum(isPub, startSpan.Start)
+		return p.parseEnum(isPub, startSpan.Start, attrs)
 	case token.TRAIT:
+		rejectMisplacedAttr()
 		return p.parseTrait(isPub, startSpan.Start)
 	case token.IMPL:
+		rejectMisplacedAttr()
 		return p.parseImpl(startSpan.Start)
 	case token.TYPE:
+		rejectMisplacedAttr()
 		return p.parseTypeAlias(isPub, startSpan.Start)
 	case token.MOD:
+		rejectMisplacedAttr()
 		return p.parseMod(isPub, startSpan.Start)
 	case token.LBRACE:
 		p.emitError("WON-SYN-005", "规范 WON 语法严禁使用花括号 '{' 作为块定界符，请使用冒号 ':' 后接 4 空格缩进体", p.cur().Span)
 		p.advance()
 		return nil
 	default:
+		rejectMisplacedAttr()
 		p.emitError("WON-SYN-005", fmt.Sprintf("未知或非法的顶层声明关键字: %q", p.cur().Lexeme), p.cur().Span)
 		p.synchronizeToLineEnd()
 		return nil
@@ -718,8 +806,8 @@ func (p *Parser) parseParamList() []*ast.Param {
 	return params
 }
 
-// parseStruct 解析 struct Name[T]: NEWLINE INDENT { StructField } DEDENT
-func (p *Parser) parseStruct(isPub bool, start diagnostic.Position) *ast.StructDecl {
+// parseStruct 解析 [Attributes] [pub] struct Name[T]: NEWLINE INDENT { StructField } DEDENT
+func (p *Parser) parseStruct(isPub bool, start diagnostic.Position, attrs []*ast.Attribute) *ast.StructDecl {
 	p.advance() // 'struct'
 	if !p.curIs(token.IDENT) {
 		p.emitError("WON-SYN-005", "struct 声明缺少结构体名称", p.cur().Span)
@@ -757,6 +845,7 @@ func (p *Parser) parseStruct(isPub bool, start diagnostic.Position) *ast.StructD
 		}
 	}
 	return &ast.StructDecl{
+		Attributes:    attrs,
 		IsPub:         isPub,
 		Name:          name,
 		GenericParams: genParams,
@@ -797,8 +886,8 @@ func (p *Parser) parseStructField() *ast.StructField {
 	}
 }
 
-// parseEnum 解析 enum Name[T]: NEWLINE INDENT { EnumVariant } DEDENT
-func (p *Parser) parseEnum(isPub bool, start diagnostic.Position) *ast.EnumDecl {
+// parseEnum 解析 [Attributes] [pub] enum Name[T]: NEWLINE INDENT { EnumVariant } DEDENT
+func (p *Parser) parseEnum(isPub bool, start diagnostic.Position, attrs []*ast.Attribute) *ast.EnumDecl {
 	p.advance() // 'enum'
 	if !p.curIs(token.IDENT) {
 		p.emitError("WON-SYN-005", "enum 声明缺少枚举名称", p.cur().Span)
@@ -888,6 +977,7 @@ func (p *Parser) parseEnum(isPub bool, start diagnostic.Position) *ast.EnumDecl 
 	}
 
 	return &ast.EnumDecl{
+		Attributes:    attrs,
 		IsPub:         isPub,
 		Name:          name,
 		GenericParams: genParams,
@@ -1287,10 +1377,38 @@ func (p *Parser) parseBindingStmt(isVar bool) *ast.LetStmt {
 		}
 	}
 
-	if !p.expect(token.ASSIGN, "WON-SYN-009", "变量绑定声明必须包含 '=' 与初始表达式") {
+	if !p.curIs(token.ASSIGN) {
+		if p.curIs(token.NEWLINE) || p.curIs(token.DEDENT) || p.curIs(token.EOF) {
+			if typeAST == nil {
+				p.emitError("WON-SYN-009", "未初始化的变量绑定必须提供显式类型标注 ': Type'", kwTok.Span)
+				p.expectNewlineOrEnd("WON-SYN-005", "变量绑定语句结尾期望换行")
+				return nil
+			}
+			identPat, isIdent := pat.(*ast.IdentPattern)
+			if !isIdent || identPat.IsRef {
+				p.emitError("WON-SYN-009", "无初始值绑定目前仅支持简单标识符声明 (let name: Type / var name: Type)", kwTok.Span)
+				p.expectNewlineOrEnd("WON-SYN-005", "变量绑定语句结尾期望换行")
+				return nil
+			}
+			endPos := p.prevEnd()
+			p.expectNewlineOrEnd("WON-SYN-005", "变量绑定语句结尾期望换行")
+			return &ast.LetStmt{
+				IsMut:        isMut,
+				Keyword:      kwTok.Lexeme,
+				Name:         identPat.Name,
+				Pattern:      pat,
+				Type:         typeStr,
+				TypeAST:      typeAST,
+				Init:         nil,
+				LetTokenSpan: kwTok.Span,
+				Span:         diagnostic.Span{File: p.srcFile, Start: kwTok.Span.Start, End: endPos},
+			}
+		}
+		p.expect(token.ASSIGN, "WON-SYN-009", "变量绑定声明缺少 '=' 或非法语法")
 		p.synchronizeToLineEnd()
 		return nil
 	}
+	p.advance() // '='
 
 	initExpr := p.parseExpression()
 	if !endsWithBlock(initExpr) {

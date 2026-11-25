@@ -700,6 +700,8 @@ func (l *Lexer) NextToken() token.Token {
 		return l.makeTok(token.QUESTION, "?", start)
 	case '#':
 		return l.makeTok(token.HASH, "#", start)
+	case '@':
+		return l.makeTok(token.AT, "@", start)
 	case '(':
 		l.delimDepth++
 		return l.makeTok(token.LPAREN, "(", start)

@@ -108,6 +108,7 @@ const (
 	FATARROW   // =>
 	QUESTION   // ?
 	HASH       // #
+	AT         // @
 
 	// 界定符
 	LPAREN   // (
@@ -208,6 +209,7 @@ var kindNames = map[Kind]string{
 	FATARROW:      "=>",
 	QUESTION:      "?",
 	HASH:          "#",
+	AT:            "@",
 	LPAREN:        "(",
 	RPAREN:        ")",
 	LBRACE:        "{",

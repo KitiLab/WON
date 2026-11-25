@@ -438,7 +438,13 @@ func (g *Generator) genLet(s *ast.LetStmt) error {
 		}
 	}
 
-	// 3. 若初始值为 unsafe 块表达式，采用标准 ISO C11 变量预声明 + 块赋值
+	// 3. 显式类型的未初始化局部标量声明（已通过 Phase 2B.1 确定性初始化证明）
+	if s.Init == nil {
+		g.writeLine(fmt.Sprintf("%s %s;", cType, s.Name))
+		return nil
+	}
+
+	// 4. 若初始值为 unsafe 块表达式，采用标准 ISO C11 变量预声明 + 块赋值
 	if u, ok := s.Init.(*ast.UnsafeExpr); ok {
 		g.writeLine(fmt.Sprintf("%s %s;", cType, s.Name))
 		g.writeLine("{")

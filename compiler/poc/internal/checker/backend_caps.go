@@ -178,6 +178,9 @@ func (c *Checker) verifyStmtBackendCaps(stmt ast.Stmt, sliceAliasVars map[symbol
 			return
 		}
 
+		if s.Init == nil {
+			return
+		}
 		if u, ok := s.Init.(*ast.UnsafeExpr); ok {
 			c.verifyBlockBackendCaps(u.Block, sliceAliasVars, false)
 			return

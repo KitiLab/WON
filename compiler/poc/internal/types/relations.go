@@ -110,8 +110,30 @@ func (c *Context) IsSized(id TypeID) bool {
 	}
 }
 
-// IsCopy 判断类型是否天然具备按位浅拷贝语义
+// MarkDerivedCopy 为经过完整字段/载荷校验的具体结构体或枚举登记 Copy 能力
+func (c *Context) MarkDerivedCopy(symID uint64) {
+	if symID != 0 {
+		c.derivedCopy[symID] = true
+	}
+}
+
+// IsDerivedCopy 查询指定 SymbolID 是否已登记 @derive(Copy)
+func (c *Context) IsDerivedCopy(symID uint64) bool {
+	return c.derivedCopy[symID]
+}
+
+// IsCopy 判断类型是否具备按位浅拷贝语义（统一权威判定入口，避免跨模块重复规则）
 func (c *Context) IsCopy(id TypeID) bool {
+	return c.isCopyVisited(id, make(map[TypeID]bool, 8))
+}
+
+func (c *Context) isCopyVisited(id TypeID, visited map[TypeID]bool) bool {
+	if id == Invalid || visited[id] {
+		return false
+	}
+	visited[id] = true
+	defer delete(visited, id)
+
 	info := c.Info(id)
 	switch info.Kind {
 	case KindUnit, KindBool, KindChar, KindRawPtr, KindFn, KindNever:
@@ -124,14 +146,20 @@ func (c *Context) IsCopy(id TypeID) bool {
 		// 仅不可变引用 &T 具备 Copy 语义，&mut T 具有独占语义不可 Copy
 		return !info.IsMut
 	case KindArray:
-		return c.IsCopy(info.Elem)
+		return c.isCopyVisited(info.Elem, visited)
 	case KindTuple:
 		for _, e := range info.Elems {
-			if !c.IsCopy(e) {
+			if !c.isCopyVisited(e, visited) {
 				return false
 			}
 		}
 		return true
+	case KindStruct, KindEnum:
+		// 泛型具体派生仍需特质约束求解，当前仅允许具体无参派生类型
+		if len(info.GenericArgs) > 0 {
+			return false
+		}
+		return c.derivedCopy[info.SymbolID]
 	default:
 		return false
 	}

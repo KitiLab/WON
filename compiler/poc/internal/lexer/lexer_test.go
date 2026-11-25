@@ -199,11 +199,26 @@ let rng = 0..10
 func TestLexerInvalidCharactersAndStrings(t *testing.T) {
 	t.Run("InvalidChar", func(t *testing.T) {
 		report := diagnostic.NewReport()
-		lex := New("test.won", "let a = @\n", report)
+		lex := New("test.won", "let a = $\n", report)
 		for tok := lex.NextToken(); tok.Kind != token.EOF; tok = lex.NextToken() {
 		}
 		if !report.HasErrors() || report.Diagnostics[0].Code != "WON-LEX-002" {
 			t.Errorf("期望错误码 WON-LEX-002, 实际: %s", report.String())
+		}
+	})
+
+	t.Run("DeriveCopyAtToken", func(t *testing.T) {
+		report := diagnostic.NewReport()
+		lex := New("attr.won", "@derive(Copy)\nstruct Pt:\n    x: i32\n", report)
+		var kinds []token.Kind
+		for tok := lex.NextToken(); tok.Kind != token.EOF; tok = lex.NextToken() {
+			kinds = append(kinds, tok.Kind)
+		}
+		if report.HasErrors() {
+			t.Fatalf("@derive(Copy) 词法解析不应报错: %s", report.String())
+		}
+		if len(kinds) < 6 || kinds[0] != token.AT || kinds[1] != token.IDENT || kinds[2] != token.LPAREN || kinds[3] != token.IDENT || kinds[4] != token.RPAREN {
+			t.Fatalf("期望 @derive(Copy) 生成 AT IDENT ( IDENT ), 实际: %v", kinds)
 		}
 	})
 

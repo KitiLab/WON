@@ -3,6 +3,8 @@ package checker
 import (
 	"github.com/KitiLab/WON/compiler/poc/internal/ast"
 	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
+	"github.com/KitiLab/WON/compiler/poc/internal/borrow"
+	"github.com/KitiLab/WON/compiler/poc/internal/cfg"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
 	"github.com/KitiLab/WON/compiler/poc/internal/symbols"
 	"github.com/KitiLab/WON/compiler/poc/internal/types"
@@ -57,7 +59,15 @@ func (c *Checker) CheckProgram(prog *ast.Program) *TypedProgram {
 		}
 	}
 
-	// Stage 4: 若尚未存在语义/词法错误，执行严谨的 C11 后端能力契约审核 (WON-GEN-002 边界)
+	// Stage 4: Phase 2B.1 所有权 CFG 构建与确定性初始化 / Move 数据流校验
+	if !c.report.HasErrors() {
+		progCFG := cfg.BuildProgram(prog, c.typed)
+		borrow.AnalyzeProgram(progCFG, c.typed, c.report)
+		c.typed.CFG = progCFG
+		c.typed.OwnershipChecked = true
+	}
+
+	// Stage 5: 若尚未存在语义/词法/所有权错误，执行严谨的 C11 后端能力契约审核 (WON-GEN-002 边界)
 	if !c.report.HasErrors() {
 		c.verifyBackendCapabilities(prog)
 	}
@@ -91,7 +101,9 @@ func (c *Checker) checkFunctionBody(fn *ast.FunctionDecl, fnSym *symbols.Symbol,
 			selfSym.Type = selfType
 			selfSym.IsMut = p.IsMut
 			selfSym.Defined = true
+			selfSym.DeclHasInit = true
 			fnScope.Insert(selfSym)
+			c.symbols.NodeSymbols[p] = selfSym
 			continue
 		}
 		if paramIdx < len(fnSym.ParamTypes) {
@@ -99,9 +111,11 @@ func (c *Checker) checkFunctionBody(fn *ast.FunctionDecl, fnSym *symbols.Symbol,
 			pSym.Type = fnSym.ParamTypes[paramIdx]
 			pSym.IsMut = p.IsMut
 			pSym.Defined = true
+			pSym.DeclHasInit = true
 			if existing, ok := fnScope.Insert(pSym); !ok {
 				c.emitDuplicateDecl(p.Name, p.Span, existing.Span)
 			}
+			c.symbols.NodeSymbols[p] = pSym
 		}
 		paramIdx++
 	}

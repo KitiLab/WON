@@ -67,8 +67,9 @@ type TypeInfo struct {
 
 // Context 管理类型驻留池并预注册内置原语与核心代数值类型
 type Context struct {
-	types     []TypeInfo
-	internMap map[string]TypeID
+	types       []TypeInfo
+	internMap   map[string]TypeID
+	derivedCopy map[uint64]bool // 已验证合法派生 @derive(Copy) 的具体结构体/枚举 SymbolID
 
 	// 预置内置基本类型快捷 ID
 	Never   TypeID
@@ -110,6 +111,7 @@ func NewContext() *Context {
 	ctx := &Context{
 		types:       make([]TypeInfo, 0, 128),
 		internMap:   make(map[string]TypeID, 128),
+		derivedCopy: make(map[uint64]bool, 16),
 		OptionSymID: BuiltinOptionSymbolID,
 		ResultSymID: BuiltinResultSymbolID,
 	}

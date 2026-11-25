@@ -168,6 +168,9 @@ func (c *Checker) collectAndResolveDeclarations(prog *ast.Program) {
 		c.resolveEnumVariants(pe.decl, pe.sym, pe.gs)
 	}
 
+	// Pass 2C.5: 检验具体类型 @derive(Copy) 合法性（禁止循环、非 Copy 字段与泛型派生）
+	c.validateDerivedCopyAttributes()
+
 	// Pass 2D: 解析顶层函数参数与返回类型签名
 	for _, pf := range pFuncs {
 		c.resolveFunctionSignature(pf.decl, pf.sym, pf.gs)
@@ -366,6 +369,204 @@ func (c *Checker) resolveFunctionSignature(decl *ast.FunctionDecl, sym *symbols.
 	sym.ReturnType = retType
 	sym.Type = c.types.Fn(paramTypes, retType)
 	sym.Defined = true
+}
+
+func hasDeriveCopyAttr(attrs []*ast.Attribute) (*ast.Attribute, bool) {
+	for _, a := range attrs {
+		if a != nil && a.Name == "derive" && len(a.Args) == 1 && a.Args[0] == "Copy" {
+			return a, true
+		}
+	}
+	return nil, false
+}
+
+// validateDerivedCopyAttributes 在所有字段与变体解析完成后，对带 @derive(Copy) 的具体结构体和枚举进行集中校验与登记。
+func (c *Checker) validateDerivedCopyAttributes() {
+	type deriveTarget struct {
+		sym  *symbols.Symbol
+		attr *ast.Attribute
+	}
+	var targets []deriveTarget
+	for _, sym := range c.symbols.All {
+		if sym == nil || sym.Decl == nil {
+			continue
+		}
+		switch d := sym.Decl.(type) {
+		case *ast.StructDecl:
+			if attr, ok := hasDeriveCopyAttr(d.Attributes); ok {
+				targets = append(targets, deriveTarget{sym: sym, attr: attr})
+			}
+		case *ast.EnumDecl:
+			if attr, ok := hasDeriveCopyAttr(d.Attributes); ok {
+				targets = append(targets, deriveTarget{sym: sym, attr: attr})
+			}
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+
+	visiting := make(map[symbols.SymbolID]bool, len(targets))
+	computed := make(map[symbols.SymbolID]bool, len(targets))
+
+	var checkTypeCopy func(tid types.TypeID) (bool, string)
+	var evalDerivedSym func(sym *symbols.Symbol, reportSpan *diagnostic.Span) bool
+
+	checkTypeCopy = func(tid types.TypeID) (bool, string) {
+		if tid == types.Invalid {
+			return false, "无效类型"
+		}
+		if c.types.IsCopy(tid) {
+			return true, ""
+		}
+		info := c.types.Info(tid)
+		switch info.Kind {
+		case types.KindArray:
+			return checkTypeCopy(info.Elem)
+		case types.KindTuple:
+			for _, elem := range info.Elems {
+				if ok, reason := checkTypeCopy(elem); !ok {
+					return false, reason
+				}
+			}
+			return true, ""
+		case types.KindStruct, types.KindEnum:
+			if len(info.GenericArgs) > 0 {
+				return false, fmt.Sprintf("类型 '%s' 包含泛型实参，暂不支持按 Copy 派生传播", c.types.Format(tid))
+			}
+			subSym := c.symbols.ByID[symbols.SymbolID(info.SymbolID)]
+			if subSym == nil {
+				return false, fmt.Sprintf("类型 '%s' 未实现 Copy", c.types.Format(tid))
+			}
+			if evalDerivedSym(subSym, nil) {
+				return true, ""
+			}
+			return false, fmt.Sprintf("成员类型 '%s' 未标注 '@derive(Copy)' 或不满足 Copy 条件", c.types.Format(tid))
+		default:
+			return false, fmt.Sprintf("类型 '%s' 不满足 Copy 语义", c.types.Format(tid))
+		}
+	}
+
+	evalDerivedSym = func(sym *symbols.Symbol, reportSpan *diagnostic.Span) bool {
+		if res, done := computed[sym.ID]; done {
+			return res
+		}
+		if visiting[sym.ID] {
+			if reportSpan != nil {
+				c.report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:        "WON-MEM-011",
+					Severity:    "error",
+					Message:     fmt.Sprintf("存在循环按值包含关系的类型 '%s' 不能使用 '@derive(Copy)'", sym.Name),
+					File:        reportSpan.File,
+					Span:        *reportSpan,
+					Explanation: "递归按值自包含结构体在内存中具有无限展开依赖，禁止自动派生 Copy。",
+				})
+			}
+			return false
+		}
+		if len(sym.GenericParamIDs) > 0 {
+			if reportSpan != nil {
+				c.report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:        "WON-MEM-011",
+					Severity:    "error",
+					Message:     fmt.Sprintf("泛型类型 '%s' 暂不支持 '@derive(Copy)'", sym.Name),
+					File:        reportSpan.File,
+					Span:        *reportSpan,
+					Explanation: "带未约束泛型参数的 @derive(Copy) 需等待后续特质系统里程碑引入泛型边界约束 (T: Copy) 后再行支持。",
+				})
+			}
+			computed[sym.ID] = false
+			return false
+		}
+
+		// 检查是否声明了 @derive(Copy)
+		var attrSpan *diagnostic.Span
+		switch d := sym.Decl.(type) {
+		case *ast.StructDecl:
+			if attr, ok := hasDeriveCopyAttr(d.Attributes); ok {
+				sp := attr.Span
+				attrSpan = &sp
+			}
+		case *ast.EnumDecl:
+			if attr, ok := hasDeriveCopyAttr(d.Attributes); ok {
+				sp := attr.Span
+				attrSpan = &sp
+			}
+		}
+		if attrSpan == nil {
+			computed[sym.ID] = false
+			return false
+		}
+
+		visiting[sym.ID] = true
+		valid := true
+
+		switch d := sym.Decl.(type) {
+		case *ast.StructDecl:
+			for _, f := range sym.Fields {
+				if ok, reason := checkTypeCopy(f.Type); !ok {
+					valid = false
+					if reportSpan != nil {
+						c.report.AddDiagnostic(diagnostic.Diagnostic{
+							Code:        "WON-MEM-011",
+							Severity:    "error",
+							Message:     fmt.Sprintf("结构体 '%s' 不能 '@derive(Copy)'：字段 '%s' (%s) 非 Copy", sym.Name, f.Name, reason),
+							File:        f.Span.File,
+							Span:        f.Span,
+							Explanation: "仅当结构体的全部具体字段均满足 Copy 且无析构函数时才可安全派生 Copy。",
+						})
+					}
+				}
+			}
+			_ = d
+		case *ast.EnumDecl:
+			for _, v := range sym.Variants {
+				for idx, pt := range v.TupleTypes {
+					if ok, reason := checkTypeCopy(pt); !ok {
+						valid = false
+						if reportSpan != nil {
+							c.report.AddDiagnostic(diagnostic.Diagnostic{
+								Code:        "WON-MEM-011",
+								Severity:    "error",
+								Message:     fmt.Sprintf("枚举 '%s' 不能 '@derive(Copy)'：变体 '%s' 第 %d 项载荷 (%s) 非 Copy", sym.Name, v.Name, idx+1, reason),
+								File:        v.Span.File,
+								Span:        v.Span,
+								Explanation: "仅当枚举全部变体载荷均满足 Copy 且无析构函数时才可安全派生 Copy。",
+							})
+						}
+					}
+				}
+				for _, sf := range v.StructFields {
+					if ok, reason := checkTypeCopy(sf.Type); !ok {
+						valid = false
+						if reportSpan != nil {
+							c.report.AddDiagnostic(diagnostic.Diagnostic{
+								Code:        "WON-MEM-011",
+								Severity:    "error",
+								Message:     fmt.Sprintf("枚举 '%s' 不能 '@derive(Copy)'：变体 '%s' 字段 '%s' (%s) 非 Copy", sym.Name, v.Name, sf.Name, reason),
+								File:        sf.Span.File,
+								Span:        sf.Span,
+								Explanation: "仅当枚举全部变体载荷均满足 Copy 且无析构函数时才可安全派生 Copy。",
+							})
+						}
+					}
+				}
+			}
+			_ = d
+		}
+
+		delete(visiting, sym.ID)
+		computed[sym.ID] = valid
+		if valid {
+			c.types.MarkDerivedCopy(uint64(sym.ID))
+		}
+		return valid
+	}
+
+	for _, t := range targets {
+		sp := t.attr.Span
+		evalDerivedSym(t.sym, &sp)
+	}
 }
 
 func (c *Checker) resolveImplBlock(ib *ast.ImplBlock, scope *symbols.Scope) {

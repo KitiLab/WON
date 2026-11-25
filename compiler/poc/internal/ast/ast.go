@@ -118,6 +118,16 @@ type FunctionDecl struct {
 func (f *FunctionDecl) GetSpan() diagnostic.Span { return f.Span }
 func (f *FunctionDecl) declNode()                {}
 
+// Attribute 表示挂载在顶层声明前的编译期属性注解，如 @derive(Copy)
+type Attribute struct {
+	Name     string
+	Args     []string
+	ArgSpans []diagnostic.Span
+	Span     diagnostic.Span
+}
+
+func (a *Attribute) GetSpan() diagnostic.Span { return a.Span }
+
 // StructField 表示结构体或结构体枚举变体的字段
 type StructField struct {
 	IsPub bool
@@ -131,6 +141,7 @@ func (s *StructField) GetSpan() diagnostic.Span { return s.Span }
 
 // StructDecl 表示结构体定义
 type StructDecl struct {
+	Attributes    []*Attribute
 	IsPub         bool
 	Name          string
 	GenericParams []*GenericParam
@@ -153,6 +164,7 @@ func (e *EnumVariant) GetSpan() diagnostic.Span { return e.Span }
 
 // EnumDecl 表示代数数据类型枚举定义
 type EnumDecl struct {
+	Attributes    []*Attribute
 	IsPub         bool
 	Name          string
 	GenericParams []*GenericParam
@@ -337,7 +349,7 @@ type BlockStmt struct {
 func (b *BlockStmt) GetSpan() diagnostic.Span { return b.Span }
 func (b *BlockStmt) stmtNode()                {}
 
-// LetStmt 表示规范变量声明: let pat [: Type] = init 或 var pat [: Type] = init
+// LetStmt 表示规范变量声明: let pat [: Type] = init | let ident: Type (或对应 var 形式)
 type LetStmt struct {
 	IsMut        bool
 	Keyword      string          // "let" 或 "var"
@@ -345,7 +357,7 @@ type LetStmt struct {
 	Pattern      Pattern         // 完整解构模式
 	Type         string          // 类型字符串（兼容旧 checker/codegen）
 	TypeAST      TypeNode        // 结构化类型节点
-	Init         Expr            // 初始值表达式
+	Init         Expr            // 初始值表达式（显式类型标注的未初始化声明可为 nil）
 	LetTokenSpan diagnostic.Span // let 关键字物理位置（供修复生成）
 	Span         diagnostic.Span
 }

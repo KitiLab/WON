@@ -162,38 +162,48 @@ func (c *Checker) checkLetStmt(s *ast.LetStmt, scope *symbols.Scope) {
 		c.validateSizedType(declType, s.Span, "局部变量")
 	}
 
-	initType := c.checkExpr(s.Init, declType, scope)
+	var varType types.TypeID
+	if s.Init == nil {
+		// 显式类型标注且无初始值声明 (let x: T / var x: T)，由后续 CFG 数据流验证确定性初始化
+		if declType == types.Invalid {
+			return
+		}
+		varType = declType
+	} else {
+		initType := c.checkExpr(s.Init, declType, scope)
 
-	// 校验不能将返回值为 void 的外部 C 函数调用结果赋值给变量 (WON-FFI-006)
-	if initType == c.types.Unit && c.isVoidFFIExpr(s.Init) {
-		c.report.AddDiagnostic(diagnostic.Diagnostic{
-			Code:        "WON-FFI-006",
-			Severity:    "error",
-			Message:     fmt.Sprintf("不能将返回值为 void 的外部调用结果赋值给变量 '%s'", s.Name),
-			File:        s.Span.File,
-			Span:        s.Span,
-			Explanation: "外部 C 函数原型声明返回值为 void，不能作为变量绑定的右值表达式。",
-		})
+		// 校验不能将返回值为 void 的外部 C 函数调用结果赋值给变量 (WON-FFI-006)
+		if initType == c.types.Unit && c.isVoidFFIExpr(s.Init) {
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-FFI-006",
+				Severity:    "error",
+				Message:     fmt.Sprintf("不能将返回值为 void 的外部调用结果赋值给变量 '%s'", s.Name),
+				File:        s.Span.File,
+				Span:        s.Span,
+				Explanation: "外部 C 函数原型声明返回值为 void，不能作为变量绑定的右值表达式。",
+			})
+		}
+
+		varType = declType
+		if varType == types.Invalid {
+			varType = initType
+			c.validateSizedType(varType, s.Span, "局部变量")
+		} else if initType != types.Invalid && !c.types.CanAssign(initType, varType) {
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-TYP-001",
+				Severity:    "error",
+				Message:     fmt.Sprintf("类型不匹配: 无法将 '%s' 类型的值初始化给类型为 '%s' 的变量", c.types.Format(initType), c.types.Format(varType)),
+				File:        s.Init.GetSpan().File,
+				Span:        s.Init.GetSpan(),
+				Explanation: "WON 禁止隐式宽化、窄化或跨类型转换；若确需转换请使用显式 'as' 操作符。",
+			})
+		}
 	}
 
-	varType := declType
-	if varType == types.Invalid {
-		varType = initType
-		c.validateSizedType(varType, s.Span, "局部变量")
-	} else if initType != types.Invalid && !c.types.CanAssign(initType, varType) {
-		c.report.AddDiagnostic(diagnostic.Diagnostic{
-			Code:        "WON-TYP-001",
-			Severity:    "error",
-			Message:     fmt.Sprintf("类型不匹配: 无法将 '%s' 类型的值初始化给类型为 '%s' 的变量", c.types.Format(initType), c.types.Format(varType)),
-			File:        s.Init.GetSpan().File,
-			Span:        s.Init.GetSpan(),
-			Explanation: "WON 禁止隐式宽化、窄化或跨类型转换；若确需转换请使用显式 'as' 操作符。",
-		})
-	}
-
+	declHasInit := s.Init != nil
 	// 将模式内声明的局部绑定插入当前词法作用域
 	if s.Pattern != nil {
-		c.bindLetPattern(s.Pattern, varType, s.IsMut, s.LetTokenSpan, scope)
+		c.bindLetPattern(s.Pattern, varType, s.IsMut, declHasInit, s.LetTokenSpan, scope)
 		if sym, ok := c.symbols.NodeSymbols[s.Pattern]; ok {
 			c.symbols.NodeSymbols[s] = sym
 		}
@@ -203,6 +213,7 @@ func (c *Checker) checkLetStmt(s *ast.LetStmt, scope *symbols.Scope) {
 		sym.Type = varType
 		sym.LetTokenSpan = s.LetTokenSpan
 		sym.Defined = true
+		sym.DeclHasInit = declHasInit
 		if existing, ok := scope.Insert(sym); !ok {
 			c.emitDuplicateDecl(s.Name, s.Span, existing.Span)
 		}
@@ -210,7 +221,7 @@ func (c *Checker) checkLetStmt(s *ast.LetStmt, scope *symbols.Scope) {
 	}
 }
 
-func (c *Checker) bindLetPattern(pat ast.Pattern, targetType types.TypeID, isMut bool, letTokSpan diagnostic.Span, scope *symbols.Scope) {
+func (c *Checker) bindLetPattern(pat ast.Pattern, targetType types.TypeID, isMut bool, declHasInit bool, letTokSpan diagnostic.Span, scope *symbols.Scope) {
 	switch p := pat.(type) {
 	case *ast.WildcardPattern:
 		// 忽略绑定
@@ -221,6 +232,7 @@ func (c *Checker) bindLetPattern(pat ast.Pattern, targetType types.TypeID, isMut
 		sym.Type = targetType
 		sym.LetTokenSpan = letTokSpan
 		sym.Defined = true
+		sym.DeclHasInit = declHasInit
 		if existing, ok := scope.Insert(sym); !ok {
 			c.emitDuplicateDecl(p.Name, p.Span, existing.Span)
 		}
@@ -229,7 +241,7 @@ func (c *Checker) bindLetPattern(pat ast.Pattern, targetType types.TypeID, isMut
 	case *ast.TuplePattern:
 		if targetType == types.Invalid {
 			for _, elemPat := range p.Elems {
-				c.bindLetPattern(elemPat, types.Invalid, isMut, letTokSpan, scope)
+				c.bindLetPattern(elemPat, types.Invalid, isMut, declHasInit, letTokSpan, scope)
 			}
 			return
 		}
@@ -245,7 +257,7 @@ func (c *Checker) bindLetPattern(pat ast.Pattern, targetType types.TypeID, isMut
 			return
 		}
 		for i, elemPat := range p.Elems {
-			c.bindLetPattern(elemPat, tInfo.Elems[i], isMut, letTokSpan, scope)
+			c.bindLetPattern(elemPat, tInfo.Elems[i], isMut, declHasInit, letTokSpan, scope)
 		}
 
 	default:
@@ -301,7 +313,9 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt, scope *symbols.Scope) {
 			return
 		}
 		targetType = sym.Type
-		if !sym.IsMut {
+		c.symbols.NodeSymbols[lhs] = sym
+		isCompound := s.Op != "" && s.Op != "="
+		if !sym.IsMut && (sym.DeclHasInit || isCompound) {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code:        "WON-MUT-001",
 				Severity:    "error",
@@ -537,7 +551,7 @@ func (c *Checker) checkForStmt(s *ast.ForStmt, scope *symbols.Scope) {
 
 	bodyScope := symbols.NewScope(symbols.ScopeBlock, scope)
 	if s.Pattern != nil {
-		c.bindLetPattern(s.Pattern, elemType, false, s.Span, bodyScope)
+		c.bindLetPattern(s.Pattern, elemType, false, true, s.Span, bodyScope)
 	}
 	c.loopDepth++
 	c.checkBlock(s.Body, types.Invalid, bodyScope)
