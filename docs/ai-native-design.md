@@ -21,7 +21,7 @@ Importantly, this capability is **completely vendor-agnostic**. The compiler doe
 ## 2. Core AI-Native Subsystems
 
 ### 2.1 Machine-Readable JSON Diagnostics
-Every compilation error, warning, and lint emitted by the compiler can be output as structured JSON via the `--format=json` flag:
+Every compilation error, warning, and lint emitted by the compiler can be output as structured JSON via the `--format=json` flag. Positions strictly record 1-based `line`, 1-based Unicode code-point `column`, and 0-based absolute UTF-8 `byte` offsets. Malformed UTF-8 input is rejected cleanly at byte granularity via `WON-LEX-004`.
 
 ```json
 {

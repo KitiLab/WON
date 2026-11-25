@@ -13,15 +13,22 @@ import (
 	"github.com/KitiLab/WON/compiler/poc/internal/token"
 )
 
+// runeSpan 记录单个已解码 Unicode 标量值及其真实源码 UTF-8 字节长度
+type runeSpan struct {
+	r       rune
+	byteLen int
+	valid   bool
+}
+
 // Lexer 规范缩进感知词法分析器
 type Lexer struct {
 	file        string
 	src         string
-	runes       []rune
+	runes       []runeSpan
 	pos         int // 当前在 runes 中的索引
 	offset      int // 当前 UTF-8 字节偏移量
 	line        int // 当前行号（从 1 开始）
-	col         int // 当前列号（从 1 开始）
+	col         int // 当前 Unicode 码点列号（从 1 开始）
 	report      *diagnostic.Report
 	indentStack []int         // 缩进深度栈，初始为 [0]
 	pending     []token.Token // 待发出的多级 DEDENT 或挂起词法单元队列
@@ -29,12 +36,57 @@ type Lexer struct {
 	delimDepth  int           // 当前开启的 () / [] / {} 嵌套深度
 }
 
-// New 创建规范词法分析器实例
+// decodeSourceUTF8 按字节校验源码是否为合法 UTF-8，确保非法字节维持 1 字节步进而不会引发位置漂移
+func decodeSourceUTF8(file, src string, base diagnostic.Position, report *diagnostic.Report, emitErrors bool) []runeSpan {
+	entries := make([]runeSpan, 0, len(src))
+	byteOff := base.Byte
+	curLine := base.Line
+	curCol := base.Column
+
+	for i := 0; i < len(src); {
+		r, size := utf8.DecodeRuneInString(src[i:])
+		if r == utf8.RuneError && size == 1 {
+			// 非法 UTF-8 编码：区别于有效编码的 U+FFFD (size == 3)
+			if emitErrors && report != nil {
+				report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:        "WON-LEX-004",
+					Severity:    "error",
+					Message:     fmt.Sprintf("非法的 UTF-8 源码编码字节: 0x%02X", src[i]),
+					File:        file,
+					Explanation: "WON 源文件必须严格采用合法 UTF-8 编码。检测到无效编码字节或截断的多字节序列。",
+					Span: diagnostic.Span{
+						File:  file,
+						Start: diagnostic.Position{Line: curLine, Column: curCol, Byte: byteOff},
+						End:   diagnostic.Position{Line: curLine, Column: curCol + 1, Byte: byteOff + 1},
+					},
+				})
+			}
+			entries = append(entries, runeSpan{r: utf8.RuneError, byteLen: 1, valid: false})
+			i++
+			byteOff++
+			curCol++
+			continue
+		}
+		entries = append(entries, runeSpan{r: r, byteLen: size, valid: true})
+		i += size
+		byteOff += size
+		if r == '\n' {
+			curLine++
+			curCol = 1
+		} else {
+			curCol++
+		}
+	}
+	return entries
+}
+
+// New 创建规范词法分析器实例并在词法切分前执行字节级 UTF-8 完整性校验
 func New(file, src string, report *diagnostic.Report) *Lexer {
+	base := diagnostic.Position{Line: 1, Column: 1, Byte: 0}
 	return &Lexer{
 		file:        file,
 		src:         src,
-		runes:       []rune(src),
+		runes:       decodeSourceUTF8(file, src, base, report, true),
 		pos:         0,
 		offset:      0,
 		line:        1,
@@ -52,7 +104,7 @@ func NewSubLexer(file, src string, base diagnostic.Position, report *diagnostic.
 	return &Lexer{
 		file:        file,
 		src:         src,
-		runes:       []rune(src),
+		runes:       decodeSourceUTF8(file, src, base, report, false),
 		pos:         0,
 		offset:      base.Byte,
 		line:        base.Line,
@@ -77,7 +129,7 @@ func (l *Lexer) peek() rune {
 	if l.pos >= len(l.runes) {
 		return 0
 	}
-	return l.runes[l.pos]
+	return l.runes[l.pos].r
 }
 
 func (l *Lexer) peekAt(ahead int) rune {
@@ -85,27 +137,23 @@ func (l *Lexer) peekAt(ahead int) rune {
 	if idx >= len(l.runes) || idx < 0 {
 		return 0
 	}
-	return l.runes[idx]
+	return l.runes[idx].r
 }
 
 func (l *Lexer) advance() rune {
 	if l.pos >= len(l.runes) {
 		return 0
 	}
-	r := l.runes[l.pos]
+	entry := l.runes[l.pos]
 	l.pos++
-	n := utf8.RuneLen(r)
-	if n < 0 {
-		n = 1
-	}
-	l.offset += n
-	if r == '\n' {
+	l.offset += entry.byteLen
+	if entry.r == '\n' {
 		l.line++
 		l.col = 1
 	} else {
 		l.col++
 	}
-	return r
+	return entry.r
 }
 
 func (l *Lexer) emitError(code, msg string, span diagnostic.Span) {
@@ -676,6 +724,9 @@ func (l *Lexer) NextToken() token.Token {
 		}
 		return l.makeTok(token.RBRACKET, "]", start)
 	default:
+		if l.pos > 0 && !l.runes[l.pos-1].valid {
+			return l.makeTok(token.ILLEGAL, "", start)
+		}
 		l.emitError("WON-LEX-002", fmt.Sprintf("未识别的非法字符: %q", ch), diagnostic.Span{
 			File:  l.file,
 			Start: start,

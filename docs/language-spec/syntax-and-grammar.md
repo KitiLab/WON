@@ -86,7 +86,8 @@ fn main() -> i32:
 ## 3. Lexical Structure
 
 ### 3.1 Source Encoding and Whitespace
-- Source files **MUST** be encoded in UTF-8.
+- Source files **MUST** be strictly valid UTF-8. Malformed UTF-8 sequences (isolated continuation bytes, truncated sequences, overlong encodings) are rejected immediately with `WON-LEX-004: Invalid UTF-8 source encoding`, without silently substituting `U+FFFD`.
+- **Source Positions**: Diagnostics record `line` (1-based), `column` (1-based Unicode code-point offset on the current line), and `byte` (0-based absolute UTF-8 byte offset from file start).
 - Whitespace consists of spaces (`U+0020`), horizontal tabs (`U+0009`), carriage returns (`U+000D`), and line feeds (`U+000A`).
 - **Indentation Rule**: Indentation **MUST** consist strictly of ASCII spaces. Tab characters (`\t`) in indentation are rejected with a syntax diagnostic (`WON-SYN-001`). Standard indentation level is 4 spaces.
 - Lines ending with a backslash (`\`) continue onto the following line without triggering a `NEWLINE` token.

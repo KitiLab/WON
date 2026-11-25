@@ -227,3 +227,119 @@ func TestLexerInvalidCharactersAndStrings(t *testing.T) {
 		}
 	})
 }
+
+func TestLexerUTF8ValidationAndExactByteOffsets(t *testing.T) {
+	t.Run("ValidASCIIAndMultibytePositions", func(t *testing.T) {
+		// "let 变量 = 1\n" -> 'let ' (4B), '变量' (6B, col 5..7), ' = ' (3B), '1' (byte 13, col 10)
+		src := "let 变量 = 1\n"
+		report := diagnostic.NewReport()
+		lex := New("utf8_pos.won", src, report)
+		if report.HasErrors() {
+			t.Fatalf("合法 UTF-8 不应报错: %s", report.String())
+		}
+		toks := make([]token.Token, 0)
+		for tok := lex.NextToken(); tok.Kind != token.EOF; tok = lex.NextToken() {
+			toks = append(toks, tok)
+		}
+		// toks[3] 为 '1'
+		intTok := toks[3]
+		if intTok.Kind != token.INT || intTok.Span.Start.Byte != 13 || intTok.Span.Start.Column != 10 || intTok.Span.Start.Line != 1 {
+			t.Errorf("期望整数 '1' 位于 byte=13, line=1, col=10，实际为 %+v", intTok.Span.Start)
+		}
+	})
+
+	t.Run("ValidEncodedUFFFD", func(t *testing.T) {
+		// 合法的三字节 UTF-8 编码的 U+FFFD (\xEF\xBF\xBD) 在字符串内不应报错且占 3 字节
+		src := "let s = \"\xef\xbf\xbd\"\nlet x = 1\n"
+		report := diagnostic.NewReport()
+		lex := New("valid_fffd.won", src, report)
+		var letX token.Token
+		for tok := lex.NextToken(); tok.Kind != token.EOF; tok = lex.NextToken() {
+			if tok.Kind == token.LET && tok.Span.Start.Line == 2 {
+				letX = tok
+			}
+		}
+		if report.HasErrors() {
+			t.Fatalf("合法编码的 U+FFFD 不应报错: %s", report.String())
+		}
+		// "let s = \"" (9B) + U+FFFD (3B) + "\"\n" (2B) = 14B
+		if letX.Span.Start.Byte != 14 {
+			t.Errorf("合法 U+FFFD 后下一行起始字节应为 14，实际为 %d", letX.Span.Start.Byte)
+		}
+	})
+
+	t.Run("CRLFWithUnicode", func(t *testing.T) {
+		src := "let s = \"世界\"\r\nlet y = 2\r\n"
+		report := diagnostic.NewReport()
+		lex := New("crlf.won", src, report)
+		var letY token.Token
+		for tok := lex.NextToken(); tok.Kind != token.EOF; tok = lex.NextToken() {
+			if tok.Kind == token.LET && tok.Span.Start.Line == 2 {
+				letY = tok
+			}
+		}
+		if report.HasErrors() {
+			t.Fatalf("含 Unicode 的 CRLF 输入不应报错: %s", report.String())
+		}
+		// "let s = \"" (9) + "世界" (6) + "\"\r\n" (3) = 18
+		if letY.Span.Start.Byte != 18 || letY.Span.Start.Line != 2 || letY.Span.Start.Column != 1 {
+			t.Errorf("期望第 2 行起始位于 byte=18, line=2, col=1，实际为 %+v", letY.Span.Start)
+		}
+	})
+
+	malformedCases := []struct {
+		name     string
+		src      string
+		wantByte int
+		wantLine int
+		wantCol  int
+	}{
+		{"IsolatedContinuationByte", "let a = 1\n\x80let b = 2\n", 10, 2, 1},
+		{"TruncatedTwoByteSeq", "let x = \"\xc3\"\n", 9, 1, 10},
+		{"TruncatedThreeByteSeq", "let x = \"\xe2\x82\"\n", 9, 1, 10},
+		{"InvalidLeadingByteFF", "let x = 1\nlet y = \xff\n", 18, 2, 9},
+		{"InvalidAfterMultibyteText", "let 世 = 1\nlet b = \xff\n", 20, 2, 9},
+		{"InvalidAfterMultipleLines", "fn f():\n    let x = 1\n    let y = \xfe\n", 34, 3, 13},
+	}
+
+	for _, tc := range malformedCases {
+		t.Run(tc.name, func(t *testing.T) {
+			report := diagnostic.NewReport()
+			lex := New("bad_utf8.won", tc.src, report)
+			for tok := lex.NextToken(); tok.Kind != token.EOF; tok = lex.NextToken() {
+			}
+			if !report.HasErrors() {
+				t.Fatalf("%s 应当检测到非法的 UTF-8 字节序列", tc.name)
+			}
+			d := report.Diagnostics[0]
+			if d.Code != "WON-LEX-004" {
+				t.Errorf("%s 期望诊断码 WON-LEX-004，实际为 %s (%s)", tc.name, d.Code, d.Message)
+			}
+			if d.Span.Start.Byte != tc.wantByte || d.Span.Start.Line != tc.wantLine || d.Span.Start.Column != tc.wantCol {
+				t.Errorf("%s 位置不匹配: 期望 byte=%d, line=%d, col=%d; 实际 byte=%d, line=%d, col=%d",
+					tc.name, tc.wantByte, tc.wantLine, tc.wantCol, d.Span.Start.Byte, d.Span.Start.Line, d.Span.Start.Column)
+			}
+		})
+	}
+
+	t.Run("NoByteOffsetDriftAfterInvalidByteFollowingMultibyte", func(t *testing.T) {
+		// "let 世 = 1 # \xff ok\nlet z = 3\n"
+		// "let " (4) + "世" (3) + " = 1 # " (7) + "\xff" (1) + " ok\n" (4) = 19
+		// 若错误按 U+FFFD(3B) 计算则第2行会偏移为 21；真实字节偏移必须为 19！
+		src := "let 世 = 1 # \xff ok\nlet z = 3\n"
+		report := diagnostic.NewReport()
+		lex := New("no_drift.won", src, report)
+		var letZ token.Token
+		for tok := lex.NextToken(); tok.Kind != token.EOF; tok = lex.NextToken() {
+			if tok.Kind == token.LET && tok.Span.Start.Line == 2 {
+				letZ = tok
+			}
+		}
+		if len(report.Diagnostics) == 0 || report.Diagnostics[0].Code != "WON-LEX-004" {
+			t.Fatalf("应报告 WON-LEX-004")
+		}
+		if letZ.Span.Start.Byte != 19 || letZ.Span.Start.Line != 2 || letZ.Span.Start.Column != 1 {
+			t.Errorf("非法 UTF-8 字节后发生偏移漂移！期望第 2 行 let 位于 byte=19, line=2, col=1，实际 %+v", letZ.Span.Start)
+		}
+	})
+}
