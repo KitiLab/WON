@@ -81,3 +81,74 @@ func FuzzOwnershipCFGAndDataflow(f *testing.F) {
 		}
 	})
 }
+
+// FuzzBorrowNLLAndProvenance 验证随机组合的共享/独占借用、重借用、NLL last-use、候选返回与作用域交互无崩溃与结果确定性。
+func FuzzBorrowNLLAndProvenance(f *testing.F) {
+	f.Add(uint8(0), uint8(1), uint8(2), uint8(3), uint8(0))
+	f.Add(uint8(3), uint8(2), uint8(1), uint8(0), uint8(1))
+	f.Add(uint8(2), uint8(4), uint8(3), uint8(2), uint8(2))
+
+	f.Fuzz(func(t *testing.T, a, b, c, d, e uint8) {
+		var sb strings.Builder
+		sb.WriteString("struct Pair:\n    var l: String\n    var r: String\n\n")
+		sb.WriteString("fn choose(cond: bool, x: &String, y: &String) -> &String:\n")
+		if e%2 == 0 {
+			sb.WriteString("    if cond:\n        return x\n    return y\n\n")
+		} else {
+			sb.WriteString("    return x\n\n")
+		}
+		sb.WriteString("fn harness(cond: bool) -> i32:\n")
+		sb.WriteString("    var p = Pair { l: String::from(\"a\"), r: String::from(\"b\") }\n")
+		sb.WriteString("    var rx = &p.l\n")
+		if a%2 == 0 {
+			sb.WriteString("    var mr = &mut p.r\n")
+		} else {
+			sb.WriteString("    var mr = &mut p.l\n")
+		}
+		if b%2 == 0 {
+			sb.WriteString("    let child = &*mr\n    println(child)\n")
+		}
+		switch c % 3 {
+		case 0:
+			sb.WriteString("    let picked = choose(cond, rx, &p.r)\n    println(picked)\n")
+		case 1:
+			sb.WriteString("    p.l.push_str(\"!\")\n")
+		case 2:
+			sb.WriteString("    mr.push_str(\"?\")\n")
+		}
+		if d%2 == 0 {
+			sb.WriteString("    println(rx)\n")
+		} else {
+			sb.WriteString("    println(mr)\n")
+		}
+		sb.WriteString("    return 0\n")
+
+		src := sb.String()
+		runOnce := func() (string, bool, bool) {
+			rep := diagnostic.NewReport()
+			lex := lexer.New("fuzz_borrow.won", src, rep)
+			p := parser.New(lex, rep, "fuzz_borrow.won")
+			prog := p.ParseProgram()
+			checked := false
+			if !rep.HasErrors() {
+				chk := checker.New(rep, nil)
+				tp := chk.CheckProgram(prog)
+				if tp != nil {
+					checked = tp.OwnershipChecked
+				}
+			}
+			// 任何报错程序绝对不允许 OwnershipChecked == true
+			if rep.HasErrors() && checked {
+				t.Fatalf("报错程序错误放行了 OwnershipChecked=true:\n%s", rep.String())
+			}
+			j, _ := rep.ToJSON()
+			return j, rep.HasErrors(), checked
+		}
+
+		j1, e1, ok1 := runOnce()
+		j2, e2, ok2 := runOnce()
+		if j1 != j2 || e1 != e2 || ok1 != ok2 {
+			t.Fatalf("Borrow/NLL Fuzz 结果不确定:\n1:%s\n2:%s", j1, j2)
+		}
+	})
+}

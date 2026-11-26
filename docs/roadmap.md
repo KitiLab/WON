@@ -108,9 +108,10 @@ The implementation roadmap adheres to strict technical dependency ordering acros
     - *Objective*: Implement `@derive(Copy)` & uninitialized simple `let`/`var` extensions, `internal/cfg` (`Place`, `Projection`, `BasicBlock`), definite-initialization, move, reinitialization, non-`Drop` partial-move, and loop fixed-point analysis (`WON-MEM-001`, `008`, `010`, `011`), Phase 2B.1.1 fail-closed hardening (`WON-INT-001`, unbounded lazy field tracking, `OwnershipChecked` codegen gate, AST-to-CFG exhaustiveness), and Phase 2B.1.2 match pattern ownership closure (borrow event preservation in mixed aggregates, `OpCopy` on `Copy` pattern bindings, and `WON-SEM-010` conservative guards on mixed opaque aggregates and guarded non-`Copy` consuming arms).
     - *Deliverables*: `internal/cfg`, `internal/borrow`, [phase-2b.1.1-cfg-soundness-closure.md](compiler/phase-2b.1.1-cfg-soundness-closure.md), [phase-2b.1.2-match-pattern-ownership-closure.md](compiler/phase-2b.1.2-match-pattern-ownership-closure.md), `@derive(Copy)` & uninit `let`/`var` in lexer/parser/types/checker/codegen, fuzz + CLI C11 tests.
     - *Status*: `IMPLEMENTED` (Verified in official CI run `45808397443`).
-  - **2B.2 (Current Milestone — Borrow Checking, NLL Regions & Candidate Provenance)**:
-    - *Objective*: Shared/exclusive loan conflict checking, disjoint field splitting, reborrowing, NLL liveness, Strategy B candidate-origin provenance, and abstract-boundary `WON-MEM-002..006`.
-    - *Status*: `IN PROGRESS` (Authorized milestone: Stage A Loan Flow -> Stage B NLL/Conflicts -> Stage C Provenance).
+  - **2B.2 (Borrow Checking, NLL Regions & Candidate Provenance)**:
+    - *Objective*: Enforce shared/exclusive XOR loan conflicts (`WON-MEM-004`/`005`/`006`), disjoint field/const-index splitting, reborrowing parent/child freezing, NLL backward region liveness, deterministic left-to-right method borrowing, Strategy B candidate-origin return provenance via Tarjan SCC fixed point, local escape (`WON-MEM-003`), and opaque multi-ref boundary rejection (`WON-MEM-002`).
+    - *Deliverables*: `internal/borrow/{loans,liveness,provenance}.go`, [phase-2b.2-borrow-checker-nll-provenance.md](compiler/phase-2b.2-borrow-checker-nll-provenance.md), unit, CLI, and fuzz suites.
+    - *Status*: `IMPLEMENTED` (Stages A & B verified in official CI; Stage C complete locally, CI pending commit push).
   - **2B.3 (Drop Elaboration & Resource Lifecycle Integration — Proposed)**:
     - *Objective*: Lexical reverse-order cleanup, conditional drop flags, early-return / `?` cleanup edges, partial-move cleanup, and `.wonbind` ownership contract hooks (`WON-MEM-007` readiness).
     - *Status*: `PLANNED`.

@@ -15,26 +15,44 @@ type diagDedupKey struct {
 	byte int
 }
 
-// AnalyzeProgram 对全程序所有权 CFG 运行确定性初始化与移动数据流分析。
-// 遵循严格 Fail-Closed 原则：内部 CFG/状态不变量违例触发 WON-INT-001，绝不静默放行。
+// AnalyzeProgram 对全程序所有权 CFG 运行完整的 Phase 2B.1 Move/Init、Stage A 借用流、Stage C 候选溯源以及 Stage B NLL/借用冲突校验。
+// 遵循严格 Fail-Closed 原则：内部 CFG/状态/收敛不变量违例触发 WON-INT-001，绝不静默放行。
 func AnalyzeProgram(progCFG *cfg.ProgramCFG, view cfg.SemanticView, report *diagnostic.Report) {
 	if progCFG == nil || view == nil || report == nil {
 		return
 	}
-	for _, fn := range progCFG.Functions {
-		analyzeFunction(fn, view, report)
-	}
-}
 
-func analyzeFunction(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report) {
-	if fn == nil || len(fn.Blocks) == 0 || fn.Entry < 0 {
+	// Pass 1: Definite Initialization & Move Analysis (Phase 2B.1)
+	for _, fn := range progCFG.Functions {
+		maxIterations := len(fn.Blocks)*(len(fn.Locals)*8+64) + 256
+		analyzeMoveInitWithBudget(fn, view, report, maxIterations)
+	}
+	if report.HasErrors() {
 		return
 	}
-	maxIterations := len(fn.Blocks)*(len(fn.Locals)*8+64) + 256
-	analyzeFunctionWithBudget(fn, view, report, maxIterations)
+
+	// Pass 2 & 3: Stage A 借用载体流 + Stage C 全程序 Tarjan SCC 候选引用溯源推理与摘要精确化
+	provRes := InferAndVerifyProvenance(progCFG, view, report)
+	if provRes == nil || report.HasErrors() {
+		return
+	}
+
+	// Pass 4: Stage B 基于精确化候选摘要的 NLL 向后活跃域、XOR 排他冲突与作用域生命周期校验
+	for _, fn := range progCFG.Functions {
+		if fn.FuncSym == nil {
+			continue
+		}
+		if flow := provRes.Flows[fn.FuncSym.ID]; flow != nil {
+			AnalyzeBorrowConflicts(fn, flow, view, report)
+		}
+	}
 }
 
 func analyzeFunctionWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report, maxIterations int) {
+	analyzeMoveInitWithBudget(fn, view, report, maxIterations)
+}
+
+func analyzeMoveInitWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report, maxIterations int) {
 	if fn == nil || len(fn.Blocks) == 0 || fn.Entry < 0 {
 		return
 	}
@@ -103,13 +121,6 @@ func analyzeFunctionWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *d
 		}
 		cur := cloneEnv(inStates[bb])
 		transferBlock(fn.Name, blk, cur, view, report, emitted)
-	}
-
-	// Phase 2B.2 Stage A & B: 构建借用标识与引用载体流，并执行 NLL 活跃域与借用排他性/作用域生命周期校验
-	if !report.HasErrors() {
-		if flow := BuildLoanFlow(fn, view, report); flow != nil && !report.HasErrors() {
-			AnalyzeBorrowConflicts(fn, flow, view, report)
-		}
 	}
 }
 

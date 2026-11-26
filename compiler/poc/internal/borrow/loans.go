@@ -229,11 +229,16 @@ type FuncLoanFlow struct {
 	TempOrigins map[cfg.ValueID]OriginSet
 	InStates    []*carrierEnv
 	OutStates   []*carrierEnv
+	Summaries   map[symbols.SymbolID]*FuncSummary
 }
 
 // BuildLoanFlow 对单个函数 CFG 构建并校验 Phase 2B.2 Stage A 的借用身份表与引用载体前向流。
 // 若发现重复/非法 LoanID、重借用缺少父关系或不动点未收敛，按 Fail-Closed 原则发出 WON-INT-001。
 func BuildLoanFlow(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report) *FuncLoanFlow {
+	return buildLoanFlowWithSummaries(fn, view, nil, report)
+}
+
+func buildLoanFlowWithSummaries(fn *cfg.FuncCFG, view cfg.SemanticView, summaries map[symbols.SymbolID]*FuncSummary, report *diagnostic.Report) *FuncLoanFlow {
 	if fn == nil || len(fn.Blocks) == 0 || fn.Entry < 0 {
 		return nil
 	}
@@ -243,6 +248,7 @@ func BuildLoanFlow(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Re
 		TempOrigins: make(map[cfg.ValueID]OriginSet),
 		InStates:    make([]*carrierEnv, len(fn.Blocks)),
 		OutStates:   make([]*carrierEnv, len(fn.Blocks)),
+		Summaries:   summaries,
 	}
 	if fn.FuncSym != nil {
 		flow.FuncSymID = fn.FuncSym.ID
@@ -580,20 +586,41 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 
 		case cfg.OpCall:
 			if st.ValTemp != cfg.InvalidValue {
-				// Stage A 保守保留所有引用实参或调用来源进入结果载体，Stage C 将细化为候选返回摘要
 				retOrig := newOriginSet()
-				hasArgOrigin := false
-				for _, argT := range st.ArgTemps {
-					if argT == cfg.InvalidValue {
-						continue
-					}
-					if argOrig, ok := env.temps[argT]; ok && !argOrig.isEmpty() {
-						retOrig.merge(argOrig)
-						hasArgOrigin = true
+				usedSummary := false
+				if st.Callee != nil && flow.Summaries != nil {
+					if sum, ok := flow.Summaries[st.Callee.ID]; ok && sum != nil {
+						usedSummary = true
+						for pIdx := range sum.ParamIndices {
+							if pIdx >= 0 && pIdx < len(st.ArgTemps) && st.ArgTemps[pIdx] != cfg.InvalidValue {
+								if argOrig, ok := env.temps[st.ArgTemps[pIdx]]; ok {
+									retOrig.merge(argOrig)
+								}
+							}
+						}
+						if sum.HasStatic {
+							retOrig.Static = true
+						}
+						if sum.Unknown {
+							retOrig.Unknown = true
+						}
 					}
 				}
-				if !hasArgOrigin {
-					retOrig.Unknown = true
+				if !usedSummary {
+					// 无过程间摘要（Stage A 独立模式或单引用内建/不透明调用）：保留关联引用实参来源
+					hasArgOrigin := false
+					for _, argT := range st.ArgTemps {
+						if argT == cfg.InvalidValue {
+							continue
+						}
+						if argOrig, ok := env.temps[argT]; ok && !argOrig.isEmpty() {
+							retOrig.merge(argOrig)
+							hasArgOrigin = true
+						}
+					}
+					if !hasArgOrigin {
+						retOrig.Unknown = true
+					}
 				}
 				cur := env.temps[st.ValTemp]
 				cur.merge(retOrig)
@@ -602,6 +629,11 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 					fc := flow.TempOrigins[st.ValTemp]
 					fc.merge(cur)
 					flow.TempOrigins[st.ValTemp] = fc
+					for id := range cur.Loans {
+						if l := flow.LoanByID[id]; l != nil {
+							l.CarrierTemps[st.ValTemp] = true
+						}
+					}
 				}
 			}
 

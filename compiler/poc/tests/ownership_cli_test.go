@@ -170,6 +170,31 @@ fn main(cond: bool) -> u64:
 			src:  "fn eat(s: String) -> u64:\n    return s.len()\n\nfn main() -> u64:\n    let p = (String::from(\"a\"), String::from(\"b\"))\n    return match p:\n        (ref a, b) => a.len() + eat(b)\n",
 			code: "WON-SEM-010",
 		},
+		{
+			name: "borrow_conflict_shared_mut",
+			src:  "fn main():\n    var s = String::from(\"conflict\")\n    let r = &s\n    let m = &mut s\n    println(r)\n    m.push_str(\"!\")\n",
+			code: "WON-MEM-004",
+		},
+		{
+			name: "double_mut_borrow",
+			src:  "fn main():\n    var s = String::from(\"double\")\n    let m1 = &mut s\n    let m2 = &mut s\n    m1.push_str(\"1\")\n    m2.push_str(\"2\")\n",
+			code: "WON-MEM-005",
+		},
+		{
+			name: "mutate_while_borrowed",
+			src:  "fn main():\n    var x: i32 = 1\n    let r = &x\n    x = 2\n    println(*r)\n",
+			code: "WON-MEM-006",
+		},
+		{
+			name: "local_ref_escape",
+			src:  "fn esc() -> &String:\n    let s = String::from(\"escape\")\n    return &s\n",
+			code: "WON-MEM-003",
+		},
+		{
+			name: "opaque_multi_ref_fn_ptr",
+			src:  "fn reg(cb: fn(&String, &String) -> &String):\n    println(\"ok\")\n",
+			code: "WON-MEM-002",
+		},
 	}
 
 	for _, nc := range negCases {
