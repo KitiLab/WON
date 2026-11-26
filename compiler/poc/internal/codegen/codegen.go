@@ -18,11 +18,12 @@ import (
 
 // Generator C11 源码生成器
 type Generator struct {
-	prog     *ast.Program
-	typed    *checker.TypedProgram
-	bindings map[string]*bindgen.BindingMeta
-	sb       strings.Builder
-	indent   int
+	prog                *ast.Program
+	typed               *checker.TypedProgram
+	bindings            map[string]*bindgen.BindingMeta
+	strictOwnershipGate bool
+	sb                  strings.Builder
+	indent              int
 }
 
 // New 创建基于语义校验结果的 C11 代码生成器（兼容未显式传入 TypedProgram 的直接调用场景）
@@ -43,15 +44,16 @@ func New(prog *ast.Program, bindings map[string]*bindgen.BindingMeta) *Generator
 	}
 }
 
-// NewTyped 创建绑定了外部已验证 TypedProgram 的 C11 代码生成器，确保后端严格复用前端规范 TypeID
+// NewTyped 创建绑定了外部已验证 TypedProgram 的 C11 代码生成器，确保后端严格复用前端规范 TypeID 并强制校验 OwnershipChecked。
 func NewTyped(prog *ast.Program, typed *checker.TypedProgram, bindings map[string]*bindgen.BindingMeta) *Generator {
 	if bindings == nil {
 		bindings = make(map[string]*bindgen.BindingMeta)
 	}
 	return &Generator{
-		prog:     prog,
-		typed:    typed,
-		bindings: bindings,
+		prog:                prog,
+		typed:               typed,
+		bindings:            bindings,
+		strictOwnershipGate: true,
 	}
 }
 
@@ -67,6 +69,9 @@ func (g *Generator) writeLine(s string) {
 
 // Generate 执行代码生成，返回严格符合 ISO C11 规范的 C 语言源码
 func (g *Generator) Generate() (string, error) {
+	if g.strictOwnershipGate && (g.typed == nil || !g.typed.OwnershipChecked) {
+		return "", fmt.Errorf("WON-INT-001: 所有权分析未通过认证 (OwnershipChecked=false)，拒绝执行 C11 代码生成")
+	}
 	g.sb.Reset()
 
 	// 1. 标准 C11 运行时与固定宽度类型头文件

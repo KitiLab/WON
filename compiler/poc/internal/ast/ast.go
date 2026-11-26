@@ -809,6 +809,8 @@ type FieldPattern struct {
 	Span    diagnostic.Span
 }
 
+func (f *FieldPattern) GetSpan() diagnostic.Span { return f.Span }
+
 // StructPattern 表示结构体解构模式: Shape::Rectangle { width, height }
 type StructPattern struct {
 	Path   []string

@@ -1,6 +1,7 @@
 package cfg_test
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -89,5 +90,52 @@ fn branch_and_loop(cond: bool, limit: i32) -> i32:
 	}
 	if !hasSymPlace {
 		t.Errorf("CFG 语句缺少解析后的非零 SymbolID 或源码 Span")
+	}
+}
+
+// TestMatchPerArmLoweringSnapshots 验证 match 分支独立降维、StructPattern 字段级投影与守卫落空流转的 CFG 结构。
+func TestMatchPerArmLoweringSnapshots(t *testing.T) {
+	refMatchSrc := `
+enum OptStr:
+    Some(String)
+    None
+
+fn probe(opt: OptStr) -> u64:
+    return match opt:
+        OptStr::Some(ref r) => r.len()
+        OptStr::None => 0u64
+`
+	refCFG := buildCFGFromSource(t, refMatchSrc)
+	refDump := refCFG.Functions[0].Dump()
+	if !strings.Contains(refDump, "BorrowShared") {
+		t.Errorf("纯引用 match 分支应发出 BorrowShared 事件:\n%s", refDump)
+	}
+	if strings.Contains(refDump, "Move opt") {
+		t.Errorf("纯引用 match 分支不应提前 Move 主体 opt:\n%s", refDump)
+	}
+
+	partialSrc := `
+struct PairStr:
+    a: String
+    b: String
+
+fn eat(s: String) -> u64:
+    return s.len()
+
+fn split(pair: PairStr, flag: bool) -> u64:
+    return match pair:
+        PairStr { a: ref ra, b: ref rb } if flag => ra.len() + rb.len()
+        PairStr { a, b: ref rb } => eat(a) + rb.len()
+`
+	partialCFG := buildCFGFromSource(t, partialSrc)
+	partialDump := partialCFG.Functions[1].Dump()
+	if !strings.Contains(partialDump, "match.arm0.gfail") {
+		t.Errorf("带守卫 match 应构造守卫落空基本块 match.arm0.gfail:\n%s", partialDump)
+	}
+	if !regexp.MustCompile(`Move pair#\d+\.a`).MatchString(partialDump) {
+		t.Errorf("Direct StructPattern 非 ref 字段应对精确字段路径 pair.a 发出 OpMove:\n%s", partialDump)
+	}
+	if !regexp.MustCompile(`BorrowShared\(reserved\) pair#\d+\.b`).MatchString(partialDump) {
+		t.Errorf("Direct StructPattern ref 字段应对精确字段路径 pair.b 发出 OpBorrowShared:\n%s", partialDump)
 	}
 }

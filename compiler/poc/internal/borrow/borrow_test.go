@@ -1,6 +1,8 @@
 package borrow_test
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/KitiLab/WON/compiler/poc/internal/checker"
@@ -383,4 +385,228 @@ struct Holder:
 fn get_id(h: &Holder) -> i32:
     return h.id
 `)
+}
+
+// buildDeepStructProgram 构造指定嵌套深度的结构体链源码（包含可移动叶节点 leaf 与可拷贝兄弟节点 sib）。
+func buildDeepStructProgram(depth int, useLeafAfterMove, readWholeAfterMove, readSiblingAfterMove, reinitLeaf bool) string {
+	var sb strings.Builder
+	sb.WriteString("struct Leaf:\n    var val: String\n    var sib: String\n\n")
+	for d := depth - 1; d >= 1; d-- {
+		sb.WriteString(fmt.Sprintf("struct L%d:\n    var inner: %s\n\n", d, func() string {
+			if d == depth-1 {
+				return "Leaf"
+			}
+			return fmt.Sprintf("L%d", d+1)
+		}()))
+	}
+
+	chainInit := "Leaf { val: String::from(\"leaf\"), sib: String::from(\"sib\") }"
+	for d := depth - 1; d >= 1; d-- {
+		chainInit = fmt.Sprintf("L%d { inner: %s }", d, chainInit)
+	}
+
+	rootType := "Leaf"
+	if depth > 1 {
+		rootType = "L1"
+	}
+
+	var leafPath strings.Builder
+	var sibPath strings.Builder
+	leafPath.WriteString("root")
+	sibPath.WriteString("root")
+	for d := 1; d < depth; d++ {
+		leafPath.WriteString(".inner")
+		sibPath.WriteString(".inner")
+	}
+	leafPath.WriteString(".val")
+	sibPath.WriteString(".sib")
+
+	sb.WriteString(fmt.Sprintf("fn consume_root(r: %s) -> u64:\n    return 1u64\n\n", rootType))
+	sb.WriteString("fn main() -> u64:\n")
+	sb.WriteString(fmt.Sprintf("    var root = %s\n", chainInit))
+	sb.WriteString(fmt.Sprintf("    let moved = %s\n", leafPath.String()))
+	if reinitLeaf {
+		sb.WriteString(fmt.Sprintf("    %s = String::from(\"restored\")\n", leafPath.String()))
+	}
+	if useLeafAfterMove {
+		sb.WriteString(fmt.Sprintf("    return %s.len()\n", leafPath.String()))
+	} else if readWholeAfterMove {
+		sb.WriteString("    return moved.len() + consume_root(root)\n")
+	} else if readSiblingAfterMove {
+		sb.WriteString(fmt.Sprintf("    return moved.len() + %s.len()\n", sibPath.String()))
+	} else {
+		sb.WriteString("    return moved.len()\n")
+	}
+	return sb.String()
+}
+
+// TestPhase2B11DeepNestedStructTracking 验证消除深度截断限制后 1/8/9/16/24 层嵌套结构体的精确部分移动与重初始化恢复。
+func TestPhase2B11DeepNestedStructTracking(t *testing.T) {
+	depths := []int{1, 8, 9, 16, 24}
+	for _, d := range depths {
+		label := fmt.Sprintf("Depth%d", d)
+		assertFailCode(t, label+"MovedLeafReadRejected", buildDeepStructProgram(d, true, false, false, false), "WON-MEM-001")
+		assertFailCode(t, label+"WholeStructAfterLeafMoveRejected", buildDeepStructProgram(d, false, true, false, false), "WON-MEM-001")
+		assertPass(t, label+"SiblingReadAllowed", buildDeepStructProgram(d, false, false, true, false))
+		assertPass(t, label+"ReinitRestoresWholeStruct", buildDeepStructProgram(d, false, true, false, true))
+
+		// 确定性复验
+		src := buildDeepStructProgram(d, false, true, false, false)
+		rep1, _ := runCheck(src).ToJSON()
+		rep2, _ := runCheck(src).ToJSON()
+		if rep1 != rep2 {
+			t.Fatalf("%s 重复分析诊断 JSON 不一致:\n1:%s\n2:%s", label, rep1, rep2)
+		}
+	}
+
+	// 通过 &Option / &Node 间接递归引用结构体不得导致惰性字段展开栈溢出
+	assertPass(t, "RecursiveIndirectedStructSafe", `
+enum NextNode:
+    End
+    More(&Node)
+
+struct Node:
+    head: String
+    next: NextNode
+
+fn inspect(n: &Node) -> u64:
+    return n.head.len()
+`)
+}
+
+// TestPhase2B11MatchArmOwnership 验证 match 按分支独立降维（纯引用 vs 按值移动 vs 混合分支 vs 部分字段解构 vs 守卫落空）。
+func TestPhase2B11MatchArmOwnership(t *testing.T) {
+	assertPass(t, "RefOnlyMatchPreservesSubject", `
+enum OptStr:
+    Some(String)
+    None
+
+fn use_opt(o: OptStr) -> u64:
+    return 1u64
+
+fn main() -> u64:
+    let opt = OptStr::Some(String::from("hello"))
+    let n = match opt:
+        OptStr::Some(ref r) => r.len()
+        OptStr::None => 0u64
+    return n + use_opt(opt)
+`)
+
+	assertFailCode(t, "ByValueMatchMovesSubject", `
+enum OptStr:
+    Some(String)
+    None
+
+fn eat(s: String) -> u64:
+    return s.len()
+
+fn use_opt(o: OptStr) -> u64:
+    return 1u64
+
+fn main() -> u64:
+    let opt = OptStr::Some(String::from("bye"))
+    let n = match opt:
+        OptStr::Some(v) => eat(v)
+        OptStr::None => 0u64
+    return n + use_opt(opt)
+`, "WON-MEM-001")
+
+	assertFailCode(t, "MixedRefAndByValueArmMarksPossiblyMoved", `
+enum OptStr:
+    Some(String)
+    None
+
+fn eat(s: String) -> u64:
+    return s.len()
+
+fn main() -> u64:
+    let opt = OptStr::Some(String::from("mix"))
+    let flag = true
+    let n = match opt:
+        OptStr::Some(ref r) if flag => r.len()
+        OptStr::Some(v) => eat(v)
+        OptStr::None => 0u64
+    let again = match opt:
+        OptStr::Some(v) => eat(v)
+        OptStr::None => 0u64
+    return n + again
+`, "WON-MEM-001")
+
+	assertPass(t, "ReinitVarSubjectAfterMovingMatchAllowed", `
+enum OptStr:
+    Some(String)
+    None
+
+fn eat(s: String) -> u64:
+    return s.len()
+
+fn main() -> u64:
+    var opt = OptStr::Some(String::from("first"))
+    let n = match opt:
+        OptStr::Some(v) => eat(v)
+        OptStr::None => 0u64
+    opt = OptStr::Some(String::from("second"))
+    let m = match opt:
+        OptStr::Some(ref r) => r.len()
+        OptStr::None => 0u64
+    return n + m
+`)
+
+	assertPass(t, "DirectStructPatternPartialMovePreservesRefField", `
+struct PairStr:
+    a: String
+    b: String
+
+fn eat(s: String) -> u64:
+    return s.len()
+
+fn main() -> u64:
+    let pair = PairStr { a: String::from("aa"), b: String::from("bb") }
+    let x = match pair:
+        PairStr { a, b: ref rb } => eat(a) + rb.len()
+    return x + pair.b.len()
+`)
+
+	assertFailCode(t, "DirectStructPatternMovedFieldAndWholeAggregateRejected", `
+struct PairStr:
+    a: String
+    b: String
+
+fn eat(s: String) -> u64:
+    return s.len()
+
+fn sink_pair(p: PairStr) -> u64:
+    return p.b.len()
+
+fn main() -> u64:
+    let pair = PairStr { a: String::from("aa"), b: String::from("bb") }
+    let _x = match pair:
+        PairStr { a, b: ref rb } => eat(a) + rb.len()
+    return sink_pair(pair)
+`, "WON-MEM-001")
+
+	assertPass(t, "GuardRefArmFallthroughToWildcardPreservesSubject", `
+enum OptStr:
+    Some(String)
+    None
+
+fn sink(o: OptStr) -> u64:
+    return 1u64
+
+fn main() -> u64:
+    let opt = OptStr::Some(String::from("guard"))
+    let len = match opt:
+        OptStr::Some(ref r) if r.len() > 2u64 => r.len()
+        _ => 0u64
+    return len + sink(opt)
+`)
+
+	assertFailCode(t, "MoveOutOfRefMatchedStructRejected", `
+struct BoxStr:
+    inner: String
+
+fn steal(b: &BoxStr) -> String:
+    return match b:
+        BoxStr { inner } => inner
+`, "WON-MEM-008")
 }

@@ -48,6 +48,9 @@ func (tp *TypedProgram) CallTarget(expr ast.Expr) *symbols.Symbol { return tp.Ca
 // FieldRef 实现 cfg.SemanticView 接口，查询成员访问解析到的字段元数据。
 func (tp *TypedProgram) FieldRef(node ast.Node) *symbols.FieldInfo { return tp.FieldRefs[node] }
 
+// VariantRef 实现 cfg.SemanticView 接口，查询模式或构造器解析到的枚举变体元数据。
+func (tp *TypedProgram) VariantRef(node ast.Node) *symbols.VariantInfo { return tp.VariantRefs[node] }
+
 // NewTypedProgram 创建初始类型化语义结果容器
 func NewTypedProgram(prog *ast.Program, tctx *types.Context, symTab *symbols.Table) *TypedProgram {
 	return &TypedProgram{

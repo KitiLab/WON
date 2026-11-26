@@ -2,7 +2,8 @@
 
 > **Specification Version**: Draft 0.2.1 (Phase 2B.0.1 Design Closure; ADR-011 Approved)  
 > **Status**: `SPECIFIED` (Architectural Direction **ACCEPTED** via [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) & [Owner Approval](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md))  
-> **Compiler Implementation Status**: Phase 2B.1 (`CFG`, `@derive(Copy)`, Uninitialized `let`/`var`, Move/Init) Authorized; Phase 2B.2 (`Borrow`/`NLL`/`Provenance`) & Phase 2B.3 (`Drop`) Remain `SPECIFIED` / Unimplemented  
+> **Compiler Implementation Status**: Phase 2B.1 / 2B.1.1 (`Ownership CFG`, `@derive(Copy)`, Uninitialized `let`/`var`, Unbounded Lazy Field Tracking, Per-Arm `match` Lowering, Fail-Closed `WON-INT-001` & Move/Init) `IMPLEMENTED`; Phase 2B.2 (`Borrow`/`NLL`/`Provenance`) & Phase 2B.3 (`Drop`) Remain `SPECIFIED` / Unimplemented  
+> **Architecture & Closure Details**: [phase-2b.0-ownership-architecture.md](../compiler/phase-2b.0-ownership-architecture.md), [phase-2b.1.1-cfg-soundness-closure.md](../compiler/phase-2b.1.1-cfg-soundness-closure.md)
 > **Governing Architecture**: [Phase 2B.0 / 2B.0.1 Ownership Architecture](../compiler/phase-2b.0-ownership-architecture.md)  
 > **Related Core Spec**: [Ownership and Memory Overview](ownership-and-memory.md), [Syntax & Grammar](syntax-and-grammar.md), [ADR-003](../decisions/ADR-003-ownership-lite-memory-model.md)
 
@@ -441,12 +442,13 @@ fn unsafe_ffi_example(sz: u64):
 
 ## 11. Implementation-Status Summary Across All Examples
 
-| Group / IDs | Normative Outcome | Current Parser (`wonc`) | Current Semantic Checker (`2A.2.1`) | Current C11 Backend | Target Enforcement Milestone |
+| Group / IDs | Normative Outcome | Current Parser (`wonc`) | Current Semantic + Ownership (`2B.1.1`) | Current C11 Backend | Target Enforcement Milestone |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `A1`, `A2`, `A4` (`@derive(Copy)`) | `PASS` (`A1`), `REJECT` (`A2` `011`, `A4` `010`) | Not parsable (no `@` token) | N/A | `WON-GEN-002` | Phase 2B.1 |
+| `A1`, `A2`, `A4` (`@derive(Copy)`) | `PASS` (`A1`), `REJECT` (`A2` `011`, `A4` `010`) | `IMPLEMENTED` | **`IMPLEMENTED` (`WON-MEM-011`)** | `WON-GEN-002` (non-scalar) | `IMPLEMENTED` (Phase 2B.1) |
 | `A3`, `N3` (`impl Drop`) | `REJECT` (`WON-MEM-011` / `WON-MEM-007`) | Parses `impl Drop` | `WON-SEM-010` (`impl Trait`) | `WON-GEN-002` | Trait Milestone |
-| `A5`, `A6`, `A8`–`A10`, `A11`–`A14`, `N1`, `N2`, `N4`–`N7` | `PASS` / Exact `WON-MEM-*` | `IMPLEMENTED` (Parses cleanly) | Typechecks (`String`, `struct`, `&`/`&mut`, `u64` `.len()`) without borrow pass | `WON-GEN-002` (`String`/refs/`struct`) | Phase 2B.1 (`001`/`008`) & 2B.2 (`002`–`006`) |
-| `A15`–`A19` (Drop / Drop Flags) | `PASS` (exact cleanup order) | `IMPLEMENTED` (Parses cleanly) | Typechecks cleanly | `WON-GEN-002` | Phase 2B.3 & 2C |
-| `N9` (Uninit `let x: T`) | `REJECT: WON-MEM-010` | Rejected `WON-SYN-009` (needs `=` ext) | N/A | N/A | Phase 2B.1 |
-| `A20`, `A21` (`scope` / `s.spawn`) | `PASS` (guarded by `Send`/`Sync`) | `IMPLEMENTED` (Parses cleanly) | `WON-SEM-010` | `WON-GEN-002` | Separate Concurrency Milestone (Phase 3) |
+| `A5`, `A6`, `A11`–`A14`, `N1`, `N2`, `N7` | `PASS` / Exact `WON-MEM-*` | `IMPLEMENTED` | **`IMPLEMENTED` (`WON-MEM-001` / `008`)** | `WON-GEN-002` (`String`/refs/`struct`) | `IMPLEMENTED` (Phase 2B.1 / 2B.1.1) |
+| `A8`–`A10`, `N4`–`N6` (Borrow/NLL/Provenance) | `PASS` / Exact `WON-MEM-*` | `IMPLEMENTED` | Typechecks without borrow conflict solver | `WON-GEN-002` | Phase 2B.2 (`002`–`006`) |
+| `A15`–`A19` (Drop / Drop Flags) | `PASS` (exact cleanup order) | `IMPLEMENTED` | Typechecks cleanly | `WON-GEN-002` | Phase 2B.3 & 2C |
+| `N9` (Uninit `let x: T`) | `REJECT: WON-MEM-010` | `IMPLEMENTED` | **`IMPLEMENTED` (`WON-MEM-010`)** | Active for supported scalars (`WON-GEN-002` otherwise) | `IMPLEMENTED` (Phase 2B.1) |
+| `A20`, `A21` (`scope` / `s.spawn`) | `PASS` (guarded by `Send`/`Sync`) | `IMPLEMENTED` | `WON-SEM-010` | `WON-GEN-002` | Separate Concurrency Milestone (Phase 3) |
 | `A22`, `N8` (`WON-MUT-001`, `WON-SEC-001/002`) | `REJECT` | `IMPLEMENTED` | **`IMPLEMENTED` (Active Today)** | Active Gate | Active Today (`2A.2.1`) |

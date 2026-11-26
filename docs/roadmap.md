@@ -104,10 +104,10 @@ The implementation roadmap adheres to strict technical dependency ordering acros
   - **2B.0 / 2B.0.1 (Ownership Architecture & Design Closure)**: Closed design for Ownership-CFG (`Place`, `Loan`, NLL region liveness, `@derive(Copy)` policy, `Static` literal provenance without `'a`/`'static` syntax, Strategy B candidate-origin return provenance, deterministic left-to-right method receiver borrowing, `WON-MEM-001`..`011` matrix, and Drop elaboration contract).
     - *Deliverables*: [phase-2b.0-ownership-architecture.md](compiler/phase-2b.0-ownership-architecture.md), [ownership-and-borrowing.md](language-spec/ownership-and-borrowing.md), [ADR-011](decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`ACCEPTED`), [OWNER-APPROVAL-ADR-011-2026-11-25.md](decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md).
     - *Status*: `IMPLEMENTED` (Governance & Design Ratified Nov 25, 2026).
-  - **2B.1 (Ownership CFG, `@derive(Copy)`, Uninitialized `let`/`var` & Move/Init Analysis)**:
-    - *Objective*: Implement `@derive(Copy)` & uninitialized simple `let`/`var` extensions, `internal/cfg` (`Place`, `Projection`, `BasicBlock`), and definite-initialization, move, reinitialization, non-`Drop` partial-move, and loop fixed-point analysis (`WON-MEM-001`, `008`, `010`, `011`).
-    - *Deliverables*: `internal/cfg`, `internal/borrow`, `@derive(Copy)` & uninit `let`/`var` in lexer/parser/types/checker/codegen, fuzz + CLI C11 tests.
-    - *Status*: `IMPLEMENTED` (Verified in local suite & CI).
+  - **2B.1 / 2B.1.1 (Ownership CFG, `@derive(Copy)`, Uninitialized `let`/`var`, Move/Init & Fail-Closed Closure)**:
+    - *Objective*: Implement `@derive(Copy)` & uninitialized simple `let`/`var` extensions, `internal/cfg` (`Place`, `Projection`, `BasicBlock`), definite-initialization, move, reinitialization, non-`Drop` partial-move, and loop fixed-point analysis (`WON-MEM-001`, `008`, `010`, `011`), plus Phase 2B.1.1 hardening (unbounded lazy struct field tracking, fail-closed `WON-INT-001` invariants & `OwnershipChecked` codegen gate, per-arm `match` lowering, and AST-to-CFG exhaustiveness coverage).
+    - *Deliverables*: `internal/cfg`, `internal/borrow`, [phase-2b.1.1-cfg-soundness-closure.md](compiler/phase-2b.1.1-cfg-soundness-closure.md), `@derive(Copy)` & uninit `let`/`var` in lexer/parser/types/checker/codegen, fuzz + CLI C11 tests.
+    - *Status*: `IMPLEMENTED` (Verified in local suite; CI check pending on commit push).
   - **2B.2 (Next Implementation Milestone — Borrow, NLL Regions & Candidate Provenance — Planned)**:
     - *Objective*: Shared/exclusive loan conflict checking, disjoint field splitting, reborrowing, NLL liveness, Strategy B candidate-origin provenance, and abstract-boundary `WON-MEM-002..006`.
     - *Status*: `SPECIFIED` / `PLANNED` (Next milestone).

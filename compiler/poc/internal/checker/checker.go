@@ -61,10 +61,12 @@ func (c *Checker) CheckProgram(prog *ast.Program) *TypedProgram {
 
 	// Stage 4: Phase 2B.1 所有权 CFG 构建与确定性初始化 / Move 数据流校验
 	if !c.report.HasErrors() {
-		progCFG := cfg.BuildProgram(prog, c.typed)
-		borrow.AnalyzeProgram(progCFG, c.typed, c.report)
+		progCFG := cfg.BuildProgram(prog, c.typed, c.report)
 		c.typed.CFG = progCFG
-		c.typed.OwnershipChecked = true
+		if !c.report.HasErrors() {
+			borrow.AnalyzeProgram(progCFG, c.typed, c.report)
+		}
+		c.typed.OwnershipChecked = !c.report.HasErrors()
 	}
 
 	// Stage 5: 若尚未存在语义/词法/所有权错误，执行严谨的 C11 后端能力契约审核 (WON-GEN-002 边界)

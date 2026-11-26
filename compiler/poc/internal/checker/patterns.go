@@ -392,7 +392,9 @@ func (c *Checker) checkStructPatternFields(ownerName string, fieldMap map[string
 			sym := c.symbols.AllocSymbol(symbols.SymVar, fp.Name, fp.Span)
 			sym.Type = ft
 			sym.Defined = true
+			sym.DeclHasInit = true
 			scope.Insert(sym)
+			c.symbols.NodeSymbols[fp] = sym
 		}
 	}
 	return allSimple

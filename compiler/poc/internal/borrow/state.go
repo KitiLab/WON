@@ -1,9 +1,10 @@
 // Package borrow 实现了 WON Phase 2B.1 所有权数据流分析器（确定性初始化、移动、重初始化与部分移动校验）。
-// 本阶段基于 internal/cfg 与有限三比特格 (Uninit/Init/Moved 集合) 在控制流图上做单调不动点求解，
-// 为 Phase 2B.2 借用/NLL 区域求解及 Phase 2B.3 析构插入保留清晰边界。
+// 本阶段基于 internal/cfg 与有限三比特格 (CanBeUninit / CanBeInit / CanBeMoved) 在控制流图上做单调不动点求解，
+// 采用按路径按需惰性结构体字段展开，消除任意固定深度限制并保持严格快速失败 (fail-closed) 语义。
 package borrow
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
@@ -25,40 +26,70 @@ type PlaceState struct {
 
 type funcEnv map[symbols.SymbolID]*PlaceState
 
-func newPlaceState(t types.TypeID, declSpan diagnostic.Span, initNow bool, symTab *symbols.Table, tctx *types.Context) *PlaceState {
-	st := &PlaceState{
+func newPlaceState(t types.TypeID, declSpan diagnostic.Span, initNow bool) *PlaceState {
+	return &PlaceState{
 		CanBeUninit: !initNow,
 		CanBeInit:   initNow,
 		DeclSpan:    declSpan,
 		Type:        t,
 	}
-	initStructFieldsIfAny(st, t, initNow, declSpan, symTab, tctx, 0)
-	return st
 }
 
-func initStructFieldsIfAny(st *PlaceState, t types.TypeID, initNow bool, declSpan diagnostic.Span, symTab *symbols.Table, tctx *types.Context, depth int) {
-	if st == nil || t == types.Invalid || tctx == nil || symTab == nil || depth > 8 {
-		return
+// uniformChild 根据父节点当前的统一状态构造尚未惰性展开的子字段状态快照。
+func (ps *PlaceState) uniformChild(fieldType types.TypeID) *PlaceState {
+	child := &PlaceState{
+		CanBeUninit: ps.CanBeUninit,
+		CanBeInit:   ps.CanBeInit,
+		CanBeMoved:  ps.CanBeMoved,
+		DeclSpan:    ps.DeclSpan,
+		Type:        fieldType,
 	}
-	info := tctx.Info(t)
-	if info.Kind != types.KindStruct || len(info.GenericArgs) > 0 {
-		return
+	if len(ps.MoveSpans) > 0 {
+		child.MoveSpans = make([]diagnostic.Span, len(ps.MoveSpans))
+		copy(child.MoveSpans, ps.MoveSpans)
+	}
+	return child
+}
+
+// expandDirectFields 仅对当前结构体节点的直接子字段执行一层惰性展开，
+// 不设固定递归深度限制，也不因前向预展开循环结构体而触发栈溢出。
+func (ps *PlaceState) expandDirectFields(symTab *symbols.Table, tctx *types.Context) error {
+	if ps == nil {
+		return fmt.Errorf("内部状态为空指针")
+	}
+	if ps.Fields != nil {
+		return nil
+	}
+	if ps.Type == types.Invalid || tctx == nil || symTab == nil {
+		return fmt.Errorf("结构体字段展开缺少有效类型上下文 (type=%d)", ps.Type)
+	}
+	info := tctx.Info(ps.Type)
+	if info.Kind != types.KindStruct {
+		return fmt.Errorf("对非结构体类型 '%s' 请求字段展开", tctx.Format(ps.Type))
 	}
 	sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]
-	if sym == nil || len(sym.Fields) == 0 {
-		return
+	if sym == nil {
+		return fmt.Errorf("结构体类型 '%s' (symID=%d) 在符号表中缺失", tctx.Format(ps.Type), info.SymbolID)
 	}
-	st.Fields = make(map[string]*PlaceState, len(sym.Fields))
-	for _, f := range sym.Fields {
-		fst := &PlaceState{
-			CanBeUninit: !initNow,
-			CanBeInit:   initNow,
-			DeclSpan:    declSpan,
-			Type:        f.Type,
+
+	// 支持泛型实例化结构体字段类型替换
+	var subst map[uint64]types.TypeID
+	if len(sym.GenericParamIDs) > 0 && len(sym.GenericParamIDs) == len(info.GenericArgs) {
+		subst = make(map[uint64]types.TypeID, len(info.GenericArgs))
+		for i, gid := range sym.GenericParamIDs {
+			subst[uint64(gid)] = info.GenericArgs[i]
 		}
-		initStructFieldsIfAny(fst, f.Type, initNow, declSpan, symTab, tctx, depth+1)
-		st.Fields[f.Name] = fst
 	}
+
+	ps.Fields = make(map[string]*PlaceState, len(sym.Fields))
+	for _, f := range sym.Fields {
+		ft := f.Type
+		if subst != nil {
+			ft = tctx.Substitute(ft, subst)
+		}
+		ps.Fields[f.Name] = ps.uniformChild(ft)
+	}
+	return nil
 }
 
 func (ps *PlaceState) clone() *PlaceState {
@@ -93,7 +124,8 @@ func cloneEnv(env funcEnv) funcEnv {
 	return cp
 }
 
-// markMoved 将当前节点及其全部子字段统一置为明确 Moved 状态并记录移出源码位置。
+// markMoved 将当前节点及其已展开的全部子字段统一置为明确 Moved 状态，
+// 后续若再访问更深层未展开字段，将从该节点的 Moved 状态继承。
 func (ps *PlaceState) markMoved(span diagnostic.Span) {
 	if ps == nil {
 		return
@@ -107,7 +139,7 @@ func (ps *PlaceState) markMoved(span diagnostic.Span) {
 	}
 }
 
-// markInit 将当前节点及其全部子字段统一恢复为明确已初始化状态。
+// markInit 将当前节点及其全部子字段恢复为明确已初始化状态。
 func (ps *PlaceState) markInit() {
 	if ps == nil {
 		return
@@ -121,7 +153,8 @@ func (ps *PlaceState) markInit() {
 	}
 }
 
-// summaryState 递归汇总结构体叶子字段（或标量自身）的聚合状态，用于校验整块聚合读取与移动。
+// summaryState 迭代/递归汇总节点的精确可达状态；
+// 对已展开子字段的聚合体，采用确定性键序汇总全部直接子字段（含自身层），禁止遗漏深层局部移动。
 func (ps *PlaceState) summaryState() (canUninit, canInit, canMoved bool, moveSpans []diagnostic.Span) {
 	if ps == nil {
 		return false, false, false, nil
@@ -159,7 +192,8 @@ func (ps *PlaceState) summaryState() (canUninit, canInit, canMoved bool, moveSpa
 	return canUninit, canInit, canMoved, moveSpans
 }
 
-// joinPlaceState 按格上确界逐位合并两个状态，确保控制流合并点不丢失任何路径原因。
+// joinPlaceState 按格上确界逐位合并两个状态；若仅一侧惰性展开了 Fields，
+// 将另一侧的统一节点语义下推并合并至每个已展开子字段，确保合流点严密无损、满足交换律与结合律。
 func joinPlaceState(a, b *PlaceState) *PlaceState {
 	if a == nil {
 		return b.clone()
@@ -187,18 +221,35 @@ func joinPlaceState(a, b *PlaceState) *PlaceState {
 		res.MoveSpans = appendUniqueSpan(res.MoveSpans, sp)
 	}
 
-	if len(a.Fields) > 0 || len(b.Fields) > 0 {
-		res.Fields = make(map[string]*PlaceState, len(a.Fields)+len(b.Fields))
-		for k, fa := range a.Fields {
-			if fb, ok := b.Fields[k]; ok {
+	if a.Fields != nil || b.Fields != nil {
+		capHint := len(a.Fields)
+		if len(b.Fields) > capHint {
+			capHint = len(b.Fields)
+		}
+		res.Fields = make(map[string]*PlaceState, capHint)
+		if a.Fields != nil {
+			for k, fa := range a.Fields {
+				var fb *PlaceState
+				if b.Fields != nil {
+					fb = b.Fields[k]
+				} else {
+					fb = b.uniformChild(fa.Type)
+				}
 				res.Fields[k] = joinPlaceState(fa, fb)
-			} else {
-				res.Fields[k] = fa.clone()
 			}
 		}
-		for k, fb := range b.Fields {
-			if _, ok := res.Fields[k]; !ok {
-				res.Fields[k] = fb.clone()
+		if b.Fields != nil {
+			for k, fb := range b.Fields {
+				if _, done := res.Fields[k]; done {
+					continue
+				}
+				var fa *PlaceState
+				if a.Fields != nil {
+					fa = a.Fields[k]
+				} else {
+					fa = a.uniformChild(fb.Type)
+				}
+				res.Fields[k] = joinPlaceState(fa, fb)
 			}
 		}
 	}
@@ -225,20 +276,47 @@ func equalPlaceState(a, b *PlaceState) bool {
 	if a.CanBeUninit != b.CanBeUninit || a.CanBeInit != b.CanBeInit || a.CanBeMoved != b.CanBeMoved {
 		return false
 	}
-	if len(a.MoveSpans) != len(b.MoveSpans) {
+	if !equalSpanSlices(a.MoveSpans, b.MoveSpans) {
 		return false
 	}
-	for i := range a.MoveSpans {
-		if a.MoveSpans[i] != b.MoveSpans[i] {
+	if a.Fields == nil && b.Fields == nil {
+		return true
+	}
+	if a.Fields != nil && b.Fields != nil {
+		if len(a.Fields) != len(b.Fields) {
+			return false
+		}
+		for k, fa := range a.Fields {
+			fb, ok := b.Fields[k]
+			if !ok || !equalPlaceState(fa, fb) {
+				return false
+			}
+		}
+		return true
+	}
+	// 当仅一侧展开时，校验所有已展开子字段是否与未展开父节点一致
+	if a.Fields != nil {
+		for _, fa := range a.Fields {
+			if !equalPlaceState(fa, b.uniformChild(fa.Type)) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, fb := range b.Fields {
+		if !equalPlaceState(a.uniformChild(fb.Type), fb) {
 			return false
 		}
 	}
-	if len(a.Fields) != len(b.Fields) {
+	return true
+}
+
+func equalSpanSlices(a, b []diagnostic.Span) bool {
+	if len(a) != len(b) {
 		return false
 	}
-	for k, fa := range a.Fields {
-		fb, ok := b.Fields[k]
-		if !ok || !equalPlaceState(fa, fb) {
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

@@ -278,6 +278,17 @@ func runBuild(args []string) {
 		typedProg = chk.CheckProgram(prog)
 	}
 
+	if !report.HasErrors() && typedProg != nil && !typedProg.OwnershipChecked {
+		report.AddDiagnostic(diagnostic.Diagnostic{
+			Code:        "WON-INT-001",
+			Severity:    "error",
+			Message:     "所有权 CFG 分析未通过内部一致性认证 (OwnershipChecked=false)，拒绝生成 C11 代码",
+			File:        srcFile,
+			Span:        prog.GetSpan(),
+			Explanation: "编译器遵循 Fail-Closed 原则，在所有权分析未完整通过前绝不生成目标 C 代码。",
+		})
+	}
+
 	if !report.HasErrors() && typedProg != nil && !typedProg.CodegenSupported {
 		report.AddDiagnostic(diagnostic.Diagnostic{
 			Code:        "WON-GEN-002",

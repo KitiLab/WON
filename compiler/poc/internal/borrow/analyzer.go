@@ -15,7 +15,8 @@ type diagDedupKey struct {
 	byte int
 }
 
-// AnalyzeProgram 对全程序所有权 CFG 运行确定性初始化与移动数据流分析，向 report 写入 WON-MEM-* / WON-MUT-001 诊断。
+// AnalyzeProgram 对全程序所有权 CFG 运行确定性初始化与移动数据流分析。
+// 遵循严格 Fail-Closed 原则：内部 CFG/状态不变量违例触发 WON-INT-001，绝不静默放行。
 func AnalyzeProgram(progCFG *cfg.ProgramCFG, view cfg.SemanticView, report *diagnostic.Report) {
 	if progCFG == nil || view == nil || report == nil {
 		return
@@ -29,24 +30,36 @@ func analyzeFunction(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.
 	if fn == nil || len(fn.Blocks) == 0 || fn.Entry < 0 {
 		return
 	}
+	maxIterations := len(fn.Blocks)*(len(fn.Locals)*8+64) + 256
+	analyzeFunctionWithBudget(fn, view, report, maxIterations)
+}
+
+func analyzeFunctionWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report, maxIterations int) {
+	if fn == nil || len(fn.Blocks) == 0 || fn.Entry < 0 {
+		return
+	}
 
 	reachable := computeReachable(fn)
 	inStates := make([]funcEnv, len(fn.Blocks))
 	outStates := make([]funcEnv, len(fn.Blocks))
 
-	// 使用确定性固定点工作表迭代直至所有可达基本块入口/出口格状态收敛
-	maxIterations := len(fn.Blocks)*(len(fn.Locals)*8+64) + 256
+	// 使用基于可达工作表的单调有限格迭代直至全部可达基本块状态收敛
 	changed := true
 	iters := 0
 	for changed {
 		iters++
 		if iters > maxIterations {
+			var fnSpan diagnostic.Span
+			if fn.Decl != nil {
+				fnSpan = fn.Decl.GetSpan()
+			}
 			report.AddDiagnostic(diagnostic.Diagnostic{
-				Code:     "WON-MEM-001",
-				Severity: "error",
-				Message:  fmt.Sprintf("函数 '%s' 所有权数据流不动点迭代未收敛，编译器拒绝静默放行", fn.Name),
-				File:     fn.Decl.GetSpan().File,
-				Span:     fn.Decl.GetSpan(),
+				Code:        "WON-INT-001",
+				Severity:    "error",
+				Message:     fmt.Sprintf("所有权数据流不动点迭代在函数 '%s' 中超过安全上限 (%d 轮) 仍未收敛", fn.Name, maxIterations),
+				File:        fnSpan.File,
+				Span:        fnSpan,
+				Explanation: "此错误表示编译器内部格传递函数或工作表在给定 CFG 上未按预期单调收敛；编译器按 Fail-Closed 原则拒绝认证该函数。",
 			})
 			return
 		}
@@ -72,7 +85,7 @@ func analyzeFunction(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.
 
 			inStates[bb] = merged
 			cur := cloneEnv(merged)
-			transferBlock(blk, cur, view, nil, nil)
+			transferBlock(fn.Name, blk, cur, view, nil, nil)
 
 			if outStates[bb] == nil || !equalEnvs(outStates[bb], cur) {
 				outStates[bb] = cur
@@ -89,7 +102,7 @@ func analyzeFunction(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.
 			continue
 		}
 		cur := cloneEnv(inStates[bb])
-		transferBlock(blk, cur, view, report, emitted)
+		transferBlock(fn.Name, blk, cur, view, report, emitted)
 	}
 }
 
@@ -113,37 +126,77 @@ func computeReachable(fn *cfg.FuncCFG) []bool {
 	return reach
 }
 
-func transferBlock(blk *cfg.BasicBlock, env funcEnv, view cfg.SemanticView, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
+func emitInternalViolation(fnName string, span diagnostic.Span, place cfg.Place, detail string, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
+	if report == nil {
+		return
+	}
+	emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+		Code:        "WON-INT-001",
+		Severity:    "error",
+		Message:     fmt.Sprintf("所有权 CFG 内部不变量违例 (函数 '%s', 位置 '%s'): %s", fnName, formatPlaceDisplay(place), detail),
+		File:        span.File,
+		Span:        span,
+		Explanation: fmt.Sprintf("编译器未能为已解析符号 #%d (%s) 维护完整的 CFG 所有权状态，按 Fail-Closed 策略拒绝认证该程序。", place.RootSymID, place.RootName),
+	})
+}
+
+func transferBlock(fnName string, blk *cfg.BasicBlock, env funcEnv, view cfg.SemanticView, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
 	symTab := view.GetSymbols()
 	tctx := view.GetTypes()
 
 	for _, st := range blk.Statements {
 		switch st.Kind {
-		case cfg.OpUninitDecl:
-			if st.Place.RootSymID != 0 {
-				env[st.Place.RootSymID] = newPlaceState(st.Type, st.Span, false, symTab, tctx)
-			}
+		case cfg.OpScopeEnter, cfg.OpNop:
+			continue
 
-		case cfg.OpInitAssign, cfg.OpStorageDecl:
-			if st.Place.RootSymID != 0 {
-				env[st.Place.RootSymID] = newPlaceState(st.Type, st.Span, true, symTab, tctx)
-			}
-
-		case cfg.OpScopeExit:
-			// 注意：局部绑定超出作用域时从当前流映射清除状态以减少状态空间
+		case cfg.OpStorageDead:
 			for _, sid := range st.Locals {
 				delete(env, sid)
 			}
 
+		case cfg.OpScopeExit:
+			for _, sid := range st.Locals {
+				delete(env, sid)
+			}
+
+		case cfg.OpUninitDecl:
+			if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil {
+				emitInternalViolation(fnName, st.Span, st.Place, "OpUninitDecl 缺少有效 SymbolID", report, emitted)
+				continue
+			}
+			env[st.Place.RootSymID] = newPlaceState(st.Type, st.Span, false)
+
+		case cfg.OpInitAssign, cfg.OpStorageDecl:
+			if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil {
+				emitInternalViolation(fnName, st.Span, st.Place, fmt.Sprintf("%s 缺少有效 SymbolID", st.Kind), report, emitted)
+				continue
+			}
+			env[st.Place.RootSymID] = newPlaceState(st.Type, st.Span, true)
+
 		case cfg.OpRead, cfg.OpCopy:
-			checkReadablePlace(env, st.Place, st.Span, symTab, report, emitted)
+			checkReadablePlace(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
+
+		case cfg.OpBorrowShared, cfg.OpBorrowMut, cfg.OpReborrow:
+			// Phase 2B.1 保留事件：借用冲突检查留待 Phase 2B.2，但仍严格要求被借用根符号拥有合法 CFG 状态
+			if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil || env[st.Place.RootSymID] == nil {
+				emitInternalViolation(fnName, st.Span, st.Place, fmt.Sprintf("%s 引用了未在 CFG 环境中追踪的位置", st.Kind), report, emitted)
+			}
+
+		case cfg.OpReturn:
+			if st.Place.RootSymID != 0 {
+				if symTab.ByID[st.Place.RootSymID] == nil || env[st.Place.RootSymID] == nil {
+					emitInternalViolation(fnName, st.Span, st.Place, "OpReturn 引用了缺失状态的返回源位置", report, emitted)
+				}
+			}
 
 		case cfg.OpMove:
+			if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil || env[st.Place.RootSymID] == nil {
+				emitInternalViolation(fnName, st.Span, st.Place, "OpMove 缺少有效符号或未追踪的根存储状态", report, emitted)
+				continue
+			}
+
 			if st.Place.HasDeref() {
-				// 允许内部先校验指针/引用变量本身是否合法初始化，同时禁止通过解引用直接移出非 Copy 目标
-				if st.Place.RootSymID != 0 {
-					checkReadablePlace(env, st.Place.RootPlace(), st.Span, symTab, report, emitted)
-				}
+				checkReadablePlace(fnName, env, st.Place.RootPlace(), st.Span, symTab, tctx, report, emitted)
 				if report != nil {
 					emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
 						Code:        "WON-MEM-008",
@@ -158,10 +211,7 @@ func transferBlock(blk *cfg.BasicBlock, env funcEnv, view cfg.SemanticView, repo
 			}
 
 			if st.Place.HasIndex() {
-				// 保守禁止直接从数组或切片下标位置移出非 Copy 元素
-				if st.Place.RootSymID != 0 {
-					checkReadablePlace(env, st.Place.RootPlace(), st.Span, symTab, report, emitted)
-				}
+				checkReadablePlace(fnName, env, st.Place.RootPlace(), st.Span, symTab, tctx, report, emitted)
 				if report != nil {
 					emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
 						Code:        "WON-MEM-008",
@@ -175,31 +225,60 @@ func transferBlock(blk *cfg.BasicBlock, env funcEnv, view cfg.SemanticView, repo
 				continue
 			}
 
-			ok := checkReadablePlace(env, st.Place, st.Span, symTab, report, emitted)
+			ok := checkReadablePlace(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
 			if ok {
-				applyMove(env, st.Place, st.Span)
+				applyMove(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
 			}
 
 		case cfg.OpAssign, cfg.OpReinit:
-			applyAssign(env, st.Place, st.Span, symTab, tctx, report, emitted)
+			applyAssign(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
+
+		default:
+			// 对任何 Phase 2B.1 尚未接管的可执行/未知 CFG 操作一律快速失败，绝不静默跳过
+			emitInternalViolation(fnName, st.Span, st.Place, fmt.Sprintf("遇到未受支持的 CFG 操作 %s", st.Kind), report, emitted)
 		}
 	}
 }
 
-func checkReadablePlace(env funcEnv, place cfg.Place, useSpan diagnostic.Span, symTab *symbols.Table, report *diagnostic.Report, emitted map[diagDedupKey]bool) bool {
-	if place.RootSymID == 0 {
-		return true
+func checkReadablePlace(fnName string, env funcEnv, place cfg.Place, useSpan diagnostic.Span, symTab *symbols.Table, tctx *types.Context, report *diagnostic.Report, emitted map[diagDedupKey]bool) bool {
+	if place.RootSymID == 0 || symTab.ByID[place.RootSymID] == nil {
+		emitInternalViolation(fnName, useSpan, place, "读取操作指向无效或缺失的符号标识", report, emitted)
+		return false
 	}
-	rootState := env[place.RootSymID]
-	if rootState == nil {
-		return true
+	rootState, exists := env[place.RootSymID]
+	if !exists || rootState == nil {
+		emitInternalViolation(fnName, useSpan, place, "读取操作对应的局部或参数绑定在 CFG 中未初始化声明", report, emitted)
+		return false
 	}
 
-	// 若路径只读单个结构体字段，仅检查该字段（或其嵌套子结构）；若整块访问或经下标访问，聚合检查全字段
-	targetState, exactPath := lookupTargetState(rootState, place)
-	if !exactPath {
-		// 对 *ptr 或 arr[i] 读取至少保证根绑定整体已完成初始化且未被移动
-		targetState = rootState
+	var targetState *PlaceState
+	exactPath := false
+	disp := formatPlaceDisplay(place)
+
+	if fields, isFieldPath := place.FieldPath(); isFieldPath {
+		resolved, err := resolveFieldState(rootState, fields, symTab, tctx)
+		if err != nil {
+			emitInternalViolation(fnName, useSpan, place, err.Error(), report, emitted)
+			return false
+		}
+		targetState = resolved
+		exactPath = true
+	} else if place.HasDeref() || place.HasIndex() {
+		// 对 *ptr 或 arr[i] 读取需确保前缀根绑定本身已完成初始化且未被移动
+		if fieldsBefore, hasPrefixFields := fieldPrefixBeforeDerefOrIndex(place); hasPrefixFields {
+			resolved, err := resolveFieldState(rootState, fieldsBefore, symTab, tctx)
+			if err != nil {
+				emitInternalViolation(fnName, useSpan, place, err.Error(), report, emitted)
+				return false
+			}
+			targetState = resolved
+		} else {
+			targetState = rootState
+		}
+	} else {
+		// 遇到未支持的投影类型（如未实现的 ProjTupleField / ProjDowncast）立即 Fail-Closed
+		emitInternalViolation(fnName, useSpan, place, "读取位置包含当前阶段尚未支持的投影种类", report, emitted)
+		return false
 	}
 
 	canUninit, _, canMoved, moveSpans := targetState.summaryState()
@@ -208,8 +287,7 @@ func checkReadablePlace(env funcEnv, place cfg.Place, useSpan diagnostic.Span, s
 	}
 
 	if report != nil {
-		disp := formatPlaceDisplay(place)
-		if !exactPath {
+		if !exactPath && place.HasDeref() {
 			disp = place.RootName
 		}
 		if canUninit && !canMoved {
@@ -252,41 +330,50 @@ func checkReadablePlace(env funcEnv, place cfg.Place, useSpan diagnostic.Span, s
 	return false
 }
 
-func applyMove(env funcEnv, place cfg.Place, moveSpan diagnostic.Span) {
-	if place.RootSymID == 0 {
+func applyMove(fnName string, env funcEnv, place cfg.Place, moveSpan diagnostic.Span, symTab *symbols.Table, tctx *types.Context, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
+	if place.RootSymID == 0 || symTab.ByID[place.RootSymID] == nil {
+		emitInternalViolation(fnName, moveSpan, place, "Move 目标缺乏有效符号标识", report, emitted)
 		return
 	}
-	rootState := env[place.RootSymID]
-	if rootState == nil {
+	rootState, exists := env[place.RootSymID]
+	if !exists || rootState == nil {
+		emitInternalViolation(fnName, moveSpan, place, "Move 目标在 CFG 中未拥有已追踪状态", report, emitted)
 		return
 	}
-	target, exact := lookupTargetState(rootState, place)
-	if !exact || target == nil {
+	fields, ok := place.FieldPath()
+	if !ok {
+		emitInternalViolation(fnName, moveSpan, place, "Move 路径包含不支持按字段局部移出的投影类型", report, emitted)
+		return
+	}
+	target, err := resolveFieldState(rootState, fields, symTab, tctx)
+	if err != nil {
+		emitInternalViolation(fnName, moveSpan, place, err.Error(), report, emitted)
 		return
 	}
 	target.markMoved(moveSpan)
 }
 
-func applyAssign(env funcEnv, place cfg.Place, assignSpan diagnostic.Span, symTab *symbols.Table, tctx *types.Context, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
-	if place.RootSymID == 0 {
+func applyAssign(fnName string, env funcEnv, place cfg.Place, assignSpan diagnostic.Span, symTab *symbols.Table, tctx *types.Context, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
+	if place.RootSymID == 0 || symTab.ByID[place.RootSymID] == nil {
+		emitInternalViolation(fnName, assignSpan, place, "赋值操作指向无效或缺失符号", report, emitted)
 		return
 	}
 	sym := symTab.ByID[place.RootSymID]
-	rootState := env[place.RootSymID]
-	if rootState == nil {
-		rootState = newPlaceState(place.RootType, assignSpan, false, symTab, tctx)
-		env[place.RootSymID] = rootState
+	rootState, exists := env[place.RootSymID]
+	if !exists || rootState == nil {
+		emitInternalViolation(fnName, assignSpan, place, "赋值操作对应的根存储绑定在 CFG 中未预先声明", report, emitted)
+		return
 	}
 
 	// 1. 简单整变量赋值 x = val
 	if len(place.Projections) == 0 {
-		if sym != nil && !sym.IsMut {
+		if !sym.IsMut {
 			canUninit, canInit, canMoved, _ := rootState.summaryState()
 			// 未初始化的 let 绑定仅当所有到达路径均严格处于“确定未初始化”状态时，允许首次初始化赋值
 			if !canUninit || canInit || canMoved {
 				if report != nil {
 					msg := fmt.Sprintf("不能对不可变绑定 '%s' 重复赋值", place.RootName)
-					exp := fmt.Sprintf("不可变 'let' 绑定一旦在某条路径上完成初始化或已发生移动，便禁止再次赋值或重新初始化；若需跨条件重赋值请改用 'var'。")
+					exp := "不可变 'let' 绑定一旦在某条路径上完成初始化或已发生移动，便禁止再次赋值或重新初始化；若需跨条件重赋值请改用 'var'。"
 					if canMoved && !canInit {
 						msg = fmt.Sprintf("不能在所有权移动后重新初始化不可变绑定 '%s'", place.RootName)
 					} else if canUninit && (canInit || canMoved) {
@@ -318,46 +405,66 @@ func applyAssign(env funcEnv, place cfg.Place, assignSpan diagnostic.Span, symTa
 		return
 	}
 
-	// 2. 通过 *ptr 赋值或 arr[i] 赋值：先确保根绑定已初始化可读，不修改整体所有权状态
+	// 2. 通过 *ptr 赋值或 arr[i] 赋值：先确保根绑定已初始化可读，不覆盖整体所有权状态
 	if place.HasDeref() || place.HasIndex() {
-		checkReadablePlace(env, place.RootPlace(), assignSpan, symTab, report, emitted)
+		checkReadablePlace(fnName, env, place.RootPlace(), assignSpan, symTab, tctx, report, emitted)
 		return
 	}
 
-	// 3. 结构体字段部分恢复 s.field = val
-	target, exact := lookupTargetState(rootState, place)
-	if exact && target != nil {
-		target.markInit()
-		// 若顶层原处于局部 Uninit/Moved 状态而所有叶子现均 Init，清零顶层标志
-		if _, _, _, _ = rootState.summaryState(); true {
-			rootState.CanBeUninit = false
-			rootState.CanBeMoved = false
-			rootState.CanBeInit = true
-		}
-	}
-}
-
-func lookupTargetState(root *PlaceState, place cfg.Place) (*PlaceState, bool) {
+	// 3. 结构体嵌套字段部分恢复 s.f1.f2 = val（按需惰性展开任意深度的字段树）
 	fields, ok := place.FieldPath()
 	if !ok {
-		return nil, false
+		emitInternalViolation(fnName, assignSpan, place, "赋值路径包含不受支持的投影种类", report, emitted)
+		return
 	}
+	target, err := resolveFieldState(rootState, fields, symTab, tctx)
+	if err != nil {
+		emitInternalViolation(fnName, assignSpan, place, err.Error(), report, emitted)
+		return
+	}
+	target.markInit()
+}
+
+// resolveFieldState 基于惰性单层展开策略沿着字段路径向下定位精确 PlaceState，不存在任何硬编码深度限制。
+func resolveFieldState(root *PlaceState, fields []string, symTab *symbols.Table, tctx *types.Context) (*PlaceState, error) {
 	cur := root
 	for _, fName := range fields {
-		if cur == nil || len(cur.Fields) == 0 {
-			return nil, false
+		if cur == nil {
+			return nil, fmt.Errorf("字段路径 '%s' 遇到空状态节点", fName)
+		}
+		if cur.Fields == nil {
+			if err := cur.expandDirectFields(symTab, tctx); err != nil {
+				return nil, err
+			}
 		}
 		next, exists := cur.Fields[fName]
-		if !exists {
-			return nil, false
+		if !exists || next == nil {
+			return nil, fmt.Errorf("结构体状态中不存在字段 '%s'（类型 %s）", fName, tctx.Format(cur.Type))
 		}
 		cur = next
 	}
-	return cur, true
+	return cur, nil
+}
+
+func fieldPrefixBeforeDerefOrIndex(place cfg.Place) ([]string, bool) {
+	if len(place.Projections) == 0 {
+		return nil, false
+	}
+	var fields []string
+	for _, p := range place.Projections {
+		if p.Kind != cfg.ProjField {
+			break
+		}
+		fields = append(fields, p.FieldName)
+	}
+	return fields, len(fields) > 0
 }
 
 func formatPlaceDisplay(p cfg.Place) string {
 	cur := p.RootName
+	if cur == "" && p.RootSymID != 0 {
+		cur = fmt.Sprintf("#%d", p.RootSymID)
+	}
 	for _, proj := range p.Projections {
 		switch proj.Kind {
 		case cfg.ProjField:
@@ -368,6 +475,10 @@ func formatPlaceDisplay(p cfg.Place) string {
 			cur += fmt.Sprintf("[%d]", proj.ConstIndex)
 		case cfg.ProjIndex:
 			cur += "[...]"
+		case cfg.ProjTupleField:
+			cur += fmt.Sprintf(".%d", proj.FieldIndex)
+		case cfg.ProjDowncast:
+			cur += fmt.Sprintf("@v%d", proj.VariantIdx)
 		}
 	}
 	return cur

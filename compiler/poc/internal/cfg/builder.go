@@ -16,6 +16,7 @@ type SemanticView interface {
 	ExprType(expr ast.Expr) types.TypeID
 	CallTarget(expr ast.Expr) *symbols.Symbol
 	FieldRef(node ast.Node) *symbols.FieldInfo
+	VariantRef(node ast.Node) *symbols.VariantInfo
 }
 
 type scopeFrame struct {
@@ -32,18 +33,18 @@ type loopFrame struct {
 }
 
 type funcBuilder struct {
-	view       SemanticView
-	fn         *FuncCFG
-	curBB      BlockID
-	nextScope  int
-	scopes     []scopeFrame
-	loops      []loopFrame
-	declBySym  map[symbols.SymbolID]*ast.LetStmt
-	inValBlock bool
+	view      SemanticView
+	report    *diagnostic.Report
+	fn        *FuncCFG
+	curBB     BlockID
+	nextScope int
+	scopes    []scopeFrame
+	loops     []loopFrame
 }
 
 // BuildProgram 基于已完成语义检查的 AST 与 SemanticView 构建全程序所有权 CFG。
-func BuildProgram(prog *ast.Program, view SemanticView) *ProgramCFG {
+// 遇到未处理节点、缺失符号绑定或无法解析的位置时触发 WON-INT-001，绝不静默跳过。
+func BuildProgram(prog *ast.Program, view SemanticView, report *diagnostic.Report) *ProgramCFG {
 	res := &ProgramCFG{
 		Functions: make([]*FuncCFG, 0, len(prog.Functions)),
 		BySymbol:  make(map[symbols.SymbolID]*FuncCFG),
@@ -55,15 +56,28 @@ func BuildProgram(prog *ast.Program, view SemanticView) *ProgramCFG {
 
 	for _, decl := range prog.Decls {
 		switch d := decl.(type) {
+		case *ast.ImportDecl, *ast.ModuleImportDecl, *ast.StructDecl, *ast.EnumDecl, *ast.TypeAliasDecl:
+			// 非可执行顶层类型或引入声明无需构建函数体 CFG
+
 		case *ast.FunctionDecl:
 			if d.Body == nil {
 				continue
 			}
 			fnSym := symTab.GlobalScope.LookupLocal(d.Name)
 			if fnSym == nil {
+				if report != nil {
+					report.AddDiagnostic(diagnostic.Diagnostic{
+						Code:        "WON-INT-001",
+						Severity:    "error",
+						Message:     fmt.Sprintf("顶层函数 '%s' 在构建 CFG 时缺少全局符号表记录", d.Name),
+						File:        d.Span.File,
+						Span:        d.Span,
+						Explanation: "Phase 2B.1 所有权 CFG 要求所有可分析函数已在符号表内解析登记。",
+					})
+				}
 				continue
 			}
-			fcfg := buildFunction(d.Name, fnSym, d, view)
+			fcfg := buildFunction(d.Name, fnSym, d, view, report)
 			res.Functions = append(res.Functions, fcfg)
 			res.BySymbol[fnSym.ID] = fcfg
 
@@ -80,6 +94,16 @@ func BuildProgram(prog *ast.Program, view SemanticView) *ProgramCFG {
 					mSym = findMethodSymbol(d, m.Name, symTab)
 				}
 				if mSym == nil {
+					if report != nil {
+						report.AddDiagnostic(diagnostic.Diagnostic{
+							Code:        "WON-INT-001",
+							Severity:    "error",
+							Message:     fmt.Sprintf("固有方法 '%s' 在构建 CFG 时缺少方法符号记录", m.Name),
+							File:        m.Span.File,
+							Span:        m.Span,
+							Explanation: "Phase 2B.1 所有权 CFG 要求所有 impl 方法已在类型符号表中关联。",
+						})
+					}
 					continue
 				}
 				qName := mSym.Name
@@ -88,9 +112,24 @@ func BuildProgram(prog *ast.Program, view SemanticView) *ProgramCFG {
 						qName = owner.Name + "::" + mSym.Name
 					}
 				}
-				fcfg := buildFunction(qName, mSym, m, view)
+				fcfg := buildFunction(qName, mSym, m, view, report)
 				res.Functions = append(res.Functions, fcfg)
 				res.BySymbol[mSym.ID] = fcfg
+			}
+
+		case *ast.TraitDecl, *ast.ModuleDecl:
+			// 已在声明检查阶段发出 WON-SEM-010
+
+		default:
+			if report != nil {
+				report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:        "WON-INT-001",
+					Severity:    "error",
+					Message:     fmt.Sprintf("顶层声明类型 %T 在所有权 CFG 构建中未处理", decl),
+					File:        decl.GetSpan().File,
+					Span:        decl.GetSpan(),
+					Explanation: "编译器 Fail-Closed 守卫拦截了未知顶层声明节点。",
+				})
 			}
 		}
 	}
@@ -110,7 +149,7 @@ func findMethodSymbol(ib *ast.ImplBlock, methodName string, symTab *symbols.Tabl
 	return owner.Methods[methodName]
 }
 
-func buildFunction(name string, fnSym *symbols.Symbol, decl *ast.FunctionDecl, view SemanticView) *FuncCFG {
+func buildFunction(name string, fnSym *symbols.Symbol, decl *ast.FunctionDecl, view SemanticView, report *diagnostic.Report) *FuncCFG {
 	f := &FuncCFG{
 		Name:    name,
 		FuncSym: fnSym,
@@ -118,9 +157,9 @@ func buildFunction(name string, fnSym *symbols.Symbol, decl *ast.FunctionDecl, v
 		Locals:  make(map[symbols.SymbolID]*LocalMeta),
 	}
 	b := &funcBuilder{
-		view:      view,
-		fn:        f,
-		declBySym: make(map[symbols.SymbolID]*ast.LetStmt),
+		view:   view,
+		report: report,
+		fn:     f,
 	}
 
 	entry := b.newBlock("entry")
@@ -132,13 +171,11 @@ func buildFunction(name string, fnSym *symbols.Symbol, decl *ast.FunctionDecl, v
 	b.curBB = entry
 	rootScope := b.pushScope(decl.Span)
 
-	// 登记参数符号：所有参数在函数入口处默认已初始化
 	if decl.Body != nil {
-		b.registerFunctionParams(decl, fnSym)
+		b.registerFunctionParams(decl)
 		b.lowerBlockStatements(decl.Body)
 	}
 
-	// 若正常路径未以显式 return/发散终结，则关闭函数根作用域并跳转到出口
 	if !b.isTerminated(b.curBB) {
 		b.popScope(rootScope, decl.Span)
 		b.terminateGoto(b.curBB, exit, decl.Span)
@@ -150,7 +187,21 @@ func buildFunction(name string, fnSym *symbols.Symbol, decl *ast.FunctionDecl, v
 	return f
 }
 
-func (b *funcBuilder) registerFunctionParams(decl *ast.FunctionDecl, fnSym *symbols.Symbol) {
+func (b *funcBuilder) emitInternalError(span diagnostic.Span, msg string) {
+	if b.report == nil {
+		return
+	}
+	b.report.AddDiagnostic(diagnostic.Diagnostic{
+		Code:        "WON-INT-001",
+		Severity:    "error",
+		Message:     fmt.Sprintf("所有权 CFG 构建失败 (函数 '%s'): %s", b.fn.Name, msg),
+		File:        span.File,
+		Span:        span,
+		Explanation: "编译器拒绝在存在未处理语法节点或缺失符号绑定的情况下认证所有权状态。",
+	})
+}
+
+func (b *funcBuilder) registerFunctionParams(decl *ast.FunctionDecl) {
 	symTab := b.view.GetSymbols()
 	for _, p := range decl.Params {
 		matched := symTab.NodeSymbols[p]
@@ -167,6 +218,7 @@ func (b *funcBuilder) registerFunctionParams(decl *ast.FunctionDecl, fnSym *symb
 			}
 		}
 		if matched == nil {
+			b.emitInternalError(p.Span, fmt.Sprintf("函数参数 '%s' 缺少已解析符号记录", p.Name))
 			continue
 		}
 		b.registerLocal(matched, true, true, 0)
@@ -177,7 +229,6 @@ func (b *funcBuilder) registerFunctionParams(decl *ast.FunctionDecl, fnSym *symb
 			Span:  p.Span,
 		})
 	}
-	_ = fnSym
 }
 
 func (b *funcBuilder) registerLocal(sym *symbols.Symbol, isParam bool, hasInit bool, scopeID int) {
@@ -340,7 +391,7 @@ func (b *funcBuilder) lowerBlockStatements(blk *ast.BlockStmt) {
 	}
 	for _, stmt := range blk.Statements {
 		if b.isTerminated(b.curBB) {
-			// 后续语句处于不可达基本块，仍创建独立死块以维持 CFG 完整性，且不接自前驱
+			// 后续语句位于不可达死块，保留基本块节点但不连接任何可达前驱
 			deadBB := b.newBlock("unreachable")
 			b.curBB = deadBB
 		}
@@ -393,23 +444,42 @@ func (b *funcBuilder) lowerStmt(stmt ast.Stmt) {
 		if s.Value != nil {
 			b.lowerExprValue(s.Value)
 		}
-		if len(b.loops) > 0 {
-			lf := &b.loops[len(b.loops)-1]
-			lf.breakEdges = true
-			b.emitScopeExitsDownTo(lf.scopeDepth, s.Span)
-			b.terminateGoto(b.curBB, lf.breakBB, s.Span)
+		if len(b.loops) == 0 {
+			b.emitInternalError(s.Span, "break 语句缺少外层循环上下文")
+			return
 		}
+		lf := &b.loops[len(b.loops)-1]
+		lf.breakEdges = true
+		b.emitScopeExitsDownTo(lf.scopeDepth, s.Span)
+		b.terminateGoto(b.curBB, lf.breakBB, s.Span)
 
 	case *ast.ContinueStmt:
-		if len(b.loops) > 0 {
-			lf := &b.loops[len(b.loops)-1]
-			lf.continueHit = true
-			b.emitScopeExitsDownTo(lf.scopeDepth, s.Span)
-			b.terminateGoto(b.curBB, lf.continueBB, s.Span)
+		if len(b.loops) == 0 {
+			b.emitInternalError(s.Span, "continue 语句缺少外层循环上下文")
+			return
 		}
+		lf := &b.loops[len(b.loops)-1]
+		lf.continueHit = true
+		b.emitScopeExitsDownTo(lf.scopeDepth, s.Span)
+		b.terminateGoto(b.curBB, lf.continueBB, s.Span)
 
 	case *ast.ExprStmt:
 		b.lowerExprValue(s.Expr)
+
+	case *ast.ScopeExpr, *ast.SpawnExpr:
+		if b.report != nil {
+			b.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-SEM-010",
+				Severity:    "error",
+				Message:     "并发控制流原语 (scope/spawn) 尚未在当前所有权阶段启用",
+				File:        s.GetSpan().File,
+				Span:        s.GetSpan(),
+				Explanation: "结构化并发所有权校验属于后续独立里程碑。",
+			})
+		}
+
+	default:
+		b.emitInternalError(stmt.GetSpan(), fmt.Sprintf("Encountered unhandled statement node %T in ownership CFG", stmt))
 	}
 }
 
@@ -420,9 +490,9 @@ func (b *funcBuilder) lowerLetStmt(s *ast.LetStmt) {
 	}
 
 	if s.Init == nil {
-		// 显式类型标注的未初始化声明: let x: Type / var x: Type
 		sym := b.lookupDeclSym(s)
 		if sym == nil {
+			b.emitInternalError(s.Span, fmt.Sprintf("未初始化变量绑定 '%s' 缺少符号解析记录", s.Name))
 			return
 		}
 		b.registerLocal(sym, false, false, curScopeID)
@@ -436,12 +506,16 @@ func (b *funcBuilder) lowerLetStmt(s *ast.LetStmt) {
 		return
 	}
 
-	// 若 RHS 是简单变量/字段位置或元组，需先求值 RHS（产生 Copy / Move 事件）再初始化目标绑定
 	b.lowerExprValue(s.Init)
 
 	if s.Pattern != nil {
 		b.registerPatternLocals(s.Pattern, true, curScopeID, s.Span)
-	} else if sym := b.lookupDeclSym(s); sym != nil {
+	} else if s.Name != "" && s.Name != "_" {
+		sym := b.lookupDeclSym(s)
+		if sym == nil {
+			b.emitInternalError(s.Span, fmt.Sprintf("变量绑定 '%s' 缺少符号解析记录", s.Name))
+			return
+		}
 		b.registerLocal(sym, false, true, curScopeID)
 		b.addLocalToTopScope(sym.ID)
 		b.emit(Statement{
@@ -467,41 +541,78 @@ func (b *funcBuilder) lookupDeclSym(s *ast.LetStmt) *symbols.Symbol {
 }
 
 func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curScopeID int, span diagnostic.Span) {
+	if pat == nil {
+		return
+	}
 	symTab := b.view.GetSymbols()
 	switch p := pat.(type) {
+	case *ast.WildcardPattern, *ast.LiteralPattern:
+		return
+
 	case *ast.IdentPattern:
-		if sym := symTab.NodeSymbols[p]; sym != nil {
-			b.registerLocal(sym, false, initNow, curScopeID)
-			b.addLocalToTopScope(sym.ID)
-			op := OpInitAssign
-			if !initNow {
-				op = OpUninitDecl
-			}
-			b.emit(Statement{
-				Kind:  op,
-				Place: b.placeForSym(sym, p.Span),
-				Type:  sym.Type,
-				Span:  p.Span,
-			})
+		if b.view.VariantRef(p) != nil {
+			return
 		}
+		sym := symTab.NodeSymbols[p]
+		if sym == nil {
+			b.emitInternalError(p.Span, fmt.Sprintf("模式绑定标识符 '%s' 缺少 SymbolID 映射", p.Name))
+			return
+		}
+		b.registerLocal(sym, false, initNow, curScopeID)
+		b.addLocalToTopScope(sym.ID)
+		op := OpInitAssign
+		if !initNow {
+			op = OpUninitDecl
+		}
+		b.emit(Statement{
+			Kind:  op,
+			Place: b.placeForSym(sym, p.Span),
+			Type:  sym.Type,
+			Span:  p.Span,
+		})
+
 	case *ast.TuplePattern:
 		for _, sub := range p.Elems {
 			b.registerPatternLocals(sub, initNow, curScopeID, span)
 		}
+
 	case *ast.StructPattern:
 		for _, fp := range p.Fields {
 			if fp.Pattern != nil {
 				b.registerPatternLocals(fp.Pattern, initNow, curScopeID, fp.Span)
+			} else {
+				sym := symTab.NodeSymbols[fp]
+				if sym == nil {
+					b.emitInternalError(fp.Span, fmt.Sprintf("结构体简写模式字段 '%s' 缺少 SymbolID 映射", fp.Name))
+					return
+				}
+				b.registerLocal(sym, false, initNow, curScopeID)
+				b.addLocalToTopScope(sym.ID)
+				op := OpInitAssign
+				if !initNow {
+					op = OpUninitDecl
+				}
+				b.emit(Statement{
+					Kind:  op,
+					Place: b.placeForSym(sym, fp.Span),
+					Type:  sym.Type,
+					Span:  fp.Span,
+				})
 			}
 		}
+
 	case *ast.EnumPattern:
 		for _, arg := range p.Args {
 			b.registerPatternLocals(arg, initNow, curScopeID, span)
 		}
+
 	case *ast.SlicePattern:
 		for _, elem := range p.Elems {
 			b.registerPatternLocals(elem, initNow, curScopeID, span)
 		}
+
+	default:
+		b.emitInternalError(pat.GetSpan(), fmt.Sprintf("模式声明注册遇到未受支持的模式类型 %T", pat))
 	}
 }
 
@@ -512,13 +623,15 @@ func (b *funcBuilder) lowerAssignStmt(s *ast.AssignStmt) {
 	}
 
 	lhsPlace, hasPlace := b.extractPlace(lhsExpr)
+	if !hasPlace {
+		b.emitInternalError(s.Span, fmt.Sprintf("赋值目标表达式 (%T) 无法解析为所有权存储位置", lhsExpr))
+		return
+	}
 	isCompound := s.Op != "" && s.Op != "="
 
-	// 若左值包含下标表达式，先求值索引表达式；若包含解引用，需先读取指针/引用根
-	b.lowerAssignTargetSubExprs(lhsExpr, isCompound, lhsPlace, hasPlace, s.Span)
+	b.lowerAssignTargetSubExprs(lhsExpr, isCompound, lhsPlace, s.Span)
 
-	// 复合赋值先对原值触发读访问检查，随后再求值右侧表达式
-	if isCompound && hasPlace {
+	if isCompound {
 		b.emit(Statement{
 			Kind:  OpRead,
 			Place: lhsPlace,
@@ -527,32 +640,22 @@ func (b *funcBuilder) lowerAssignStmt(s *ast.AssignStmt) {
 		})
 	}
 
-	// 求值 RHS（若写入整个变量 x = consume(x)，先在右侧消费，再把左侧标记为已初始化！）
 	b.lowerExprValue(s.Value)
 
-	if hasPlace {
-		if len(lhsPlace.Projections) == 0 && !isCompound {
-			b.emit(Statement{
-				Kind:  OpAssign,
-				Place: lhsPlace,
-				Type:  lhsPlace.RootType,
-				Span:  s.Span,
-			})
-		} else {
-			b.emit(Statement{
-				Kind:  OpAssign,
-				Place: lhsPlace,
-				Type:  lhsPlace.ElemType,
-				Span:  s.Span,
-			})
-		}
-	}
+	b.emit(Statement{
+		Kind:  OpAssign,
+		Place: lhsPlace,
+		Type:  lhsPlace.ElemType,
+		Span:  s.Span,
+	})
 }
 
-func (b *funcBuilder) lowerAssignTargetSubExprs(lhs ast.Expr, isCompound bool, lhsPlace Place, hasPlace bool, span diagnostic.Span) {
+func (b *funcBuilder) lowerAssignTargetSubExprs(lhs ast.Expr, isCompound bool, lhsPlace Place, span diagnostic.Span) {
 	switch e := lhs.(type) {
+	case *ast.Identifier:
+		// 根变量本身将由右侧求值后的 OpAssign 写入
+
 	case *ast.IndexExpr:
-		// 仅检查数组根位置已初始化并求值下标，不可把整块数组当右值 OpMove
 		if objPlace, ok := b.extractPlace(e.Object); ok {
 			b.emit(Statement{
 				Kind:  OpRead,
@@ -564,26 +667,29 @@ func (b *funcBuilder) lowerAssignTargetSubExprs(lhs ast.Expr, isCompound bool, l
 			b.lowerExprValue(e.Object)
 		}
 		b.lowerExprValue(e.Index)
+
 	case *ast.FieldAccessExpr:
-		b.lowerAssignTargetSubExprs(e.Object, isCompound, lhsPlace, hasPlace, span)
+		b.lowerAssignTargetSubExprs(e.Object, isCompound, lhsPlace, span)
+
 	case *ast.UnaryExpr:
-		if e.Op == "*" {
-			// 通过 *ptr 写入仅读取 ptr 本身，不可消费 ptr（例如 &mut T 本身非 Copy）
-			if ptrPlace, ok := b.extractPlace(e.Expr); ok {
-				b.emit(Statement{
-					Kind:  OpRead,
-					Place: ptrPlace,
-					Type:  ptrPlace.ElemType,
-					Span:  e.Expr.GetSpan(),
-				})
-			} else {
-				b.lowerExprValue(e.Expr)
-			}
+		if e.Op != "*" {
+			b.emitInternalError(e.Span, fmt.Sprintf("赋值左值遇到非解引用一元操作符 %q", e.Op))
+			return
 		}
+		if ptrPlace, ok := b.extractPlace(e.Expr); ok {
+			b.emit(Statement{
+				Kind:  OpRead,
+				Place: ptrPlace,
+				Type:  ptrPlace.ElemType,
+				Span:  e.Expr.GetSpan(),
+			})
+		} else {
+			b.lowerExprValue(e.Expr)
+		}
+
+	default:
+		b.emitInternalError(lhs.GetSpan(), fmt.Sprintf("赋值左值包含未处理节点 %T", lhs))
 	}
-	_ = isCompound
-	_ = lhsPlace
-	_ = hasPlace
 }
 
 func (b *funcBuilder) lowerIfStmt(s *ast.IfStmt) {
@@ -615,10 +721,8 @@ func (b *funcBuilder) lowerIfStmt(s *ast.IfStmt) {
 
 	if thenClosed && elseClosed {
 		b.fn.Blocks[mergeBB].Terminator = Terminator{Kind: TermUnreachable, Span: s.Span}
-		b.curBB = mergeBB
-	} else {
-		b.curBB = mergeBB
 	}
+	b.curBB = mergeBB
 }
 
 func (b *funcBuilder) lowerWhileStmt(s *ast.WhileStmt) {
@@ -680,87 +784,71 @@ func (b *funcBuilder) lowerForStmt(s *ast.ForStmt) {
 	b.curBB = exitBB
 }
 
-func patternUsesRef(pat ast.Pattern) bool {
-	if pat == nil {
-		return false
-	}
-	switch p := pat.(type) {
-	case *ast.IdentPattern:
-		return p.IsRef
-	case *ast.TuplePattern:
-		for _, sub := range p.Elems {
-			if patternUsesRef(sub) {
-				return true
-			}
-		}
-	case *ast.StructPattern:
-		for _, fp := range p.Fields {
-			if patternUsesRef(fp.Pattern) {
-				return true
-			}
-		}
-	case *ast.EnumPattern:
-		for _, arg := range p.Args {
-			if patternUsesRef(arg) {
-				return true
-			}
-		}
-	case *ast.SlicePattern:
-		for _, elem := range p.Elems {
-			if patternUsesRef(elem) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
+// lowerMatchExpr 为 match 表达式的每个分支单独降低所有权语义，精确区分引用模式分支与按值移动分支，并忠实表达守卫落空流转。
 func (b *funcBuilder) lowerMatchExpr(m *ast.MatchExpr) {
-	usesRef := false
-	for _, arm := range m.Arms {
-		if patternUsesRef(arm.Pattern) {
-			usesRef = true
-			break
-		}
-	}
-	if usesRef {
-		if p, ok := b.extractPlace(m.Subject); ok {
-			b.emit(Statement{
-				Kind:  OpRead,
-				Place: p,
-				Type:  p.ElemType,
-				Span:  m.Subject.GetSpan(),
-			})
-		} else {
-			b.lowerExprValue(m.Subject)
-		}
+	subjPlace, hasSubjPlace := b.extractPlace(m.Subject)
+	if hasSubjPlace {
+		// 在分发点仅检查标签判别式可读性，绝不在进入具体分支前提前吞并整个主体
+		b.lowerPlacePrereqs(m.Subject, subjPlace)
+		b.emit(Statement{
+			Kind:  OpRead,
+			Place: subjPlace,
+			Type:  b.view.ExprType(m.Subject),
+			Span:  m.Subject.GetSpan(),
+		})
 	} else {
 		b.lowerExprValue(m.Subject)
 	}
+
 	switchBB := b.curBB
 	mergeBB := b.newBlock("match.merge")
 
-	armEntries := make([]BlockID, 0, len(m.Arms))
-	allDiverged := true
-	for i := range m.Arms {
-		armEntries = append(armEntries, b.newBlock(fmt.Sprintf("match.arm%d", i)))
-	}
-	if len(armEntries) == 0 {
+	if len(m.Arms) == 0 {
 		b.terminateGoto(switchBB, mergeBB, m.Span)
 		b.curBB = mergeBB
 		return
 	}
-	b.terminateSwitch(switchBB, armEntries, m.Span)
 
+	armTests := make([]BlockID, len(m.Arms))
+	for i := range m.Arms {
+		armTests[i] = b.newBlock(fmt.Sprintf("match.arm%d.pat", i))
+	}
+	b.terminateSwitch(switchBB, armTests, m.Span)
+
+	subjType := b.view.ExprType(m.Subject)
+	if subjType == types.Invalid && hasSubjPlace {
+		subjType = subjPlace.ElemType
+	}
+
+	allDiverged := true
 	for i, arm := range m.Arms {
-		b.curBB = armEntries[i]
+		b.curBB = armTests[i]
 		sid := b.pushScope(arm.Span)
+
 		if arm.Pattern != nil {
-			b.registerPatternLocals(arm.Pattern, true, sid, arm.Span)
+			b.applyArmPatternOwnership(arm.Pattern, subjPlace, hasSubjPlace, subjType, sid)
 		}
+
 		if arm.Guard != nil {
 			b.lowerExprValue(arm.Guard)
+			guardBB := b.curBB
+			armBodyBB := b.newBlock(fmt.Sprintf("match.arm%d.body", i))
+			guardFailBB := b.newBlock(fmt.Sprintf("match.arm%d.gfail", i))
+			b.terminateSwitch(guardBB, []BlockID{armBodyBB, guardFailBB}, arm.Guard.GetSpan())
+
+			// 守卫失败路径先退出当前分支绑定作用域，再汇入后续候选分支或退出合并点
+			b.curBB = guardFailBB
+			b.popScopeKeepFrame(arm.Guard.GetSpan())
+			if i+1 < len(m.Arms) {
+				b.terminateGoto(guardFailBB, armTests[i+1], arm.Guard.GetSpan())
+			} else {
+				b.terminateGoto(guardFailBB, mergeBB, arm.Guard.GetSpan())
+				allDiverged = false
+			}
+
+			b.curBB = armBodyBB
 		}
+
 		b.lowerBlockStatements(arm.Body)
 		if !b.isTerminated(b.curBB) {
 			allDiverged = false
@@ -777,13 +865,249 @@ func (b *funcBuilder) lowerMatchExpr(m *ast.MatchExpr) {
 	b.curBB = mergeBB
 }
 
-// lowerExprValue 按所有权与求值顺序降低任意右值表达式。
+func (b *funcBuilder) popScopeKeepFrame(span diagnostic.Span) {
+	if len(b.scopes) == 0 {
+		return
+	}
+	top := b.scopes[len(b.scopes)-1]
+	localsCopy := make([]symbols.SymbolID, len(top.locals))
+	copy(localsCopy, top.locals)
+	b.emit(Statement{
+		Kind:    OpScopeExit,
+		ScopeID: top.id,
+		Locals:  localsCopy,
+		Span:    span,
+	})
+}
+
+// applyArmPatternOwnership 按单个 match 分支的实际模式种类生成独立的所有权/移动/借用事件与绑定初始化。
+func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, hasPlace bool, patType types.TypeID, scopeID int) {
+	if pat == nil {
+		return
+	}
+	symTab := b.view.GetSymbols()
+	tctx := b.view.GetTypes()
+	baseType := patType
+	isThroughRef := false
+	if baseType != types.Invalid && tctx.Info(baseType).Kind == types.KindRef {
+		isThroughRef = true
+		baseType = tctx.Info(baseType).Elem
+	}
+
+	switch p := pat.(type) {
+	case *ast.WildcardPattern, *ast.LiteralPattern:
+		return
+
+	case *ast.IdentPattern:
+		if b.view.VariantRef(p) != nil {
+			// 单元枚举变体仅检查判别式，不移出主体
+			return
+		}
+		sym := symTab.NodeSymbols[p]
+		if sym == nil {
+			b.emitInternalError(p.Span, fmt.Sprintf("match 分支绑定 '%s' 缺少 SymbolID", p.Name))
+			return
+		}
+		if hasPlace {
+			if p.IsRef {
+				op := OpBorrowShared
+				if p.IsMut {
+					op = OpBorrowMut
+				}
+				b.emit(Statement{Kind: OpRead, Place: place, Type: place.ElemType, Span: p.Span})
+				b.emit(Statement{Kind: op, Place: place, Type: sym.Type, Span: p.Span})
+			} else if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
+				if isThroughRef || place.HasDeref() || place.HasIndex() {
+					// 通过引用/解引用匹配出的非 Copy 值按值绑定与直接解引用移出一致，触发 WON-MEM-008 防线
+					pEmit := place
+					if isThroughRef && !place.HasDeref() {
+						pEmit = place.AppendProj(Projection{Kind: ProjDeref, ElemType: sym.Type}, sym.Type, p.Span)
+					}
+					b.emit(Statement{Kind: OpMove, Place: pEmit, Type: sym.Type, Span: p.Span})
+				} else {
+					b.emit(Statement{Kind: OpMove, Place: place, Type: sym.Type, Span: p.Span})
+				}
+			}
+		}
+		b.registerLocal(sym, false, true, scopeID)
+		b.addLocalToTopScope(sym.ID)
+		b.emit(Statement{
+			Kind:  OpInitAssign,
+			Place: b.placeForSym(sym, p.Span),
+			Type:  sym.Type,
+			Span:  p.Span,
+		})
+
+	case *ast.StructPattern:
+		// 区分 1) 枚举结构体变体 vs 2) 直接结构体字段部分匹配
+		if b.view.VariantRef(p) != nil {
+			b.lowerOpaqueAggregatePattern(p, place, hasPlace, isThroughRef, scopeID)
+			return
+		}
+
+		// 直接结构体解构拥有精确的 ProjField 投影标识：逐字段处理借用与按字段部分移动！
+		for _, fp := range p.Fields {
+			fieldPlace := place
+			var fType types.TypeID
+			if fi := findStructFieldInfo(baseType, fp.Name, symTab, tctx); fi != nil {
+				fType = fi.Type
+			}
+			if hasPlace {
+				if isThroughRef && !place.HasDeref() {
+					fieldPlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: baseType}, baseType, fp.Span)
+				}
+				fieldPlace = fieldPlace.AppendField(fp.Name, -1, fType, fp.Span)
+			}
+
+			if fp.Pattern == nil {
+				sym := symTab.NodeSymbols[fp]
+				if sym == nil {
+					b.emitInternalError(fp.Span, fmt.Sprintf("结构体解构简写字段 '%s' 缺少 SymbolID", fp.Name))
+					continue
+				}
+				if hasPlace && sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
+					b.emit(Statement{Kind: OpMove, Place: fieldPlace, Type: sym.Type, Span: fp.Span})
+				}
+				b.registerLocal(sym, false, true, scopeID)
+				b.addLocalToTopScope(sym.ID)
+				b.emit(Statement{
+					Kind:  OpInitAssign,
+					Place: b.placeForSym(sym, fp.Span),
+					Type:  sym.Type,
+					Span:  fp.Span,
+				})
+				continue
+			}
+
+			b.applyArmPatternOwnership(fp.Pattern, fieldPlace, hasPlace, fType, scopeID)
+		}
+
+	case *ast.EnumPattern, *ast.TuplePattern, *ast.SlicePattern:
+		// 尚未实现 ProjDowncast / ProjTupleField 的聚合解构模式：按整臂叶子语义区分全借用/Copy vs 按值整主体 Move
+		b.lowerOpaqueAggregatePattern(p, place, hasPlace, isThroughRef, scopeID)
+
+	default:
+		b.emitInternalError(pat.GetSpan(), fmt.Sprintf("match 模式匹配遇到未处理的模式节点 %T", pat))
+	}
+}
+
+func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, hasPlace bool, isThroughRef bool, scopeID int) {
+	tctx := b.view.GetTypes()
+	symTab := b.view.GetSymbols()
+
+	var bindings []*symbols.Symbol
+	var borrowOps []Statement
+	needsMove := false
+
+	var walk func(node ast.Pattern)
+	walk = func(node ast.Pattern) {
+		if node == nil {
+			return
+		}
+		switch p := node.(type) {
+		case *ast.WildcardPattern, *ast.LiteralPattern:
+			return
+		case *ast.IdentPattern:
+			if b.view.VariantRef(p) != nil {
+				return
+			}
+			sym := symTab.NodeSymbols[p]
+			if sym == nil {
+				b.emitInternalError(p.Span, fmt.Sprintf("嵌套模式绑定 '%s' 缺少 SymbolID", p.Name))
+				return
+			}
+			bindings = append(bindings, sym)
+			if p.IsRef {
+				op := OpBorrowShared
+				if p.IsMut {
+					op = OpBorrowMut
+				}
+				if hasPlace {
+					borrowOps = append(borrowOps, Statement{Kind: op, Place: place, Type: sym.Type, Span: p.Span})
+				}
+			} else if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
+				needsMove = true
+			}
+		case *ast.TuplePattern:
+			for _, el := range p.Elems {
+				walk(el)
+			}
+		case *ast.EnumPattern:
+			for _, arg := range p.Args {
+				walk(arg)
+			}
+		case *ast.StructPattern:
+			for _, fp := range p.Fields {
+				if fp.Pattern != nil {
+					walk(fp.Pattern)
+				} else if sym := symTab.NodeSymbols[fp]; sym != nil {
+					bindings = append(bindings, sym)
+					if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
+						needsMove = true
+					}
+				} else {
+					b.emitInternalError(fp.Span, fmt.Sprintf("嵌套结构体简写字段 '%s' 缺少 SymbolID", fp.Name))
+				}
+			}
+		case *ast.SlicePattern:
+			for _, el := range p.Elems {
+				walk(el)
+			}
+		default:
+			b.emitInternalError(node.GetSpan(), fmt.Sprintf("聚合模式内部包含未处理的节点 %T", node))
+		}
+	}
+
+	walk(pat)
+
+	if hasPlace {
+		if needsMove {
+			movePlace := place
+			if isThroughRef && !place.HasDeref() {
+				movePlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: place.ElemType}, place.ElemType, pat.GetSpan())
+			}
+			b.emit(Statement{Kind: OpMove, Place: movePlace, Type: place.ElemType, Span: pat.GetSpan()})
+		} else if len(borrowOps) > 0 {
+			b.emit(Statement{Kind: OpRead, Place: place, Type: place.ElemType, Span: pat.GetSpan()})
+			for _, bop := range borrowOps {
+				b.emit(bop)
+			}
+		}
+	}
+
+	for _, sym := range bindings {
+		b.registerLocal(sym, false, true, scopeID)
+		b.addLocalToTopScope(sym.ID)
+		b.emit(Statement{
+			Kind:  OpInitAssign,
+			Place: b.placeForSym(sym, sym.Span),
+			Type:  sym.Type,
+			Span:  sym.Span,
+		})
+	}
+}
+
+func findStructFieldInfo(structType types.TypeID, fieldName string, symTab *symbols.Table, tctx *types.Context) *symbols.FieldInfo {
+	if structType == types.Invalid || tctx == nil || symTab == nil {
+		return nil
+	}
+	info := tctx.Info(structType)
+	if info.Kind != types.KindStruct {
+		return nil
+	}
+	sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]
+	if sym == nil || sym.FieldMap == nil {
+		return nil
+	}
+	return sym.FieldMap[fieldName]
+}
+
+// lowerExprValue 按所有权与求值顺序降低任意右值表达式，并在末尾对任何未知 AST 表达式触发 WON-INT-001。
 func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 	if expr == nil {
 		return
 	}
 
-	// 若表达式直接映射到存储位置 Place，则在此统一产生 Copy / Move 事件，禁止对父结构体重复产生整体 Move。
 	if place, ok := b.extractPlace(expr); ok {
 		b.lowerPlaceValueAccess(expr, place)
 		return
@@ -820,12 +1144,16 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 			}
 		}
 
+	case *ast.Identifier:
+		// 非局部/参数标识符（如枚举单元构造器 / 函数名），检查符号确实已解析
+		if sym := b.view.GetSymbols().NodeSymbols[e]; sym == nil {
+			b.emitInternalError(e.Span, fmt.Sprintf("标识符表达式 '%s' 缺少已解析符号记录", e.Name))
+		}
+
 	case *ast.FieldAccessExpr:
-		// 仅当基表达式为临时值（非 Place）时走到此分支
 		b.lowerExprValue(e.Object)
 
 	case *ast.IndexExpr:
-		// 仅当基表达式为临时值或切片范围表达式时走到此分支
 		b.lowerExprValue(e.Object)
 		if rng, isRng := e.Index.(*ast.RangeExpr); isRng {
 			if rng.Start != nil {
@@ -846,11 +1174,9 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 		b.lowerExprValue(e.Expr)
 
 	case *ast.UnaryExpr:
-		// 若为 *ptr，当 ptr 为 Place 时已在上面 extractPlace 分支处理；此处仅处理非 Place 指针临时值或普通一元运算
 		b.lowerExprValue(e.Expr)
 
 	case *ast.BorrowExpr:
-		// 借用表达式不消费/移动源值；在 Phase 2B.1 先检查基础目标可读/已初始化并预留 Borrow 事件
 		targetPlace, ok := b.extractPlace(e.Expr)
 		if ok {
 			b.lowerPlaceAddressSubExprs(e.Expr)
@@ -914,13 +1240,10 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 		}
 
 	case *ast.MethodCallExpr:
-		// 遵循 ADR-011 批准的 receiver-first 求值策略：按方法接收者方式处理
 		calSym := b.view.CallTarget(e)
 		if calSym != nil && calSym.HasSelf && !calSym.SelfIsRef {
-			// 值接收者 self: 按实参类型执行 Copy 或 Move
 			b.lowerExprValue(e.Receiver)
 		} else if p, ok := b.extractPlace(e.Receiver); ok {
-			// &self / &mut self（含内建方法）：读取/借用接收者（不移动其所有权！）
 			b.lowerPlaceAddressSubExprs(e.Receiver)
 			b.emit(Statement{
 				Kind:  OpRead,
@@ -951,13 +1274,35 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 	case *ast.IfStmt:
 		b.lowerIfStmt(e)
 
+	case *ast.WhileStmt:
+		b.lowerWhileStmt(e)
+
+	case *ast.ForStmt:
+		b.lowerForStmt(e)
+
 	case *ast.MatchExpr:
 		b.lowerMatchExpr(e)
+
+	case *ast.ScopeExpr, *ast.SpawnExpr:
+		if b.report != nil {
+			b.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:     "WON-SEM-010",
+				Severity: "error",
+				Message:  "结构化并发原语 (scope/spawn) 尚未在当前所有权阶段启用",
+				File:     expr.GetSpan().File,
+				Span:     expr.GetSpan(),
+			})
+		}
+
+	default:
+		b.emitInternalError(expr.GetSpan(), fmt.Sprintf("Encountered unhandled expression node %T in ownership CFG", expr))
 	}
 }
 
 func (b *funcBuilder) lowerPlaceAddressSubExprs(expr ast.Expr) {
 	switch e := expr.(type) {
+	case *ast.Identifier:
+		return
 	case *ast.FieldAccessExpr:
 		b.lowerPlaceAddressSubExprs(e.Object)
 	case *ast.IndexExpr:
@@ -967,11 +1312,12 @@ func (b *funcBuilder) lowerPlaceAddressSubExprs(expr ast.Expr) {
 		if e.Op == "*" {
 			b.lowerPlaceAddressSubExprs(e.Expr)
 		}
+	default:
+		b.emitInternalError(expr.GetSpan(), fmt.Sprintf("取址路径包含未处理节点 %T", expr))
 	}
 }
 
 func (b *funcBuilder) lowerPlaceValueAccess(expr ast.Expr, place Place) {
-	// 先计算路径中的动态索引及解引用前置根位置读检查
 	b.lowerPlacePrereqs(expr, place)
 
 	exprType := b.view.ExprType(expr)
@@ -979,7 +1325,6 @@ func (b *funcBuilder) lowerPlaceValueAccess(expr ast.Expr, place Place) {
 		exprType = place.ElemType
 	}
 
-	// Copy 类型永远产生 OpCopy，不消费源绑定；非 Copy 产生 OpMove
 	if exprType != types.Invalid && b.view.GetTypes().IsCopy(exprType) {
 		b.emit(Statement{
 			Kind:  OpCopy,
@@ -999,7 +1344,6 @@ func (b *funcBuilder) lowerPlaceValueAccess(expr ast.Expr, place Place) {
 }
 
 func (b *funcBuilder) lowerPlacePrereqs(expr ast.Expr, place Place) {
-	// 对路径上的下标表达式进行正常读求值
 	switch e := expr.(type) {
 	case *ast.IndexExpr:
 		b.lowerPlacePrereqs(e.Object, place)
@@ -1008,7 +1352,6 @@ func (b *funcBuilder) lowerPlacePrereqs(expr ast.Expr, place Place) {
 		b.lowerPlacePrereqs(e.Object, place)
 	case *ast.UnaryExpr:
 		if e.Op == "*" {
-			// 解引用本身要求指针/引用变量本身处于已初始化/未移动状态
 			if ptrPlace, ok := b.extractPlace(e.Expr); ok {
 				b.emit(Statement{
 					Kind:  OpRead,
@@ -1044,7 +1387,6 @@ func (b *funcBuilder) extractPlace(expr ast.Expr) (Place, bool) {
 		if !ok {
 			return Place{}, false
 		}
-		// 若基表达式为引用/原生指针，结构体成员访问隐式附带解引用投影
 		baseType := b.view.ExprType(e.Object)
 		if baseType == types.Invalid {
 			baseType = basePlace.ElemType
