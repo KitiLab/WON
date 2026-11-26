@@ -1,7 +1,7 @@
 # WON Language Specification: C Interoperability and Unsafe Boundaries
 
 > **Specification Version**: Draft 0.1  
-> **Status**: `SPECIFIED` (Under Architectural Review)  
+> **Status**: `SPECIFIED` (`#import` / `WON-SEC-001` & Typed Sidecar Contract Model `FFIContractCatalog` `IMPLEMENTED` in Phase 2B.3; Textual `.wonbind` Parser Syntax Remains `SPECIFIED` / Proposed)  
 > **Module**: Native C FFI, Header Processing & Unsafe Model  
 > **Date**: November 2026
 

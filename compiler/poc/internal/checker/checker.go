@@ -69,7 +69,13 @@ func (c *Checker) CheckProgram(prog *ast.Program) *TypedProgram {
 		}
 		if !c.report.HasErrors() {
 			resReg := drop.NewResourceRegistry()
-			dropPlan := drop.ElaborateProgram(progCFG, c.typed, resReg, c.report)
+			var ffiCatalogs []*bindgen.FFIContractCatalog
+			for _, bm := range c.bindings {
+				if bm != nil && bm.Contracts != nil {
+					ffiCatalogs = append(ffiCatalogs, bm.Contracts)
+				}
+			}
+			dropPlan := drop.ElaborateProgramWithFFI(progCFG, c.typed, resReg, ffiCatalogs, c.report)
 			c.typed.DropPlan = dropPlan
 			c.typed.DropElaborated = dropPlan != nil && dropPlan.DropElaborated && !c.report.HasErrors()
 		}

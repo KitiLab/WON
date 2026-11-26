@@ -2,7 +2,7 @@
 
 > **Document Status**: `ACCEPTED` (Architectural Design Closed in 2B.0.1 & Ratified in [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md); Phase 2B.1–2B.2 `IMPLEMENTED`)  
 > **Milestone**: Phase 2B.0 / 2B.0.1 — Ownership Architecture & Semantic Design Closure  
-> **Target Compiler Packages**: `compiler/poc/internal/cfg`, `compiler/poc/internal/borrow` (`2B.1–2B.2` Implemented; `2B.3` Planned), bridging `compiler/poc/internal/checker` (`TypedProgram`) to ADR-009 TIR (`Phase 2C`)  
+> **Target Compiler Packages**: `compiler/poc/internal/cfg`, `compiler/poc/internal/borrow`, `compiler/poc/internal/drop` (`2B.1–2B.3` Implemented), bridging `compiler/poc/internal/checker` (`TypedProgram`) to ADR-009 TIR (`Phase 2C`)  
 > **Companion Specifications**:
 > - [Ownership and Borrowing Specification](../language-spec/ownership-and-borrowing.md) (`ACCEPTED`; `2B.1–2B.2` Implemented)
 > - [Phase 2B.2 Borrow Checker, NLL & Provenance](phase-2b.2-borrow-checker-nll-provenance.md) (`IMPLEMENTED`)
@@ -18,7 +18,7 @@
 ## 1. Compiler Audit & Status Boundary
 
 > [!NOTE]
-> **Implementation Status Reconciliation (Post-Phase 2B.2.2)**: Following owner approval ([OWNER-APPROVAL-ADR-011-2026-11-25.md](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md)), Phases **2B.1–2B.1.2** (Ownership CFG, `@derive(Copy)`, uninitialized `let`/`var`, move/init & match-pattern closure) and Phases **2B.2–2B.2.2** (Borrow Checker, NLL Regions, Reborrow & Reference Mutability Closure, Canonical `self` Indexing, Per-Field Aggregate & Candidate Provenance, and Fail-Closed `AccessAuthority` / Parent-Loan / Origin / Metadata Invariants `WON-MEM-002..006` + `WON-INT-001`) are **`IMPLEMENTED`**. **Phase 2B.3** (Drop Elaboration) and trait/concurrency milestones remain `SPECIFIED`/`PLANNED`. Raw-pointer `unsafe:` dereference writes remain explicitly distinguished from statically proven aliasing safety.
+> **Implementation Status Reconciliation (Post-Phase 2B.3)**: Following owner approval ([OWNER-APPROVAL-ADR-011-2026-11-25.md](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md)), Phases **2B.1–2B.1.2** (Ownership CFG, `@derive(Copy)`, uninitialized `let`/`var`, move/init & match-pattern closure), **2B.2–2B.2.2.1** (Borrow Checker, NLL Regions, Reborrow & Reference Mutability Closure, Canonical `self` Indexing, Per-Field Aggregate & Candidate Provenance, and Fail-Closed `AccessAuthority` / Parent-Loan / Origin / Metadata Invariants), and **2B.3** ([Phase 2B.3 Drop Elaboration & FFI Ownership Contracts](phase-2b.3-drop-elaboration.md)) are **`IMPLEMENTED`**. Phase 2C (TIR lowering & C11 RAII destructor codegen) and trait/concurrency milestones remain `SPECIFIED`/`PLANNED`. Raw-pointer `unsafe:` dereference writes remain explicitly distinguished from statically proven aliasing safety.
 
 ### 1.1 Historical Baseline Context & Currently `IMPLEMENTED` Capabilities
 1. **Lexer & Parser (`internal/token`, `internal/lexer`, `internal/parser`)**:
@@ -50,7 +50,7 @@
 | Ownership-Lite Architecture (`ADR-011`, `ownership-and-borrowing.md`) | `ACCEPTED` | Approved Nov 25, 2026 (`OWNER-APPROVAL-ADR-011-2026-11-25.md`). |
 | Ownership CFG & Move/Init Analysis (`internal/cfg`, `internal/borrow` — `2B.1–2B.1.2`) | `IMPLEMENTED` | Verified in CI (`91a6932`); fail-closed `WON-INT-001` & `OwnershipChecked` gate. |
 | Borrow Checker, NLL & Candidate Provenance (`2B.2`) | `IMPLEMENTED` | `loans.go`, `liveness.go`, `provenance.go` (`WON-MEM-002..006`). |
-| Drop Elaboration & Drop Flags (`2B.3`) | `SPECIFIED` / `PLANNED` | Deferred to Phase 2B.3 / Phase 2C. |
+| Drop Elaboration, Drop Flags & FFI Contracts (`2B.3`) | `IMPLEMENTED` | [phase-2b.3-drop-elaboration.md](phase-2b.3-drop-elaboration.md); Phase 2C TIR/C11 emission pending. |
 | General Traits (`trait`, `impl Drop`, generic `Copy`), `Send`/`Sync`, `scope`/`spawn` | `PLANNED` (Separate Future Milestone) | Rejected with `WON-SEM-010` until post-2B trait & concurrency milestones. |
 | ADR-009 TIR Lowering & Multi-Type C11 Codegen (`Drop` Emission) | `SPECIFIED` (Phase 2C) | Ownership CFG designed to lower 1:1 to TIR. |
 
@@ -329,7 +329,7 @@ All Phase 2B diagnostics map cleanly to `diagnostic.Diagnostic` (`Version: 1`). 
 | **`WON-MEM-004`** | `IMPLEMENTED` (2B.2) | `Borrow exclusivity conflict (&T vs &mut T)` | Taking `&mut p` while `&p` is live, OR reading / `&p` while `&mut p` is live (incl. `v.push(v.len())`). | Conflicting second access/borrow | Active prior loan `OriginSpan` & blocking last use. | Reorder last read before `&mut` borrow, or hoist sub-expression into temporary. |
 | **`WON-MEM-005`** | `IMPLEMENTED` (2B.2) | `Multiple active mutable borrows` | Creating second overlapping `&mut p` while another `&mut p` loan is live. | Second `&mut` expression/call | First active `&mut` loan `OriginSpan`. | Split disjoint struct fields (`&mut s.a`, `&mut s.b`) or finish first borrow's uses first. |
 | **`WON-MEM-006`** | `IMPLEMENTED` (2B.2) | `Cannot mutate or move borrowed value` | Assigning, modifying, or moving owner place `p` while `&p` or `&mut p` is live. | Mutation or move site | Active loan `OriginSpan` blocking write. | Complete all uses of the borrow before mutating/moving owner. |
-| **`WON-MEM-007`** | `SPECIFIED` (2B.3 / Future Drop) | `Cannot partially move out of Drop type` | Moving field/payload out of type defining root `Drop` destructor. | Field move expression | `Drop` impl definition span on parent type. | Borrow `&s.field` instead, or move whole struct. |
+| **`WON-MEM-007`** | `IMPLEMENTED` (2B.3 Guard Hook; user `impl Drop` in Trait Milestone) | `Cannot partially move out of Drop type` | Moving field/payload out of type defining root `Drop` destructor. | Field move expression | `Drop` impl definition span on parent type. | Borrow `&s.field` instead, or move whole struct. |
 | **`WON-MEM-008`** | `IMPLEMENTED` (2B.1) | `Cannot move out of borrowed reference` | Moving non-`Copy` value through `*r` or `r.field` when `r` is `&T` or `&mut T`. | Deref/field move expression | Parameter/borrow binding declaration of `r`. | Borrow (`&*r`), clone explicitly, or take parameter by value if ownership transfer is intended. |
 | **`WON-MEM-009`** | `SPECIFIED` (Optional Lint) | `Unnecessary var binding` | `var x` never reassigned, field-mutated, or mutably borrowed. | `var` binding name | `var` token span (`LetTokenSpan`). | Syntactic replacement edit `var` -> `let` (safe, unambiguous lint). |
 | **`WON-MEM-010`** | `IMPLEMENTED` (2B.1) | `Use of possibly uninitialized binding` | Read, borrow, or move of binding whose `InitState` is `Uninit` / `MaybeInit` never-initialized. | Use site | Declaration span (`let x: T` once optional uninit syntax exists). | Ensure every control-flow path initializes variable before use. |

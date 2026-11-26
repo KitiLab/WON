@@ -1,10 +1,10 @@
 # WON Language Specification: Ownership and Memory Model
 
-> **Specification Version**: Draft 0.1  
-> **Status**: `SPECIFIED` (Under Architectural Review)  
+> **Specification Version**: Draft 0.1 (Historical Design Baseline; Superseded on Implementation Status by [Draft 0.2.1](ownership-and-borrowing.md))  
+> **Status**: `SPECIFIED` (Governing Ownership-Lite Architecture `ACCEPTED` via [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md); Phase 2B.1–2B.3 `IMPLEMENTED` in `wonc`)  
 > **Module**: Ownership-Lite & Memory Safety  
 > **Date**: November 2026  
-> **Phase 2B.0 Normative Elaboration**: [Ownership and Borrowing Normative Proposal](ownership-and-borrowing.md) (`Proposed / Awaiting Owner Approval`), [Phase 2B.0 Ownership Architecture](../compiler/phase-2b.0-ownership-architecture.md)
+> **Phase 2B Architecture & Normative Spec**: [Ownership and Borrowing Normative Spec](ownership-and-borrowing.md) (`ACCEPTED`), [Phase 2B.0 Ownership Architecture](../compiler/phase-2b.0-ownership-architecture.md), [Phase 2B.3 Drop Elaboration](../compiler/phase-2b.3-drop-elaboration.md)
 
 ---
 
@@ -17,7 +17,7 @@ Systems languages face a stark historical dichotomy:
 WON establishes a third path: **Ownership-Lite** (formalized as an architectural foundation in ADR-003).
 > **Ownership-Lite Vision & Design Objective**: To deliver compile-time memory safety and deterministic destruction with zero garbage collection, **without requiring developers or AI agents to annotate named lifetime parameters (`'a`) in application source code.**
 >
-> *Note on Status*: While the high-level architecture of ownership-lite is an `ACCEPTED` project foundation (ADR-003), the specific static borrow-checking algorithm and reference provenance rules detailed in this document are currently **`SPECIFIED` / `UNDER INVESTIGATION`** awaiting full compiler pass implementation and empirical validation in Phase 2.
+> *Note on Status*: The Ownership-Lite architecture (ADR-003, ADR-011) is `ACCEPTED`, and Phase 2B.1–2B.3 static analyses (CFG move/init, NLL borrow checking, candidate provenance, and deterministic Drop elaboration) are `IMPLEMENTED` in `compiler/poc/`. C11 codegen destructor emission (`WON-GEN-002` subset), general traits (`impl Drop`), and structured concurrency remain `SPECIFIED`/`PLANNED` for Phase 2C/3.
 
 ---
 

@@ -40,6 +40,7 @@ type BindingMeta struct {
 	ZlibVersion     string                    `json:"zlib_version,omitempty"`
 	Typedefs        map[string]TypedefMapping `json:"typedefs"`
 	Functions       map[string]FunctionSig    `json:"functions"`
+	Contracts       *FFIContractCatalog       `json:"ownership_contracts,omitempty"`
 	GeneratedAtUnix int64                     `json:"generated_at_unix"`
 }
 

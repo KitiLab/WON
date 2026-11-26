@@ -104,6 +104,7 @@ type Statement struct {
 	Callee      *symbols.Symbol
 	CalleeName  string
 	ArgTemps    []ValueID
+	ArgPlaces   []Place
 	AggTemps    []AggTemp
 
 	// Phase 2B.3 确定性析构标志与胶水描述符关联字段

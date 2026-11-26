@@ -162,6 +162,15 @@ func CloneFuncCFG(src *cfg.FuncCFG) *cfg.FuncCFG {
 			if len(st.ArgTemps) > 0 {
 				cst.ArgTemps = append([]cfg.ValueID(nil), st.ArgTemps...)
 			}
+			if len(st.ArgPlaces) > 0 {
+				cst.ArgPlaces = make([]cfg.Place, len(st.ArgPlaces))
+				for k, ap := range st.ArgPlaces {
+					cst.ArgPlaces[k] = ap
+					if len(ap.Projections) > 0 {
+						cst.ArgPlaces[k].Projections = append([]cfg.Projection(nil), ap.Projections...)
+					}
+				}
+			}
 			if len(st.AggTemps) > 0 {
 				cst.AggTemps = append([]cfg.AggTemp(nil), st.AggTemps...)
 			}

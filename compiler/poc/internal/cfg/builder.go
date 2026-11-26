@@ -2078,11 +2078,18 @@ func containsTryExpr(expr ast.Expr) bool {
 
 func (b *funcBuilder) emitCallExpr(calSym *symbols.Symbol, fallbackName string, args []ast.Expr, exprType types.TypeID, span diagnostic.Span, selfTemp *ValueID) ValueID {
 	argTemps := make([]ValueID, 0, len(args)+1)
+	argPlaces := make([]Place, 0, len(args)+1)
 	if selfTemp != nil {
 		argTemps = append(argTemps, *selfTemp)
+		argPlaces = append(argPlaces, Place{})
 	}
 	for _, arg := range args {
 		argTemps = append(argTemps, b.lowerExprVal(arg))
+		if p, ok := b.extractPlace(arg); ok {
+			argPlaces = append(argPlaces, p)
+		} else {
+			argPlaces = append(argPlaces, Place{})
+		}
 	}
 	name := fallbackName
 	if calSym != nil && calSym.Name != "" {
@@ -2097,6 +2104,7 @@ func (b *funcBuilder) emitCallExpr(calSym *symbols.Symbol, fallbackName string, 
 		Callee:     calSym,
 		CalleeName: name,
 		ArgTemps:   argTemps,
+		ArgPlaces:  argPlaces,
 		ValTemp:    retTemp,
 		Type:       exprType,
 		Span:       span,
