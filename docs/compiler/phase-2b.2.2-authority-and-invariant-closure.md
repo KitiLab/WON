@@ -1,6 +1,6 @@
 # Phase 2B.2.2 — Borrow Authority, Parameter Provenance & Fail-Closed Invariant Closure
 
-> **Document Status**: `IMPLEMENTED` (Verified in compiler unit, CLI, fuzz, and C11 suites; follows Phase 2B.2.1 baseline [`7d6b27b`](https://github.com/KitiLab/WON/commit/7d6b27ba0b67a1e762830685757b11365c696b31) CI run `45822885882`)  
+> **Document Status**: `IMPLEMENTED` (Phase 2B.2.2 verified at [`6ea286a`](https://github.com/KitiLab/WON/commit/6ea286af53a69e9b57cd8bd45b44a2327ac47aa4), CI run `45827181201`; closed in Phase 2B.2.2.1 follow-up)  
 > **Milestone**: Phase 2B.2.2 (Borrow Authority & Provenance Invariant Closure Prior to Phase 2B.3)  
 > **Governing Specification**: [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`ACCEPTED`), [phase-2b.2-borrow-checker-nll-provenance.md](phase-2b.2-borrow-checker-nll-provenance.md), [phase-2b.2.1-mutability-and-provenance-closure.md](phase-2b.2.1-mutability-and-provenance-closure.md), [ownership-and-borrowing.md](../language-spec/ownership-and-borrowing.md)  
 > **Scope Exclusions**: Phase 2B.3 (`Drop` elaboration, drop flags, `.wonbind` FFI resource cleanup), general `trait` / `impl Drop` / generic `Copy`, two-phase borrows, closures, and concurrency runtime remain deferred.
@@ -36,3 +36,20 @@ Every projection layer (`ProjDeref`, `ProjField`, `ProjConstIdx`, `ProjIndex`, `
 - **`checkCallProvenanceAndDisjointness`**: Validates every summary candidate `pIdx` against `Callee.EffectiveParamCount()` and `ArgTemps`, rejects missing `ValueID`, empty caller `OriginSet`, or empty resolved targets with **`WON-INT-001`** (preventing `targetsOverlap(nil, nil) == false` from certifying safety), enforces `&mut` authority on mutable candidates, treats `Unknown` / `*mut`-derived aliases as conservatively overlapping (`WON-MEM-005`), and preserves cross-field `&` vs `&mut` overlap checks (`WON-MEM-004`/`005`).
 - **`checkOpaqueSignatures`**: Emits **`WON-INT-001`** on bodyless/fn-ptr signatures with `Invalid` return or parameter types, `WON-SEM-010` on unprojectable ref aggregates, `WON-MEM-002` on 0-ref (including zero-arg bodyless/`fn()` returning `&str`) or `>=2`-ref opaque signatures, and `WON-MEM-004` on single shared input returning `&mut`.
 - **`cmd/wonc`**: Both `wonc check` and `wonc build` enforce `enforceOwnershipCheckedGate` (`!OwnershipChecked -> WON-INT-001` before check success or C11 codegen, leaving zero `.won.c` artifacts on failure).
+
+---
+
+## 2. Phase 2B.2.2.1 — Parent Loan Type & Function Identity Closure
+
+Phase 2B.2.2.1 eliminates remaining fail-open fallbacks in [`authority.go`](../../compiler/poc/internal/borrow/authority.go), [`loans.go`](../../compiler/poc/internal/borrow/loans.go), and [`provenance.go`](../../compiler/poc/internal/borrow/provenance.go):
+
+1. **Mandatory `LoanInfo.Type` & Mutability Validation (`validateLoanRecordMetadata`)**:
+   - Replaced conditional checks (`if pl.Type != types.Invalid && tctx != nil`) with mandatory validation across every child reborrow `selfLoan` and every parent `pl` and carrier loan in `OriginSet.Loans`: requires non-nil `types.Context`, non-`Invalid` `TypeID`, `KindRef` or `KindRawPtr`, valid `Elem`, exact agreement between `LoanInfo.IsMut` and `TypeInfo.IsMut`, and matching `BorrowKind`. Missing or contradictory metadata emits **`WON-INT-001`**.
+2. **Uniform Function Identity Enforcement (`validateParentLoansIdentity`, `validateCarrierOriginSet`, `checkReturnOriginsValid`)**:
+   - Requires non-nil `fn` and `fn.FuncSym`, non-zero `fn.FuncSym.ID`, non-zero `flow.FuncSymID == fn.FuncSym.ID`, and matching `loan.FuncSymID == fn.FuncSym.ID` for both parent and child loans (no `!= 0` bypasses).
+3. **Parameter-Origin Projection Validation (`OriginSet.ParamPaths`, `validateParamDerefChainAuthority`)**:
+   - Removed the final fallback returning `AuthorityMutable` on non-reference values: direct `&T` / `*const T` -> `AuthorityShared`, direct `&mut T` -> `AuthorityMutable`, direct `*mut T` -> `AuthorityUnsafeRawPtr`, scalar or non-ref structs/unprojected aggregates -> `AuthorityUnknown` (**`WON-INT-001`**).
+   - Extended `OriginSet` with `ParamPaths` preserving the exact originating parameter field/element projection paths (e.g., `o.inner.rw` vs `m.ro`) without guessing from return field names.
+   - Enforces exact generic substitution argument counts (`len(GenericParamIDs) == len(GenericArgs)` and non-`Invalid` args).
+4. **Raw-Pointer Type & `FromRawPtr` Consistency**:
+   - Validates `LoanInfo.FromRawPtr` strictly against physical type evidence (`KindRawPtr` or direct dereference of a `*const`/`*mut` carrier): forging `FromRawPtr=true` on normal `&T`/`&mut T` loans or omitting it on raw-pointer loans emits **`WON-INT-001`**; isolated `Unknown` origins lacking valid `*mut` backing emit **`WON-INT-001`** and never authorize `&mut`.

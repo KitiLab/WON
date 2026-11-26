@@ -109,6 +109,81 @@ func TestPhase2B2_2AuthorityResultAndParamChainInvariants(t *testing.T) {
 		t.Fatalf("经由元组内共享引用解引用期望 AuthorityShared，实际 %+v", outTupleShared)
 	}
 
+	// 4.5 标量参数、无引用结构体、包含共享/可变引用字段的结构体、嵌套字段、未投影聚合与非法泛型替换
+	plainStructSym := symTab.AllocSymbol(symbols.SymStruct, "Plain", sp)
+	plainStructSym.FieldMap = map[string]*symbols.FieldInfo{"v": {Name: "v", Type: tctx.I32, Span: sp}}
+	plainStructType := tctx.Struct(uint64(plainStructSym.ID), "Plain", nil)
+
+	mixedStructSym := symTab.AllocSymbol(symbols.SymStruct, "MixedBox", sp)
+	mixedStructSym.FieldMap = map[string]*symbols.FieldInfo{
+		"ro": {Name: "ro", Type: refSharedI32, Span: sp},
+		"rw": {Name: "rw", Type: refMutI32, Span: sp},
+	}
+	mixedStructType := tctx.Struct(uint64(mixedStructSym.ID), "MixedBox", nil)
+
+	outerStructSym := symTab.AllocSymbol(symbols.SymStruct, "OuterBox", sp)
+	outerStructSym.FieldMap = map[string]*symbols.FieldInfo{
+		"inner": {Name: "inner", Type: mixedStructType, Span: sp},
+	}
+	outerStructType := tctx.Struct(uint64(outerStructSym.ID), "OuterBox", nil)
+
+	genBoxSym := symTab.AllocSymbol(symbols.SymStruct, "GenBox", sp)
+	tpSym := symTab.AllocSymbol(symbols.SymTypeParam, "T", sp)
+	genBoxSym.GenericParamIDs = []symbols.SymbolID{tpSym.ID}
+	genBoxSym.FieldMap = map[string]*symbols.FieldInfo{
+		"item": {Name: "item", Type: tctx.TypeParam(uint64(tpSym.ID), "T"), Span: sp},
+	}
+	// 故意传入 0 个 GenericArgs（与 GenericParamIDs=1 不匹配）及包含 Invalid 泛型实参
+	badGenCountType := tctx.Struct(uint64(genBoxSym.ID), "GenBox", nil)
+	badGenInvalidArgType := tctx.Struct(uint64(genBoxSym.ID), "GenBox", []types.TypeID{types.Invalid})
+
+	constRawI32 := tctx.RawPtr(false, tctx.I32)
+	extFnSym := symTab.AllocSymbol(symbols.SymFunc, "ext_param_cases", sp)
+	extFnSym.ParamTypes = []types.TypeID{
+		tctx.I32,             // 0: 标量
+		plainStructType,      // 1: 无引用结构体
+		mixedStructType,      // 2: 含 & 与 &mut 的结构体
+		outerStructType,      // 3: 嵌套结构体
+		constRawI32,          // 4: *const i32
+		badGenCountType,      // 5: 泛型参数数量失配
+		badGenInvalidArgType, // 6: 泛型实参 Invalid
+	}
+	extFn := &cfg.FuncCFG{Name: "ext_param_cases", FuncSym: extFnSym}
+
+	if out := validateParamDerefChainAuthority(extFn, 0, cfg.Place{}, tctx, symTab); !out.Internal || out.Authority != AuthorityUnknown {
+		t.Fatalf("标量参数不得授予可变引用权限，实际 %+v", out)
+	}
+	if out := validateParamDerefChainAuthority(extFn, 1, cfg.Place{}, tctx, symTab); !out.Internal || out.Authority != AuthorityUnknown {
+		t.Fatalf("无引用结构体参数不得授予可变引用权限，实际 %+v", out)
+	}
+	if out := validateParamDerefChainAuthority(extFn, 1, cfg.Place{Projections: []cfg.Projection{{Kind: cfg.ProjField, FieldName: "v", ElemType: tctx.I32}}}, tctx, symTab); !out.Internal || out.Authority != AuthorityUnknown {
+		t.Fatalf("无引用结构体投影至 i32 不得授予可变引用权限，实际 %+v", out)
+	}
+	if out := validateParamDerefChainAuthority(extFn, 2, cfg.Place{}, tctx, symTab); !out.Internal || out.Authority != AuthorityUnknown {
+		t.Fatalf("未精确定位引用字段的 MixedBox 聚合不得默认授予可变权限，实际 %+v", out)
+	}
+	if out := validateParamDerefChainAuthority(extFn, 2, cfg.Place{Projections: []cfg.Projection{{Kind: cfg.ProjField, FieldName: "ro", ElemType: refSharedI32}}}, tctx, symTab); out.Internal || out.Authority != AuthorityShared {
+		t.Fatalf("MixedBox.ro (&i32) 期望 AuthorityShared，实际 %+v", out)
+	}
+	if out := validateParamDerefChainAuthority(extFn, 2, cfg.Place{Projections: []cfg.Projection{{Kind: cfg.ProjField, FieldName: "rw", ElemType: refMutI32}}}, tctx, symTab); out.Internal || out.Authority != AuthorityMutable {
+		t.Fatalf("MixedBox.rw (&mut i32) 期望 AuthorityMutable，实际 %+v", out)
+	}
+	if out := validateParamDerefChainAuthority(extFn, 3, cfg.Place{Projections: []cfg.Projection{
+		{Kind: cfg.ProjField, FieldName: "inner", ElemType: mixedStructType},
+		{Kind: cfg.ProjField, FieldName: "rw", ElemType: refMutI32},
+	}}, tctx, symTab); out.Internal || out.Authority != AuthorityMutable {
+		t.Fatalf("嵌套结构体 OuterBox.inner.rw 期望 AuthorityMutable，实际 %+v", out)
+	}
+	if out := validateParamDerefChainAuthority(extFn, 4, cfg.Place{Projections: []cfg.Projection{{Kind: cfg.ProjDeref, ElemType: tctx.I32}}}, tctx, symTab); out.Internal || out.Authority != AuthorityShared {
+		t.Fatalf("*const 原生指针期望 AuthorityShared，实际 %+v", out)
+	}
+	if out := validateParamDerefChainAuthority(extFn, 5, cfg.Place{Projections: []cfg.Projection{{Kind: cfg.ProjField, FieldName: "item", ElemType: tctx.I32}}}, tctx, symTab); !out.Internal || out.Authority != AuthorityUnknown {
+		t.Fatalf("泛型实参个数不匹配应返回 Internal/Unknown，实际 %+v", out)
+	}
+	if out := validateParamDerefChainAuthority(extFn, 6, cfg.Place{Projections: []cfg.Projection{{Kind: cfg.ProjField, FieldName: "item", ElemType: tctx.I32}}}, tctx, symTab); !out.Internal || out.Authority != AuthorityUnknown {
+		t.Fatalf("泛型实参 Invalid 应返回 Internal/Unknown，实际 %+v", out)
+	}
+
 	// 5. 各类元数据缺失/损坏 -> AuthorityUnknown + Internal=true (WON-INT-001)
 	if out := validateParamDerefChainAuthority(nil, 0, cfg.Place{}, tctx, symTab); !out.Internal || out.Authority != AuthorityUnknown {
 		t.Fatalf("nil fn 应返回 Internal/Unknown，实际 %+v", out)
@@ -268,36 +343,127 @@ func TestPhase2B2_2ParentLoanAndOriginSetFailClosed(t *testing.T) {
 		t.Fatalf("创建顺序倒置应触发 Internal/WON-INT-001，实际 %+v", out)
 	}
 
-	// 7. 共享父借用 -> 可变子借用 -> AuthorityShared (WON-MEM-004, 非 Internal)
+	// 7. 共享父借用 -> 可变子借用 -> AuthorityShared (WON-MEM-004, 非 Internal)；共享父 -> 共享子 -> 允许
 	flowSharedParent := &FuncLoanFlow{
 		FuncSymID: fnSym.ID,
 		LoanByID: map[cfg.LoanID]*LoanInfo{
 			1: {ID: 1, FuncSymID: fnSym.ID, Kind: cfg.BorrowShared, Place: xPlace, Type: tctx.Ref(false, tctx.I32), IsMut: false, CreatedAt: cfg.ProgramPoint{Block: 0, StmtIdx: 0}},
-			2: {ID: 2, FuncSymID: fnSym.ID, Kind: cfg.BorrowReborrowMut, Place: derefR, IsMut: true, IsReborrow: true, ParentPlace: rPlace, ParentLoans: map[cfg.LoanID]bool{1: true}, CreatedAt: cfg.ProgramPoint{Block: 0, StmtIdx: 1}},
+			2: {ID: 2, FuncSymID: fnSym.ID, Kind: cfg.BorrowReborrowMut, Place: derefR, Type: tctx.Ref(true, tctx.I32), IsMut: true, IsReborrow: true, ParentPlace: rPlace, ParentLoans: map[cfg.LoanID]bool{1: true}, CreatedAt: cfg.ProgramPoint{Block: 0, StmtIdx: 1}},
+			3: {ID: 3, FuncSymID: fnSym.ID, Kind: cfg.BorrowReborrowShared, Place: derefR, Type: tctx.Ref(false, tctx.I32), IsMut: false, IsReborrow: true, ParentPlace: rPlace, ParentLoans: map[cfg.LoanID]bool{1: true}, CreatedAt: cfg.ProgramPoint{Block: 0, StmtIdx: 1}},
 		},
 	}
 	if out := validateParentLoansIdentity(fn, flowSharedParent, flowSharedParent.LoanByID[2], []bool{true}, tctx); out.Internal || out.Authority != AuthorityShared {
-		t.Fatalf("共享父借用期望 AuthorityShared，实际 %+v", out)
+		t.Fatalf("共享父借用->可变子期望 AuthorityShared，实际 %+v", out)
+	}
+	if out := validateParentLoansIdentity(fn, flowSharedParent, flowSharedParent.LoanByID[3], []bool{true}, tctx); out.Internal || out.Authority != AuthorityMutable {
+		t.Fatalf("共享父借用->共享子重借用应校验合法，实际 %+v", out)
 	}
 
-	// 8. OriginSet 空 / Unknown / Static 校验
+	// 7.5 强制 Parent/Child LoanInfo 类型、BorrowKind、FromRawPtr 与统一 FunctionID 不变量
+	metaFailCases := []struct {
+		name  string
+		modFn func(*cfg.FuncCFG, *FuncLoanFlow) (*LoanInfo, *types.Context)
+	}{
+		{"ParentTypeInvalid", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			fl.LoanByID[1].Type = types.Invalid
+			return fl.LoanByID[2], tctx
+		}},
+		{"NilTypeContext", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			return fl.LoanByID[2], nil
+		}},
+		{"ParentTypeScalar", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			fl.LoanByID[1].Type = tctx.I32
+			return fl.LoanByID[2], tctx
+		}},
+		{"ParentElemTypeInvalid", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			fl.LoanByID[1].Type = tctx.Ref(true, types.Invalid)
+			return fl.LoanByID[2], tctx
+		}},
+		{"ParentIsMutContradictsType", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			fl.LoanByID[1].Type = tctx.Ref(false, tctx.I32)
+			fl.LoanByID[1].IsMut = true
+			return fl.LoanByID[2], tctx
+		}},
+		{"ParentBorrowKindContradictsMut", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			fl.LoanByID[1].Kind = cfg.BorrowShared
+			fl.LoanByID[1].IsMut = true
+			fl.LoanByID[1].Type = tctx.Ref(true, tctx.I32)
+			return fl.LoanByID[2], tctx
+		}},
+		{"ChildTypeInvalid", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			fl.LoanByID[2].Type = types.Invalid
+			return fl.LoanByID[2], tctx
+		}},
+		{"ParentFuncSymIDZero", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			fl.LoanByID[1].FuncSymID = 0
+			return fl.LoanByID[2], tctx
+		}},
+		{"FlowFuncSymIDZero", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			fl.FuncSymID = 0
+			return fl.LoanByID[2], tctx
+		}},
+		{"FlowFuncSymIDMismatchFn", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			fl.FuncSymID = otherSym.ID
+			return fl.LoanByID[2], tctx
+		}},
+		{"FnFuncSymNil", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			f.FuncSym = nil
+			return fl.LoanByID[2], tctx
+		}},
+		{"FromRawPtrForgedOnSafeMutLoan", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			fl.LoanByID[1].FromRawPtr = true
+			return fl.LoanByID[2], tctx
+		}},
+		{"FromRawPtrForgedOnSafeSharedLoan", func(f *cfg.FuncCFG, fl *FuncLoanFlow) (*LoanInfo, *types.Context) {
+			fl.LoanByID[1].Kind = cfg.BorrowShared
+			fl.LoanByID[1].IsMut = false
+			fl.LoanByID[1].Type = tctx.Ref(false, tctx.I32)
+			fl.LoanByID[1].FromRawPtr = true
+			return fl.LoanByID[2], tctx
+		}},
+	}
+	for _, mc := range metaFailCases {
+		t.Run(mc.name, func(t *testing.T) {
+			f := baseFn()
+			fl := &FuncLoanFlow{
+				FuncSymID: fnSym.ID,
+				LoanByID: map[cfg.LoanID]*LoanInfo{
+					1: {ID: 1, FuncSymID: fnSym.ID, Kind: cfg.BorrowMut, Place: xPlace, Type: tctx.Ref(true, tctx.I32), IsMut: true, CreatedAt: cfg.ProgramPoint{Block: 0, StmtIdx: 0}, Carriers: map[symbols.SymbolID]bool{rSym.ID: true}},
+					2: {ID: 2, FuncSymID: fnSym.ID, Kind: cfg.BorrowReborrowMut, Place: derefR, Type: tctx.Ref(true, tctx.I32), IsMut: true, IsReborrow: true, ParentPlace: rPlace, ParentLoans: map[cfg.LoanID]bool{1: true}, CreatedAt: cfg.ProgramPoint{Block: 0, StmtIdx: 1}},
+				},
+			}
+			ch, useTctx := mc.modFn(f, fl)
+			if out := validateParentLoansIdentity(f, fl, ch, []bool{true}, useTctx); !out.Internal || out.Authority != AuthorityUnknown {
+				t.Fatalf("%s 必须触发 Internal/WON-INT-001，实际 %+v", mc.name, out)
+			}
+		})
+	}
+
+	// 8. OriginSet 空 / Unknown / Static / 原生指针一致性校验
 	if out := validateCarrierOriginSet(fn, flow, OriginSet{}, derefR, true, true, tctx, symTab); !out.Internal {
 		t.Fatalf("需要父载体的空 OriginSet 应触发 Internal/WON-INT-001，实际 %+v", out)
 	}
-	if out := validateCarrierOriginSet(fn, flow, OriginSet{Unknown: true}, derefR, true, true, tctx, symTab); out.Authority.PermitsMutableAccess() {
-		t.Fatalf("无原生指针背书的孤立 Unknown OriginSet 绝不允许授权可变访问，实际 %+v", out)
+	if out := validateCarrierOriginSet(fn, flow, OriginSet{Unknown: true}, derefR, true, true, tctx, symTab); !out.Internal || out.Authority.PermitsMutableAccess() {
+		t.Fatalf("无原生指针背书的孤立 Unknown OriginSet 必须触发 Internal 且不得授权可变访问，实际 %+v", out)
 	}
 	if out := validateCarrierOriginSet(fn, flow, OriginSet{Static: true}, derefR, true, true, tctx, symTab); out.Authority != AuthorityShared {
 		t.Fatalf("Static 来源请求可变权限应返回 AuthorityShared，实际 %+v", out)
 	}
+	rawPtrSym := symTab.AllocSymbol(symbols.SymVar, "p_raw", sp)
+	rawPtrSym.Type = tctx.RawPtr(true, tctx.I32)
+	derefRawMut := cfg.Place{RootSymID: rawPtrSym.ID, RootName: "p_raw", RootType: tctx.RawPtr(true, tctx.I32), ElemType: tctx.I32, Projections: []cfg.Projection{{Kind: cfg.ProjDeref, ElemType: tctx.I32}}}
 	rawFlow := &FuncLoanFlow{
 		FuncSymID: fnSym.ID,
 		LoanByID: map[cfg.LoanID]*LoanInfo{
-			10: {ID: 10, FuncSymID: fnSym.ID, Kind: cfg.BorrowMut, Place: derefR, IsMut: true, FromRawPtr: true},
+			10: {ID: 10, FuncSymID: fnSym.ID, Kind: cfg.BorrowMut, Place: derefRawMut, Type: tctx.Ref(true, tctx.I32), IsMut: true, FromRawPtr: true},
+			11: {ID: 11, FuncSymID: fnSym.ID, Kind: cfg.BorrowMut, Place: derefRawMut, Type: tctx.Ref(true, tctx.I32), IsMut: true, FromRawPtr: false},
 		},
 	}
-	if out := validateCarrierOriginSet(fn, rawFlow, OriginSet{Loans: map[cfg.LoanID]bool{10: true}, Unknown: true}, derefR, true, true, tctx, symTab); out.Internal || out.Authority != AuthorityUnsafeRawPtr {
+	if out := validateCarrierOriginSet(fn, rawFlow, OriginSet{Loans: map[cfg.LoanID]bool{10: true}, Unknown: true}, derefRawMut, true, true, tctx, symTab); out.Internal || out.Authority != AuthorityUnsafeRawPtr {
 		t.Fatalf("*mut 原生指针贷款背书的 OriginSet 期望 AuthorityUnsafeRawPtr，实际 %+v", out)
+	}
+	if out := validateCarrierOriginSet(fn, rawFlow, OriginSet{Loans: map[cfg.LoanID]bool{11: true}, Unknown: true}, derefRawMut, true, true, tctx, symTab); !out.Internal {
+		t.Fatalf("原生指针解引用借用缺少 FromRawPtr 标记应触发 Internal/WON-INT-001，实际 %+v", out)
 	}
 }
 

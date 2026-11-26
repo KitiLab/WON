@@ -1,8 +1,8 @@
 # WON Compiler Architecture
 
-> **Document Status**: `IMPLEMENTED` (Phase 0B–2A.2.1 Frontend, Core Semantics & C11 Subset Contract; Phase 2B.1–2B.2.2 Ownership CFG, Move, Borrow/NLL, Mutability, Authority & Provenance) / `SPECIFIED` (Phase 2B.3 Drop, Phase 2C TIR Pending)  
+> **Document Status**: `IMPLEMENTED` (Phase 0B–2A.2.1 Frontend, Core Semantics & C11 Subset Contract; Phase 2B.1–2B.2.2.1 Ownership CFG, Move, Borrow/NLL, Mutability, Authority & Provenance) / `SPECIFIED` (Phase 2B.3 Drop, Phase 2C TIR Pending)  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 2B.2.2  
+> **Last Updated**: Phase 2B.2.2.1  
 > **Normative Specification**: [docs/language-spec/compiler-and-ir-requirements.md](language-spec/compiler-and-ir-requirements.md)  
 > **Phase 2A–2B Details**: [Typed Semantic Model](compiler/phase-2a-typed-semantic-model.md), [Semantic Analysis Pipeline](compiler/phase-2a-semantic-analysis.md), [C11 Backend Capability Matrix](compiler/phase-2a.2-backend-capability-matrix.md), [Phase 2B.0 Ownership & CFG Architecture](compiler/phase-2b.0-ownership-architecture.md), [Phase 2B.1.1 CFG Soundness Closure](compiler/phase-2b.1.1-cfg-soundness-closure.md), [Phase 2B.1.2 Match Pattern Closure](compiler/phase-2b.1.2-match-pattern-ownership-closure.md), [Phase 2B.2 Borrow Checker, NLL & Provenance](compiler/phase-2b.2-borrow-checker-nll-provenance.md), [Phase 2B.2.1 Mutability & Provenance Closure](compiler/phase-2b.2.1-mutability-and-provenance-closure.md), [Phase 2B.2.2 Authority & Invariant Closure](compiler/phase-2b.2.2-authority-and-invariant-closure.md)
 

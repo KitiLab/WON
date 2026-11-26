@@ -118,10 +118,13 @@ func validateParamDerefChainAuthority(
 
 	viaUnsafeRaw := false
 	sawShared := false
+	sawMutRef := false
 	firstInfo := tctx.Info(curType)
 	if firstInfo.Kind == types.KindRef {
 		if !firstInfo.IsMut {
 			sawShared = true
+		} else {
+			sawMutRef = true
 		}
 	} else if firstInfo.Kind == types.KindRawPtr {
 		if !firstInfo.IsMut {
@@ -140,8 +143,9 @@ func validateParamDerefChainAuthority(
 			}
 			if !info.IsMut {
 				sawShared = true
-			}
-			if info.Kind == types.KindRawPtr && info.IsMut {
+			} else if info.Kind == types.KindRef {
+				sawMutRef = true
+			} else if info.Kind == types.KindRawPtr {
 				viaUnsafeRaw = true
 			}
 			nextType := info.Elem
@@ -157,8 +161,9 @@ func validateParamDerefChainAuthority(
 			if info.Kind == types.KindRef || info.Kind == types.KindRawPtr {
 				if !info.IsMut {
 					sawShared = true
-				}
-				if info.Kind == types.KindRawPtr && info.IsMut {
+				} else if info.Kind == types.KindRef {
+					sawMutRef = true
+				} else if info.Kind == types.KindRawPtr {
 					viaUnsafeRaw = true
 				}
 				if info.Elem == types.Invalid {
@@ -182,9 +187,15 @@ func validateParamDerefChainAuthority(
 				return internalAuthorityError(fmt.Sprintf("结构体 '%s' 中不存在字段 '%s'", sym.Name, proj.FieldName))
 			}
 			fieldType := fi.Type
-			if len(sym.GenericParamIDs) > 0 && len(sym.GenericParamIDs) == len(info.GenericArgs) {
+			if len(sym.GenericParamIDs) > 0 {
+				if len(sym.GenericParamIDs) != len(info.GenericArgs) {
+					return internalAuthorityError(fmt.Sprintf("泛型结构体 '%s' 字段 '%s' 替换参数个数不匹配 (%d vs %d)", sym.Name, proj.FieldName, len(sym.GenericParamIDs), len(info.GenericArgs)))
+				}
 				subst := make(map[uint64]types.TypeID, len(info.GenericArgs))
 				for i, gid := range sym.GenericParamIDs {
+					if info.GenericArgs[i] == types.Invalid {
+						return internalAuthorityError(fmt.Sprintf("泛型结构体 '%s' 第 %d 个实参类型无效", sym.Name, i))
+					}
 					subst[uint64(gid)] = info.GenericArgs[i]
 				}
 				fieldType = tctx.Substitute(fieldType, subst)
@@ -201,8 +212,9 @@ func validateParamDerefChainAuthority(
 			if info.Kind == types.KindRef || info.Kind == types.KindRawPtr {
 				if !info.IsMut {
 					sawShared = true
-				}
-				if info.Kind == types.KindRawPtr && info.IsMut {
+				} else if info.Kind == types.KindRef {
+					sawMutRef = true
+				} else if info.Kind == types.KindRawPtr {
 					viaUnsafeRaw = true
 				}
 				if info.Elem == types.Invalid {
@@ -230,8 +242,9 @@ func validateParamDerefChainAuthority(
 			if info.Kind == types.KindRef || info.Kind == types.KindRawPtr {
 				if !info.IsMut {
 					sawShared = true
-				}
-				if info.Kind == types.KindRawPtr && info.IsMut {
+				} else if info.Kind == types.KindRef {
+					sawMutRef = true
+				} else if info.Kind == types.KindRawPtr {
 					viaUnsafeRaw = true
 				}
 				if info.Elem == types.Invalid {
@@ -263,13 +276,93 @@ func validateParamDerefChainAuthority(
 	if sawShared {
 		return sharedAuthority("解引用或投影链中包含只读共享引用 (&T / *const T)")
 	}
+	endInfo := tctx.Info(curType)
+	if endInfo.Kind == types.KindRef {
+		if !endInfo.IsMut {
+			return sharedAuthority("参数投影目标类型为共享不可变引用 (&T)")
+		}
+		sawMutRef = true
+	} else if endInfo.Kind == types.KindRawPtr {
+		if !endInfo.IsMut {
+			return sharedAuthority("参数投影目标类型为只读原生指针 (*const T)")
+		}
+		viaUnsafeRaw = true
+	}
+
 	if viaUnsafeRaw {
 		return okAuthority(AuthorityUnsafeRawPtr)
+	}
+	if sawMutRef {
+		return okAuthority(AuthorityMutable)
+	}
+	// 非引用标量或未精确定位至引用成员的值聚合参数绝不能默认授予可变借用权限
+	return internalAuthorityError(fmt.Sprintf("形参 #%d 路径 '%s' (终端类型 '%s') 不携带可证的可变引用权限", pIdx, place.String(), tctx.Format(curType)))
+}
+
+// validateLoanRecordMetadata 强制验证单条 LoanInfo 的规范函数身份、引用/指针类型、ElemType、BorrowKind 与 FromRawPtr 一致性。
+func validateLoanRecordMetadata(
+	expectedFuncSymID symbols.SymbolID,
+	loan *LoanInfo,
+	tctx *types.Context,
+	label string,
+) authorityCheckOutcome {
+	if expectedFuncSymID == 0 {
+		return internalAuthorityError(fmt.Sprintf("%s校验缺少有效的函数符号身份 ID", label))
+	}
+	if loan == nil {
+		return internalAuthorityError(fmt.Sprintf("%s记录为空 (nil)", label))
+	}
+	if loan.ID == cfg.InvalidLoan {
+		return internalAuthorityError(fmt.Sprintf("%s LoanID 为零值 InvalidLoan (0)", label))
+	}
+	if loan.FuncSymID == 0 || loan.FuncSymID != expectedFuncSymID {
+		return internalAuthorityError(fmt.Sprintf("%s L%d 函数身份不匹配 (期望 %d，实际 %d)", label, loan.ID, expectedFuncSymID, loan.FuncSymID))
+	}
+	if tctx == nil {
+		return internalAuthorityError(fmt.Sprintf("%s L%d 校验缺少 TypeContext", label, loan.ID))
+	}
+	if !isValidBorrowKind(loan.Kind) {
+		return internalAuthorityError(fmt.Sprintf("%s L%d BorrowKind (%d) 非法", label, loan.ID, loan.Kind))
+	}
+	if loan.IsReborrow && loan.Kind != cfg.BorrowReborrowShared && loan.Kind != cfg.BorrowReborrowMut {
+		return internalAuthorityError(fmt.Sprintf("%s L%d 标记为重借用但 BorrowKind (%d) 非重借用类型", label, loan.ID, loan.Kind))
+	}
+	if loan.IsMut != (loan.Kind == cfg.BorrowMut || loan.Kind == cfg.BorrowReborrowMut) {
+		return internalAuthorityError(fmt.Sprintf("%s L%d IsMut (%v) 与 BorrowKind (%d) 矛盾", label, loan.ID, loan.IsMut, loan.Kind))
+	}
+	if loan.Type == types.Invalid {
+		return internalAuthorityError(fmt.Sprintf("%s L%d 缺少有效的 TypeID (Invalid)", label, loan.ID))
+	}
+	lInfo := tctx.Info(loan.Type)
+	if lInfo.Kind != types.KindRef && lInfo.Kind != types.KindRawPtr {
+		return internalAuthorityError(fmt.Sprintf("%s L%d 类型 '%s' 不是引用或指针类型", label, loan.ID, tctx.Format(loan.Type)))
+	}
+	if lInfo.Elem == types.Invalid {
+		return internalAuthorityError(fmt.Sprintf("%s L%d 元素类型无效", label, loan.ID))
+	}
+	if lInfo.IsMut != loan.IsMut {
+		return internalAuthorityError(fmt.Sprintf("%s L%d IsMut (%v) 与引用类型 '%s' 的可变性矛盾", label, loan.ID, loan.IsMut, tctx.Format(loan.Type)))
+	}
+
+	// 验证 FromRawPtr 与实际类型的物理来源一致性：普通安全引用绝不能仅凭布尔标记伪装成原生指针来源
+	pref, hasDeref := loan.Place.PrefixBeforeLastDeref()
+	derefsRawPtr := !loan.IsReborrow && hasDeref && pref.ElemType != types.Invalid && tctx.Info(pref.ElemType).Kind == types.KindRawPtr
+	if loan.FromRawPtr {
+		if lInfo.Kind != types.KindRawPtr && !derefsRawPtr {
+			return internalAuthorityError(fmt.Sprintf("%s L%d 错误标记 FromRawPtr=true（既非 *T 类型也未直接解引用原生指针）", label, loan.ID))
+		}
+		if derefsRawPtr && loan.IsMut && !tctx.Info(pref.ElemType).IsMut {
+			return sharedAuthority(fmt.Sprintf("%s L%d 从只读 *const 原生指针解引用不得获取可变借用", label, loan.ID))
+		}
+	} else {
+		if lInfo.Kind == types.KindRawPtr || derefsRawPtr {
+			return internalAuthorityError(fmt.Sprintf("%s L%d 为原生指针类型/解引用但缺少 FromRawPtr=true 标记", label, loan.ID))
+		}
 	}
 	return okAuthority(AuthorityMutable)
 }
 
-// validateParentLoansIdentity 在排他检查前集中验证重借用声明的全部父借用标识、所属函数、可重借用类型、位置一致、无环拓扑与前置可达顺序。
+// validateParentLoansIdentity 在排他检查前集中验证重借用及全部父借用标识、统一函数身份、强制类型一致、无环拓扑与前置可达顺序。
 func validateParentLoansIdentity(
 	fn *cfg.FuncCFG,
 	flow *FuncLoanFlow,
@@ -277,11 +370,21 @@ func validateParentLoansIdentity(
 	reachable []bool,
 	tctx *types.Context,
 ) authorityCheckOutcome {
-	if fn == nil || flow == nil || selfLoan == nil || !selfLoan.IsReborrow {
-		return internalAuthorityError("重借用父关系校验缺少有效的 FuncCFG/FuncLoanFlow/LoanInfo")
+	if fn == nil || fn.FuncSym == nil || fn.FuncSym.ID == 0 {
+		return internalAuthorityError("重借用父关系校验缺少有效的 FuncCFG/FuncSym.ID")
 	}
-	if selfLoan.ID == cfg.InvalidLoan {
-		return internalAuthorityError("重借用事件自身 LoanID 为 InvalidLoan (0)")
+	expectedFuncID := fn.FuncSym.ID
+	if flow == nil || flow.FuncSymID == 0 || flow.FuncSymID != expectedFuncID {
+		return internalAuthorityError(fmt.Sprintf("重借用校验流 FuncSymID 缺失或与函数符号 %d 不一致", expectedFuncID))
+	}
+	if tctx == nil {
+		return internalAuthorityError("重借用父关系校验缺少 TypeContext")
+	}
+	if selfLoan == nil || !selfLoan.IsReborrow {
+		return internalAuthorityError("重借用父关系校验缺少有效重借用 LoanInfo")
+	}
+	if childCheck := validateLoanRecordMetadata(expectedFuncID, selfLoan, tctx, "子重借用"); childCheck.Internal {
+		return childCheck
 	}
 	if !selfLoan.Place.HasDeref() && selfLoan.ParentPlace.RootSymID == 0 {
 		return internalAuthorityError(fmt.Sprintf("重借用 L%d 缺少解引用投影与有效 ParentPlace", selfLoan.ID))
@@ -305,17 +408,9 @@ func validateParentLoansIdentity(
 		if pl == nil {
 			return internalAuthorityError(fmt.Sprintf("重借用 L%d 引用了不存在的父借用 L%d", selfLoan.ID, pid))
 		}
-		if flow.FuncSymID != 0 && pl.FuncSymID != flow.FuncSymID {
-			return internalAuthorityError(fmt.Sprintf("重借用 L%d 引用了跨函数父借用 L%d (期望 FuncSymID=%d，实际=%d)", selfLoan.ID, pid, flow.FuncSymID, pl.FuncSymID))
-		}
-		if !isValidBorrowKind(pl.Kind) {
-			return internalAuthorityError(fmt.Sprintf("重借用 L%d 的父借用 L%d 种类 %d 非法", selfLoan.ID, pid, pl.Kind))
-		}
-		if pl.Type != types.Invalid && tctx != nil {
-			pInfo := tctx.Info(pl.Type)
-			if pInfo.Kind != types.KindRef && pInfo.Kind != types.KindRawPtr {
-				return internalAuthorityError(fmt.Sprintf("重借用 L%d 的父借用 L%d 类型 '%s' 不是引用/指针类型", selfLoan.ID, pid, tctx.Format(pl.Type)))
-			}
+		parentCheck := validateLoanRecordMetadata(expectedFuncID, pl, tctx, fmt.Sprintf("重借用 L%d 的父借用", selfLoan.ID))
+		if parentCheck.Internal {
+			return parentCheck
 		}
 		// 一致性校验：若父占位与父借用均为简单局部变量载体且记录在 Carriers 中，父借用应确实绑定到该局部载体或其前驱
 		if selfLoan.ParentPlace.RootSymID != 0 && !selfLoan.ParentPlace.HasDeref() {
@@ -409,8 +504,11 @@ func validateCarrierOriginSet(
 	tctx *types.Context,
 	symTab *symbols.Table,
 ) authorityCheckOutcome {
-	if fn == nil || flow == nil {
-		return internalAuthorityError("载体 OriginSet 校验缺少 FuncCFG 或 FuncLoanFlow")
+	if fn == nil || fn.FuncSym == nil || fn.FuncSym.ID == 0 || flow == nil || flow.FuncSymID == 0 || flow.FuncSymID != fn.FuncSym.ID {
+		return internalAuthorityError("载体 OriginSet 校验缺少有效的 FuncSym/FuncLoanFlow 统一身份")
+	}
+	if tctx == nil {
+		return internalAuthorityError("载体 OriginSet 校验缺少 TypeContext")
 	}
 	if orig.isEmpty() {
 		if requireNonEmpty {
@@ -423,18 +521,11 @@ func validateCarrierOriginSet(
 	rawBackedMut := false
 
 	for _, lid := range orig.SortedLoans() {
-		if lid == cfg.InvalidLoan {
-			return internalAuthorityError("OriginSet 包含零值 InvalidLoan (L0)")
-		}
 		li := flow.LoanByID[lid]
-		if li == nil {
-			return internalAuthorityError(fmt.Sprintf("OriginSet 引用了未知借用 L%d", lid))
-		}
-		if flow.FuncSymID != 0 && li.FuncSymID != flow.FuncSymID {
-			return internalAuthorityError(fmt.Sprintf("OriginSet 引用了跨函数借用 L%d", lid))
-		}
-		if !isValidBorrowKind(li.Kind) {
-			return internalAuthorityError(fmt.Sprintf("OriginSet 借用 L%d 包含非法 BorrowKind %d", lid, li.Kind))
+		if chk := validateLoanRecordMetadata(fn.FuncSym.ID, li, tctx, "载体 OriginSet 借用"); chk.Internal {
+			return chk
+		} else if chk.Authority == AuthorityShared {
+			res = combineOriginAuthorities(res, chk)
 		}
 		if requireMutAccess {
 			if !li.IsMut {
@@ -443,12 +534,31 @@ func validateCarrierOriginSet(
 				rawBackedMut = true
 				res = combineOriginAuthorities(res, okAuthority(AuthorityUnsafeRawPtr))
 			}
-		} else if li.FromRawPtr {
+		} else if li.FromRawPtr && li.IsMut {
 			rawBackedMut = true
 		}
 	}
 
 	for _, pIdx := range orig.SortedParams() {
+		if pm, hasPaths := orig.ParamPaths[pIdx]; hasPaths && len(pm) > 0 {
+			keys := make([]string, 0, len(pm))
+			for k := range pm {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				srcPlace := pm[k]
+				pOut := validateParamDerefChainAuthority(fn, pIdx, srcPlace, tctx, symTab)
+				if pOut.Internal {
+					return pOut
+				}
+				if pOut.Authority == AuthorityUnsafeRawPtr {
+					rawBackedMut = true
+				}
+				res = combineOriginAuthorities(res, pOut)
+			}
+			continue
+		}
 		pOut := validateParamDerefChainAuthority(fn, pIdx, place, tctx, symTab)
 		if pOut.Internal {
 			return pOut
@@ -468,12 +578,12 @@ func validateCarrierOriginSet(
 	}
 
 	if orig.Unknown {
-		// 仅允许明确来自 *mut 原生指针的 Unknown 在显式 unsafe 语境中获得 AuthorityUnsafeRawPtr；
-		// 孤立无背书或来源冲突的 Unknown 绝不能授权 &mut 访问。
+		// 仅允许经类型一致性校验的 *mut T 原生指针来源在 unsafe 语境获得 AuthorityUnsafeRawPtr；
+		// 孤立无有效 *mut 背书的 Unknown 绝不允许作为可变权限依据。
 		if !rawBackedMut {
 			if requireMutAccess {
 				if len(orig.Loans) == 0 && len(orig.Params) == 0 {
-					return sharedAuthority("未知来源 (&const/不透明来源) 不具备独占 &mut 访问权限")
+					return internalAuthorityError("Unknown 溯源缺乏有效的 *mut 原生指针或引用证据，拒绝赋予可变权限")
 				}
 				return sharedAuthority("未知别名来源不具备可证的 &mut 访问权限")
 			}

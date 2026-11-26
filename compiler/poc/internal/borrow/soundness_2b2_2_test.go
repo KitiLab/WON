@@ -114,4 +114,42 @@ impl Pair:
 			}
 		}
 	}
+
+	// 7. 混合结构体参数：嵌套投影提取 &mut 字段合法通过；混合分支混入 shared 字段作 &mut 返回被 ParamPaths 精确拦截
+	assertPass(t, "NestedStructParamProjectedMutRefReturnPass", `
+struct Inner:
+    rw: &mut i32
+    ro: &i32
+
+struct Outer:
+    inner: Inner
+
+fn pick_nested_mut(o: Outer) -> &mut i32:
+    return o.inner.rw
+`)
+
+	assertFailCode(t, "MixedStructParamSharedFieldReturnedViaIntermediateMutRejected", `
+struct Mixed:
+    ro: &i32
+    rw: &mut i32
+
+fn sneaky_field(c: bool, m: Mixed, fallback: &mut i32) -> &mut i32:
+    let r = m.ro
+    if c:
+        return &mut *r
+    return fallback
+`, "WON-MEM-004")
+
+	// 8. *const T 与 *mut T 在函数返回安全引用时必须拒绝 (WON-MEM-003)
+	assertFailCode(t, "RawConstPtrParamCannotReturnSafeRef", `
+fn bad_raw_const(p: *const i32) -> &i32:
+    return unsafe:
+        &*p
+`, "WON-MEM-003")
+
+	assertFailCode(t, "RawMutPtrParamCannotReturnSafeMutRef", `
+fn bad_raw_mut(p: *mut i32) -> &mut i32:
+    return unsafe:
+        &mut *p
+`, "WON-MEM-003")
 }

@@ -706,23 +706,15 @@ func checkReturnOriginsValid(
 	report *diagnostic.Report,
 	emitted map[diagDedupKey]bool,
 ) bool {
-	if fn == nil || flow == nil {
-		emitInternalFlowDiag(fn, report, emitted, st.Span, "返回溯源校验缺少 FuncCFG 或 FuncLoanFlow")
+	if fn == nil || fn.FuncSym == nil || fn.FuncSym.ID == 0 || flow == nil || flow.FuncSymID == 0 || flow.FuncSymID != fn.FuncSym.ID || tctx == nil {
+		emitInternalFlowDiag(fn, report, emitted, st.Span, "返回溯源校验缺少有效的 FuncSym/FuncLoanFlow/TypeContext")
 		return false
 	}
 
 	for _, lid := range orig.SortedLoans() {
-		if lid == cfg.InvalidLoan {
-			emitInternalFlowDiag(fn, report, emitted, st.Span, "返回溯源集合包含无效 LoanID (L0)")
-			return false
-		}
 		li := flow.LoanByID[lid]
-		if li == nil {
-			emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("返回溯源集合引用了不存在的借用 L%d", lid))
-			return false
-		}
-		if flow.FuncSymID != 0 && li.FuncSymID != flow.FuncSymID {
-			emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("返回溯源集合包含跨函数借用 L%d", lid))
+		if lChk := validateLoanRecordMetadata(fn.FuncSym.ID, li, tctx, "返回溯源借用"); lChk.Internal {
+			emitInternalFlowDiag(fn, report, emitted, st.Span, lChk.Detail)
 			return false
 		}
 		targets := resolveLoanUnderlyingTargets(flow, lid, nil)
@@ -774,6 +766,17 @@ func checkReturnOriginsValid(
 				emitInternalFlowDiag(fn, report, emitted, st.Span, pOut.Detail)
 				return false
 			}
+			if pOut.Authority == AuthorityUnsafeRawPtr {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-MEM-003",
+					Severity:    "error",
+					Message:     fmt.Sprintf("函数 '%s' 不能将源自原生指针的参数引用逃逸为安全返回值", fn.Name),
+					File:        st.Span.File,
+					Span:        st.Span,
+					Explanation: "原生指针解引用来源缺乏安全生命周期保证，禁止直接逃逸。",
+				})
+				return false
+			}
 			if isMut && pOut.Authority == AuthorityShared {
 				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
 					Code:        "WON-MEM-004",
@@ -814,10 +817,6 @@ func checkReturnOriginsValid(
 
 	paramCands := orig.SortedParams()
 	if len(paramCands) > 0 {
-		if fn.FuncSym == nil || tctx == nil {
-			emitInternalFlowDiag(fn, report, emitted, st.Span, "验证参数返回溯源时缺少 FuncSym 或 TypeContext")
-			return false
-		}
 		paramCount := fn.FuncSym.EffectiveParamCount()
 		for _, pIdx := range paramCands {
 			if pIdx < 0 || pIdx >= paramCount {
@@ -830,84 +829,64 @@ func checkReturnOriginsValid(
 				return false
 			}
 			pInfo := tctx.Info(pt)
-			if isMut {
-				pLabel := fn.FuncSym.EffectiveParamName(pIdx)
-				if pLabel == "" {
-					pLabel = fmt.Sprintf("#%d", pIdx+1)
+			pLabel := fn.FuncSym.EffectiveParamName(pIdx)
+			if pLabel == "" {
+				pLabel = fmt.Sprintf("#%d", pIdx+1)
+			}
+			if pInfo.Kind == types.KindRawPtr {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-MEM-003",
+					Severity:    "error",
+					Message:     fmt.Sprintf("函数 '%s' 不能将原生指针参数 '%s' 直接作为安全引用返回", fn.Name, pLabel),
+					File:        st.Span.File,
+					Span:        st.Span,
+					Explanation: "原生指针来源缺乏安全生命周期保证，禁止直接逃逸为安全引用返回值。",
+				})
+				return false
+			}
+
+			// 基于起源投影路径验证参数自身及携带的字段引用投影权限，绝不按返回字段名猜测或放行未解析聚合
+			var checkPlaces []cfg.Place
+			if pm := orig.ParamPaths[pIdx]; len(pm) > 0 {
+				keys := make([]string, 0, len(pm))
+				for k := range pm {
+					keys = append(keys, k)
 				}
-				switch pInfo.Kind {
-				case types.KindRef:
-					if !pInfo.IsMut {
-						emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
-							Code:        "WON-MEM-004",
-							Severity:    "error",
-							Message:     fmt.Sprintf("函数 '%s' 不能将不可变引用参数 '%s' 作为 '&mut' 返回", fn.Name, pLabel),
-							File:        st.Span.File,
-							Span:        st.Span,
-							Explanation: "只有具备 &mut 独占可变权限的来源才可作为 &mut 返回候选。",
-						})
-						return false
-					}
-				case types.KindRawPtr:
+				sort.Strings(keys)
+				for _, k := range keys {
+					checkPlaces = append(checkPlaces, pm[k])
+				}
+			} else {
+				checkPlaces = []cfg.Place{st.Place}
+			}
+
+			for _, cp := range checkPlaces {
+				pOut := validateParamDerefChainAuthority(fn, pIdx, cp, tctx, symTab)
+				if pOut.Internal {
+					emitInternalFlowDiag(fn, report, emitted, st.Span, pOut.Detail)
+					return false
+				}
+				if pOut.Authority == AuthorityUnsafeRawPtr {
 					emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
 						Code:        "WON-MEM-003",
 						Severity:    "error",
-						Message:     fmt.Sprintf("函数 '%s' 不能将原生指针参数 '%s' 直接作为安全 '&mut' 返回", fn.Name, pLabel),
+						Message:     fmt.Sprintf("函数 '%s' 试图通过原生指针路径返回安全引用", fn.Name),
 						File:        st.Span.File,
 						Span:        st.Span,
-						Explanation: "原生指针来源缺乏安全生命周期保证，禁止直接逃逸为安全引用返回值。",
+						Explanation: "原生指针解引用来源禁止直接逃逸为安全引用返回值。",
 					})
 					return false
-				default:
-					// 若参数本身为按值传入且包含引用字段的结构体/元组，只有其内部确实携带 &mut 叶子时才可起源为 &mut 返回
-					leaves, _ := collectTypeRefLeaves(tctx, symTab, pt, "")
-					hasMutLeaf := false
-					for _, lf := range leaves {
-						if lf.IsMut {
-							hasMutLeaf = true
-							break
-						}
-					}
-					if !hasMutLeaf {
-						emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
-							Code:        "WON-MEM-004",
-							Severity:    "error",
-							Message:     fmt.Sprintf("函数 '%s' 参数 '%s' 不具备可导出的 '&mut' 来源权限", fn.Name, pLabel),
-							File:        st.Span.File,
-							Span:        st.Span,
-							Explanation: "按值或仅包含只读引用的参数无法授权 &mut 引用返回。",
-						})
-						return false
-					}
 				}
-				if st.Place.RootSymID != 0 && len(st.Place.Projections) > 0 {
-					pOut := validateParamDerefChainAuthority(fn, pIdx, st.Place, tctx, symTab)
-					if pOut.Internal {
-						emitInternalFlowDiag(fn, report, emitted, st.Span, pOut.Detail)
-						return false
-					}
-					if pOut.Authority == AuthorityShared {
-						emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
-							Code:        "WON-MEM-004",
-							Severity:    "error",
-							Message:     fmt.Sprintf("函数 '%s' 返回路径包含只读共享外层引用，禁止作为 '&mut' 返回", fn.Name),
-							File:        st.Span.File,
-							Span:        st.Span,
-							Explanation: "经由共享外层引用的投影仅具只读权限。",
-						})
-						return false
-					}
-					if pOut.Authority == AuthorityUnsafeRawPtr {
-						emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
-							Code:        "WON-MEM-003",
-							Severity:    "error",
-							Message:     fmt.Sprintf("函数 '%s' 试图通过原生指针路径返回安全 '&mut' 引用", fn.Name),
-							File:        st.Span.File,
-							Span:        st.Span,
-							Explanation: "原生指针解引用来源禁止直接逃逸为安全引用返回值。",
-						})
-						return false
-					}
+				if isMut && pOut.Authority == AuthorityShared {
+					emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+						Code:        "WON-MEM-004",
+						Severity:    "error",
+						Message:     fmt.Sprintf("函数 '%s' 不能将不可变引用参数/字段 '%s' 作为 '&mut' 返回", fn.Name, pLabel),
+						File:        st.Span.File,
+						Span:        st.Span,
+						Explanation: "只有具备 &mut 独占可变权限的来源才可作为 &mut 返回候选。",
+					})
+					return false
 				}
 			}
 		}

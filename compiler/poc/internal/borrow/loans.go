@@ -15,17 +15,35 @@ import (
 // OriginSet 描述单个引用临时值或存储载体位置在特定控制流点可携带的借用、形参与静态溯源集合。
 // 采用有限确定性集合格，满足单调有限高迭代收敛保证。
 type OriginSet struct {
-	Loans   map[cfg.LoanID]bool
-	Params  map[int]bool
-	Static  bool
-	Unknown bool
+	Loans      map[cfg.LoanID]bool
+	Params     map[int]bool
+	ParamPaths map[int]map[string]cfg.Place
+	Static     bool
+	Unknown    bool
 }
 
 func newOriginSet() OriginSet {
 	return OriginSet{
-		Loans:  make(map[cfg.LoanID]bool),
-		Params: make(map[int]bool),
+		Loans:      make(map[cfg.LoanID]bool),
+		Params:     make(map[int]bool),
+		ParamPaths: make(map[int]map[string]cfg.Place),
 	}
+}
+
+func (o *OriginSet) recordParamPath(pIdx int, place cfg.Place) {
+	if o.Params == nil {
+		o.Params = make(map[int]bool)
+	}
+	o.Params[pIdx] = true
+	if o.ParamPaths == nil {
+		o.ParamPaths = make(map[int]map[string]cfg.Place)
+	}
+	pm := o.ParamPaths[pIdx]
+	if pm == nil {
+		pm = make(map[string]cfg.Place, 1)
+		o.ParamPaths[pIdx] = pm
+	}
+	pm[place.Key()] = place
 }
 
 func (o OriginSet) isEmpty() bool {
@@ -34,16 +52,24 @@ func (o OriginSet) isEmpty() bool {
 
 func (o OriginSet) clone() OriginSet {
 	cp := OriginSet{
-		Loans:   make(map[cfg.LoanID]bool, len(o.Loans)),
-		Params:  make(map[int]bool, len(o.Params)),
-		Static:  o.Static,
-		Unknown: o.Unknown,
+		Loans:      make(map[cfg.LoanID]bool, len(o.Loans)),
+		Params:     make(map[int]bool, len(o.Params)),
+		ParamPaths: make(map[int]map[string]cfg.Place, len(o.ParamPaths)),
+		Static:     o.Static,
+		Unknown:    o.Unknown,
 	}
 	for id := range o.Loans {
 		cp.Loans[id] = true
 	}
 	for p := range o.Params {
 		cp.Params[p] = true
+	}
+	for p, pm := range o.ParamPaths {
+		inner := make(map[string]cfg.Place, len(pm))
+		for k, pl := range pm {
+			inner[k] = pl
+		}
+		cp.ParamPaths[p] = inner
 	}
 	return cp
 }
@@ -55,11 +81,24 @@ func (o *OriginSet) merge(other OriginSet) {
 	if o.Params == nil {
 		o.Params = make(map[int]bool)
 	}
+	if o.ParamPaths == nil && len(other.ParamPaths) > 0 {
+		o.ParamPaths = make(map[int]map[string]cfg.Place, len(other.ParamPaths))
+	}
 	for id := range other.Loans {
 		o.Loans[id] = true
 	}
 	for p := range other.Params {
 		o.Params[p] = true
+	}
+	for p, pm := range other.ParamPaths {
+		dst := o.ParamPaths[p]
+		if dst == nil {
+			dst = make(map[string]cfg.Place, len(pm))
+			o.ParamPaths[p] = dst
+		}
+		for k, pl := range pm {
+			dst[k] = pl
+		}
 	}
 	if other.Static {
 		o.Static = true
@@ -70,7 +109,7 @@ func (o *OriginSet) merge(other OriginSet) {
 }
 
 func (o OriginSet) equals(other OriginSet) bool {
-	if o.Static != other.Static || o.Unknown != other.Unknown || len(o.Loans) != len(other.Loans) || len(o.Params) != len(other.Params) {
+	if o.Static != other.Static || o.Unknown != other.Unknown || len(o.Loans) != len(other.Loans) || len(o.Params) != len(other.Params) || len(o.ParamPaths) != len(other.ParamPaths) {
 		return false
 	}
 	for id := range o.Loans {
@@ -81,6 +120,17 @@ func (o OriginSet) equals(other OriginSet) bool {
 	for p := range o.Params {
 		if !other.Params[p] {
 			return false
+		}
+	}
+	for p, pm := range o.ParamPaths {
+		opm := other.ParamPaths[p]
+		if len(pm) != len(opm) {
+			return false
+		}
+		for k := range pm {
+			if _, ok := opm[k]; !ok {
+				return false
+			}
 		}
 	}
 	return true
@@ -422,9 +472,16 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 						}
 					}
 				}
-				// 子重借用继承父借用的参数/静态/未知底层溯源，同时保留自身 LoanID
+				// 子重借用继承父借用的参数（含完整投影路径）/静态/未知底层溯源，同时保留自身 LoanID
 				for pIdx := range parentOrig.Params {
 					o.Params[pIdx] = true
+					if pm, hasPaths := parentOrig.ParamPaths[pIdx]; hasPaths && len(pm) > 0 {
+						for _, sp := range pm {
+							o.recordParamPath(pIdx, sp)
+						}
+					} else if st.ParentPlace.RootSymID != 0 {
+						o.recordParamPath(pIdx, st.ParentPlace)
+					}
 				}
 				if parentOrig.Static {
 					o.Static = true
@@ -569,17 +626,17 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 		case cfg.OpInitAssign, cfg.OpAssign, cfg.OpReinit:
 			meta := fn.Locals[st.Place.RootSymID]
 			if meta != nil && meta.IsParam && st.Kind == cfg.OpInitAssign && st.SrcTemp == cfg.InvalidValue {
-				// 参数入口绑定：若参数自身为引用或包含引用成员，注入 Param(idx) 溯源，并展开可投影成员路径
+				// 参数入口绑定：若参数自身为引用或包含引用成员，注入 Param(idx) 及精确投影路径溯源
 				if meta.Type != types.Invalid && tctx != nil && typeHasRef(tctx, nil, meta.Type, view.GetSymbols()) {
 					o := newOriginSet()
-					o.Params[meta.ParamIdx] = true
+					o.recordParamPath(meta.ParamIdx, st.Place)
 					env.places[st.Place.Key()] = o
 					leaves, _ := collectTypeRefLeaves(tctx, view.GetSymbols(), meta.Type, "")
 					for _, leaf := range leaves {
 						if leaf.Path != "" {
 							childPlace := placeForFieldPath(st.Place, leaf.Path, st.Span)
 							co := newOriginSet()
-							co.Params[meta.ParamIdx] = true
+							co.recordParamPath(meta.ParamIdx, childPlace)
 							env.places[childPlace.Key()] = co
 						}
 					}
