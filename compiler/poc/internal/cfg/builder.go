@@ -1819,10 +1819,14 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 				}
 			}
 			rv := b.nextTemp()
+			borrowType := borrowTarget.ElemType
+			if tctx := b.view.GetTypes(); tctx != nil && borrowTarget.ElemType != types.Invalid {
+				borrowType = tctx.Ref(isMut, borrowTarget.ElemType)
+			}
 			b.emit(Statement{
 				Kind:        opKind,
 				Place:       borrowTarget,
-				Type:        borrowTarget.ElemType,
+				Type:        borrowType,
 				LoanID:      b.nextLoan(),
 				BorrowKind:  bk,
 				IsReborrow:  isReborrow,

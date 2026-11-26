@@ -1,6 +1,6 @@
 # Phase 2B.2.1 — Reference Mutability, Reborrow & Provenance Soundness Closure
 
-> **Document Status**: `IMPLEMENTED` (Verified in compiler unit, CLI, and fuzz suites; follows Phase 2B.2 baseline [`9d2cda4`](https://github.com/KitiLab/WON/commit/9d2cda4811a81c4ed80f634597c73dd535a8954e) CI run `45814423072`)  
+> **Document Status**: `IMPLEMENTED` (Verified in compiler unit, CLI, and fuzz suites at [`7d6b27b`](https://github.com/KitiLab/WON/commit/7d6b27ba0b67a1e762830685757b11365c696b31), CI run `45822885882`; further hardened in [Phase 2B.2.2](phase-2b.2.2-authority-and-invariant-closure.md))  
 > **Milestone**: Phase 2B.2.1 (Compiler Correctness Hardening Prior to Phase 2B.3)  
 > **Governing Specification**: [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`ACCEPTED`), [phase-2b.2-borrow-checker-nll-provenance.md](phase-2b.2-borrow-checker-nll-provenance.md), [ownership-and-borrowing.md](../language-spec/ownership-and-borrowing.md)  
 > **Scope Exclusions**: Phase 2B.3 (`Drop` elaboration, drop flags, `.wonbind` cleanup), general `trait` / `impl Drop` / generic `Copy`, two-phase borrows, closures, and concurrency runtime remain deferred.

@@ -101,6 +101,19 @@ func runParse(args []string) {
 }
 
 // resolveBindings 遍历程序中的 #import 声明并加载对应的 C 库绑定元数据
+func enforceOwnershipCheckedGate(report *diagnostic.Report, typedProg *checker.TypedProgram, srcFile string, span diagnostic.Span, actionDesc string) {
+	if !report.HasErrors() && typedProg != nil && !typedProg.OwnershipChecked {
+		report.AddDiagnostic(diagnostic.Diagnostic{
+			Code:        "WON-INT-001",
+			Severity:    "error",
+			Message:     fmt.Sprintf("所有权 CFG 分析未通过内部一致性认证 (OwnershipChecked=false)，%s", actionDesc),
+			File:        srcFile,
+			Span:        span,
+			Explanation: "编译器遵循 Fail-Closed 原则，所有权分析未完整通过认证前绝不放行 check 或生成目标 C 代码。",
+		})
+	}
+}
+
 func resolveBindings(prog *ast.Program) (map[string]*bindgen.BindingMeta, error) {
 	bindings := make(map[string]*bindgen.BindingMeta)
 	for _, imp := range prog.Imports {
@@ -183,7 +196,8 @@ func runCheck(args []string) {
 			})
 		}
 		chk := checker.New(report, bindings)
-		chk.CheckProgram(prog)
+		typedProg := chk.CheckProgram(prog)
+		enforceOwnershipCheckedGate(report, typedProg, srcFile, prog.GetSpan(), "拒绝通过语义检查")
 	}
 
 	if *format == "json" {
@@ -278,16 +292,7 @@ func runBuild(args []string) {
 		typedProg = chk.CheckProgram(prog)
 	}
 
-	if !report.HasErrors() && typedProg != nil && !typedProg.OwnershipChecked {
-		report.AddDiagnostic(diagnostic.Diagnostic{
-			Code:        "WON-INT-001",
-			Severity:    "error",
-			Message:     "所有权 CFG 分析未通过内部一致性认证 (OwnershipChecked=false)，拒绝生成 C11 代码",
-			File:        srcFile,
-			Span:        prog.GetSpan(),
-			Explanation: "编译器遵循 Fail-Closed 原则，在所有权分析未完整通过前绝不生成目标 C 代码。",
-		})
-	}
+	enforceOwnershipCheckedGate(report, typedProg, srcFile, prog.GetSpan(), "拒绝生成 C11 代码")
 
 	if !report.HasErrors() && typedProg != nil && !typedProg.CodegenSupported {
 		report.AddDiagnostic(diagnostic.Diagnostic{

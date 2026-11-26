@@ -220,6 +220,16 @@ fn main(cond: bool) -> u64:
 			src:  "fn reg(cb: fn() -> &str):\n    println(\"ok\")\n",
 			code: "WON-MEM-002",
 		},
+		{
+			name: "raw_ptr_unknown_alias_candidate_overlap",
+			src:  "fn pick_mut(c: bool, a: &mut i32, b: &mut i32) -> &mut i32:\n    if c:\n        return a\n    return b\n\nfn main(c: bool, p: *mut i32):\n    var x: i32 = 1\n    unsafe:\n        let r = pick_mut(c, &mut *p, &mut x)\n        *r = 2\n",
+			code: "WON-MEM-005",
+		},
+		{
+			name: "nested_shared_ref_mut_reborrow",
+			src:  "fn bad():\n    var x: i32 = 1\n    var p = &mut x\n    let pp = &p\n    let q = &mut **pp\n",
+			code: "WON-MEM-004",
+		},
 	}
 
 	for _, nc := range negCases {

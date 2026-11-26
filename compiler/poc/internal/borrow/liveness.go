@@ -553,18 +553,30 @@ func checkStmtBorrowConflicts(
 	report *diagnostic.Report,
 	emitted map[diagDedupKey]bool,
 ) {
-	// 1. 先检查不依赖本地活跃 Loan 集合的权限不变量：禁止从共享不可变引用 (&T) 重借用或解引用写入 &mut
+	// 1. 先检查不依赖本地活跃 Loan 集合的权限与父关系不变量：
+	// - 校验所有 OpReborrow 的父借用标识、类型、图无环与可达顺序 (WON-INT-001 vs WON-MEM-004)
+	// - 禁止从共享不可变引用 (&T) 或未证明/损坏权限源创建可变借用或写入解引用
 	switch st.Kind {
 	case cfg.OpBorrowShared, cfg.OpBorrowMut, cfg.OpReborrow:
-		if selfLoan := flow.LoanByID[st.LoanID]; selfLoan != nil && selfLoan.IsMut && selfLoan.IsReborrow {
-			if !hasMutableReborrowAuthority(fn, flow, fwd, selfLoan, tctx, symTab) {
+		selfLoan := flow.LoanByID[st.LoanID]
+		if st.IsReborrow || st.Kind == cfg.OpReborrow {
+			if selfLoan == nil {
+				emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("重借用语句 L%d 在 LoanByID 中缺失", st.LoanID))
+				return
+			}
+			out := validateReborrowAuthorityAndParents(fn, flow, fwd, selfLoan, tctx, symTab, computeReachable(fn))
+			if out.Internal {
+				emitInternalFlowDiag(fn, report, emitted, st.Span, out.Detail)
+				return
+			}
+			if selfLoan.IsMut && !out.Authority.PermitsMutableAccess() {
 				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
 					Code:        "WON-MEM-004",
 					Severity:    "error",
 					Message:     fmt.Sprintf("不能从共享不可变引用创建可变借用 '%s'", formatPlaceDisplay(selfLoan.Place)),
 					File:        st.Span.File,
 					Span:        st.Span,
-					Explanation: "父引用仅持有共享只读 (&T) 权限，WON 禁止通过重借用从共享引用制造独占可变引用 (&mut T)。",
+					Explanation: "父引用仅持有共享只读 (&T / *const T) 权限，WON 禁止通过重借用从共享引用制造独占可变引用 (&mut T)。",
 				})
 				return
 			}
@@ -574,14 +586,33 @@ func checkStmtBorrowConflicts(
 		if st.Place.RootSymID != 0 && st.Place.HasDeref() {
 			pref, _ := st.Place.PrefixBeforeLastDeref()
 			carrierOrig := lookupReborrowParentOrigins(fwd, flow, pref)
-			if !hasMutableCarrierOrigins(fn, flow, carrierOrig, st.Place, tctx, symTab) {
+			isRawPtrDeref := pref.ElemType != types.Invalid && tctx != nil && tctx.Info(pref.ElemType).Kind == types.KindRawPtr
+			if isRawPtrDeref {
+				if !tctx.Info(pref.ElemType).IsMut {
+					emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+						Code:        "WON-MEM-004",
+						Severity:    "error",
+						Message:     fmt.Sprintf("不能通过只读原生指针 '*const' 解引用修改 '%s'", formatPlaceDisplay(st.Place)),
+						File:        st.Span.File,
+						Span:        st.Span,
+						Explanation: "*const T 原生指针仅具备只读访问能力，禁止通过解引用写入内存。",
+					})
+					return
+				}
+			}
+			out := validateCarrierOriginSet(fn, flow, carrierOrig, st.Place, !isRawPtrDeref, true, tctx, symTab)
+			if out.Internal {
+				emitInternalFlowDiag(fn, report, emitted, st.Span, out.Detail)
+				return
+			}
+			if !isRawPtrDeref && !out.Authority.PermitsMutableAccess() {
 				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
 					Code:        "WON-MEM-004",
 					Severity:    "error",
 					Message:     fmt.Sprintf("不能通过只读共享引用解引用修改 '%s'", formatPlaceDisplay(st.Place)),
 					File:        st.Span.File,
 					Span:        st.Span,
-					Explanation: "解引用链上的父载体为共享只读 (&T) 引用，禁止写入数据。",
+					Explanation: "解引用链上的父载体为共享只读 (&T / *const T) 引用，禁止写入数据。",
 				})
 				return
 			}
@@ -775,94 +806,65 @@ func checkStmtBorrowConflicts(
 	_ = liveAfter
 }
 
-func hasMutableReborrowAuthority(fn *cfg.FuncCFG, flow *FuncLoanFlow, fwd *carrierEnv, selfLoan *LoanInfo, tctx *types.Context, symTab *symbols.Table) bool {
-	if selfLoan == nil {
-		return false
+func validateReborrowAuthorityAndParents(
+	fn *cfg.FuncCFG,
+	flow *FuncLoanFlow,
+	fwd *carrierEnv,
+	selfLoan *LoanInfo,
+	tctx *types.Context,
+	symTab *symbols.Table,
+	reachable []bool,
+) authorityCheckOutcome {
+	res := validateParentLoansIdentity(fn, flow, selfLoan, reachable, tctx)
+	if res.Internal {
+		return res
 	}
-	for pid := range selfLoan.ParentLoans {
-		if pl := flow.LoanByID[pid]; pl != nil && !pl.IsMut {
-			return false
+	for _, pIdx := range sortedParamInts(selfLoan.ParentParams) {
+		pOut := validateParamDerefChainAuthority(fn, pIdx, selfLoan.Place, tctx, symTab)
+		if pOut.Internal {
+			return pOut
 		}
+		res = combineOriginAuthorities(res, pOut)
 	}
-	for pIdx := range selfLoan.ParentParams {
-		if !paramDerefChainMutable(fn, pIdx, selfLoan.Place, tctx, symTab) {
-			return false
-		}
-	}
+	requireCarrier := len(selfLoan.ParentLoans) == 0 && len(selfLoan.ParentParams) == 0
 	if selfLoan.ParentPlace.RootSymID != 0 {
 		parentOrig := lookupReborrowParentOrigins(fwd, flow, selfLoan.ParentPlace)
-		if !hasMutableCarrierOrigins(fn, flow, parentOrig, selfLoan.Place, tctx, symTab) {
-			return false
+		cOut := validateCarrierOriginSet(fn, flow, parentOrig, selfLoan.Place, requireCarrier, selfLoan.IsMut, tctx, symTab)
+		if cOut.Internal {
+			return cOut
 		}
+		res = combineOriginAuthorities(res, cOut)
+	} else if requireCarrier {
+		return internalAuthorityError(fmt.Sprintf("重借用 L%d 缺少 ParentLoans、ParentParams 与 ParentPlace", selfLoan.ID))
 	}
-	return true
+	return res
 }
 
+func sortedParamInts(m map[int]bool) []int {
+	res := make([]int, 0, len(m))
+	for k := range m {
+		res = append(res, k)
+	}
+	sort.Ints(res)
+	return res
+}
+
+// hasMutableReborrowAuthority 保留向后兼容包内测试/辅助调用，委托至 Fail-Closed 权限模型。
+func hasMutableReborrowAuthority(fn *cfg.FuncCFG, flow *FuncLoanFlow, fwd *carrierEnv, selfLoan *LoanInfo, tctx *types.Context, symTab *symbols.Table) bool {
+	out := validateReborrowAuthorityAndParents(fn, flow, fwd, selfLoan, tctx, symTab, nil)
+	return !out.Internal && out.Authority.PermitsMutableAccess()
+}
+
+// hasMutableCarrierOrigins 保留向后兼容包内辅助调用，对空 OriginSet 与未知元数据严格 Fail-Closed。
 func hasMutableCarrierOrigins(fn *cfg.FuncCFG, flow *FuncLoanFlow, orig OriginSet, derefPlace cfg.Place, tctx *types.Context, symTab *symbols.Table) bool {
-	for pid := range orig.Loans {
-		if pl := flow.LoanByID[pid]; pl != nil && !pl.IsMut {
-			return false
-		}
-	}
-	for pIdx := range orig.Params {
-		if !paramDerefChainMutable(fn, pIdx, derefPlace, tctx, symTab) {
-			return false
-		}
-	}
-	return true
+	out := validateCarrierOriginSet(fn, flow, orig, derefPlace, true, true, tctx, symTab)
+	return !out.Internal && out.Authority.PermitsMutableAccess()
 }
 
+// paramDerefChainMutable 返回仅在权限被显式证明为可变（安全 &mut 或显式 unsafe *mut）时为 true；缺失/损坏/共享均返回 false。
 func paramDerefChainMutable(fn *cfg.FuncCFG, pIdx int, derefPlace cfg.Place, tctx *types.Context, symTab *symbols.Table) bool {
-	if fn == nil || fn.FuncSym == nil || tctx == nil || pIdx < 0 {
-		return true
-	}
-	curType := fn.FuncSym.EffectiveParamType(pIdx, tctx)
-	if curType == types.Invalid {
-		return true
-	}
-	firstInfo := tctx.Info(curType)
-	if firstInfo.Kind == types.KindRef && !firstInfo.IsMut {
-		return false
-	}
-	for _, proj := range derefPlace.Projections {
-		info := tctx.Info(curType)
-		switch proj.Kind {
-		case cfg.ProjDeref:
-			if (info.Kind == types.KindRef || info.Kind == types.KindRawPtr) && !info.IsMut {
-				return false
-			}
-			if info.Kind == types.KindRef || info.Kind == types.KindRawPtr {
-				curType = info.Elem
-			} else if proj.ElemType != types.Invalid {
-				curType = proj.ElemType
-			}
-		case cfg.ProjField:
-			if (info.Kind == types.KindRef || info.Kind == types.KindRawPtr) && !info.IsMut {
-				return false
-			}
-			if info.Kind == types.KindRef || info.Kind == types.KindRawPtr {
-				curType = info.Elem
-			}
-			if curType != types.Invalid && symTab != nil {
-				cInfo := tctx.Info(curType)
-				if cInfo.Kind == types.KindStruct {
-					if sym := symTab.ByID[symbols.SymbolID(cInfo.SymbolID)]; sym != nil {
-						if fi := sym.FieldMap[proj.FieldName]; fi != nil {
-							curType = fi.Type
-							continue
-						}
-					}
-				}
-			}
-			curType = proj.ElemType
-		case cfg.ProjConstIdx, cfg.ProjIndex, cfg.ProjTupleField:
-			if (info.Kind == types.KindRef || info.Kind == types.KindRawPtr) && !info.IsMut {
-				return false
-			}
-			curType = proj.ElemType
-		}
-	}
-	return true
+	out := validateParamDerefChainAuthority(fn, pIdx, derefPlace, tctx, symTab)
+	return !out.Internal && out.Authority.PermitsMutableAccess()
 }
 
 func checkScopeExitLoans(

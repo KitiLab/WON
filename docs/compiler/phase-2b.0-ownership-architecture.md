@@ -18,7 +18,7 @@
 ## 1. Compiler Audit & Status Boundary
 
 > [!NOTE]
-> **Implementation Status Reconciliation (Post-Phase 2B.2.1)**: Following owner approval ([OWNER-APPROVAL-ADR-011-2026-11-25.md](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md)), Phases **2B.1–2B.1.2** (Ownership CFG, `@derive(Copy)`, uninitialized `let`/`var`, move/init & match-pattern closure) and Phases **2B.2–2B.2.1** (Borrow Checker, NLL Regions, Reborrow & Reference Mutability Closure, Canonical `self` Method Indexing, Per-Field Aggregate & Candidate Provenance `WON-MEM-002..006`) are **`IMPLEMENTED`**. **Phase 2B.3** (Drop Elaboration) and trait/concurrency milestones remain `SPECIFIED`/`PLANNED`.
+> **Implementation Status Reconciliation (Post-Phase 2B.2.2)**: Following owner approval ([OWNER-APPROVAL-ADR-011-2026-11-25.md](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md)), Phases **2B.1–2B.1.2** (Ownership CFG, `@derive(Copy)`, uninitialized `let`/`var`, move/init & match-pattern closure) and Phases **2B.2–2B.2.2** (Borrow Checker, NLL Regions, Reborrow & Reference Mutability Closure, Canonical `self` Indexing, Per-Field Aggregate & Candidate Provenance, and Fail-Closed `AccessAuthority` / Parent-Loan / Origin / Metadata Invariants `WON-MEM-002..006` + `WON-INT-001`) are **`IMPLEMENTED`**. **Phase 2B.3** (Drop Elaboration) and trait/concurrency milestones remain `SPECIFIED`/`PLANNED`. Raw-pointer `unsafe:` dereference writes remain explicitly distinguished from statically proven aliasing safety.
 
 ### 1.1 Historical Baseline Context & Currently `IMPLEMENTED` Capabilities
 1. **Lexer & Parser (`internal/token`, `internal/lexer`, `internal/parser`)**:

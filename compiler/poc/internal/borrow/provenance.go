@@ -313,7 +313,43 @@ func checkOpaqueSignatures(progCFG *cfg.ProgramCFG, symTab *symbols.Table, tctx 
 		return
 	}
 	checkFnType := func(name string, span diagnostic.Span, paramTypes []types.TypeID, retType types.TypeID, label string) {
+		if retType == types.Invalid {
+			emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+				Code:        "WON-INT-001",
+				Severity:    "error",
+				Message:     fmt.Sprintf("%s '%s' 缺少有效的返回类型元数据", label, name),
+				File:        span.File,
+				Span:        span,
+				Explanation: "不透明边界校验需要完整的返回类型信息；缺少有效 TypeID 时按 Fail-Closed 原则拒绝认证。",
+			})
+			return
+		}
+		for idx, pt := range paramTypes {
+			if pt == types.Invalid {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-INT-001",
+					Severity:    "error",
+					Message:     fmt.Sprintf("%s '%s' 第 %d 个规范形参缺少有效类型元数据", label, name, idx),
+					File:        span.File,
+					Span:        span,
+					Explanation: "缺少有效参数类型元数据时无法证明引用输入数量与可变性权限，按 Fail-Closed 原则拒绝认证。",
+				})
+				return
+			}
+		}
 		if !typeHasRef(tctx, nil, retType, symTab) {
+			return
+		}
+		leaves, unsup := collectTypeRefLeaves(tctx, symTab, retType, "")
+		if unsup {
+			emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+				Code:        "WON-SEM-010",
+				Severity:    "error",
+				Message:     fmt.Sprintf("%s '%s' 返回不支持按字段投影分析的含引用聚合 (%s)", label, name, tctx.Format(retType)),
+				File:        span.File,
+				Span:        span,
+				Explanation: "不透明接口不允许返回无法按字段拆分的含引用枚举、数组或切片。",
+			})
 			return
 		}
 		refCount, mutRefCount := countRefParamCapabilities(paramTypes, tctx, symTab)
@@ -328,7 +364,6 @@ func checkOpaqueSignatures(progCFG *cfg.ProgramCFG, symTab *symbols.Table, tctx 
 			})
 			return
 		}
-		leaves, _ := collectTypeRefLeaves(tctx, symTab, retType, "")
 		for _, leaf := range leaves {
 			if leaf.IsMut && mutRefCount == 0 {
 				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
@@ -671,22 +706,35 @@ func checkReturnOriginsValid(
 	report *diagnostic.Report,
 	emitted map[diagDedupKey]bool,
 ) bool {
+	if fn == nil || flow == nil {
+		emitInternalFlowDiag(fn, report, emitted, st.Span, "返回溯源校验缺少 FuncCFG 或 FuncLoanFlow")
+		return false
+	}
+
 	for _, lid := range orig.SortedLoans() {
+		if lid == cfg.InvalidLoan {
+			emitInternalFlowDiag(fn, report, emitted, st.Span, "返回溯源集合包含无效 LoanID (L0)")
+			return false
+		}
 		li := flow.LoanByID[lid]
+		if li == nil {
+			emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("返回溯源集合引用了不存在的借用 L%d", lid))
+			return false
+		}
+		if flow.FuncSymID != 0 && li.FuncSymID != flow.FuncSymID {
+			emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("返回溯源集合包含跨函数借用 L%d", lid))
+			return false
+		}
 		targets := resolveLoanUnderlyingTargets(flow, lid, nil)
 		for _, tgt := range targets {
 			if tgt.unknown {
-				var sp diagnostic.Span
-				if li != nil {
-					sp = li.Span
-				}
 				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
 					Code:        "WON-MEM-003",
 					Severity:    "error",
 					Message:     fmt.Sprintf("函数 '%s' 试图返回源自裸指针解引用或未知生命周期的引用", fn.Name),
 					File:        st.Span.File,
 					Span:        st.Span,
-					Explanation: fmt.Sprintf("位于 %d:%d 的借用不具备可证的输入参数或静态生命周期来源，禁止通过安全引用返回逃逸。", sp.Start.Line, sp.Start.Column),
+					Explanation: fmt.Sprintf("位于 %d:%d 的借用不具备可证的输入参数或静态生命周期来源，禁止通过安全引用返回逃逸。", li.Span.Start.Line, li.Span.Start.Column),
 				})
 				return false
 			}
@@ -709,7 +757,7 @@ func checkReturnOriginsValid(
 				})
 				return false
 			}
-			if isMut && li != nil && !li.IsMut {
+			if isMut && !li.IsMut {
 				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
 					Code:        "WON-MEM-004",
 					Severity:    "error",
@@ -717,6 +765,23 @@ func checkReturnOriginsValid(
 					File:        st.Span.File,
 					Span:        st.Span,
 					Explanation: "不可变借用源无法升级为可变返回引用。",
+				})
+				return false
+			}
+			// 同时验证该借用穿透的父参数具备有效元数据（及可变返回所需的独占权限）
+			pOut := validateParamDerefChainAuthority(fn, tgt.paramIdx, tgt.place, tctx, symTab)
+			if pOut.Internal {
+				emitInternalFlowDiag(fn, report, emitted, st.Span, pOut.Detail)
+				return false
+			}
+			if isMut && pOut.Authority == AuthorityShared {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-MEM-004",
+					Severity:    "error",
+					Message:     fmt.Sprintf("不能将源自不可变参数的借用作为函数 '%s' 的 '&mut' 返回", fn.Name),
+					File:        st.Span.File,
+					Span:        st.Span,
+					Explanation: "底层来源形参仅具备共享 (&T) 权限，禁止升级为 &mut 返回。",
 				})
 				return false
 			}
@@ -735,17 +800,44 @@ func checkReturnOriginsValid(
 		return false
 	}
 
-	if isMut {
-		for _, pIdx := range orig.SortedParams() {
-			if fn.FuncSym != nil && tctx != nil {
-				pt := fn.FuncSym.EffectiveParamType(pIdx, tctx)
-				if pt != types.Invalid {
-					pInfo := tctx.Info(pt)
-					if pInfo.Kind == types.KindRef && !pInfo.IsMut {
-						pLabel := fn.FuncSym.EffectiveParamName(pIdx)
-						if pLabel == "" {
-							pLabel = fmt.Sprintf("#%d", pIdx+1)
-						}
+	if isMut && orig.Static {
+		emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+			Code:        "WON-MEM-004",
+			Severity:    "error",
+			Message:     fmt.Sprintf("函数 '%s' 不能将静态不可变引用作为 '&mut' 返回", fn.Name),
+			File:        st.Span.File,
+			Span:        st.Span,
+			Explanation: "Static 字符串字面量等静态引用为只读共享语义，不能作为 &mut 返回。",
+		})
+		return false
+	}
+
+	paramCands := orig.SortedParams()
+	if len(paramCands) > 0 {
+		if fn.FuncSym == nil || tctx == nil {
+			emitInternalFlowDiag(fn, report, emitted, st.Span, "验证参数返回溯源时缺少 FuncSym 或 TypeContext")
+			return false
+		}
+		paramCount := fn.FuncSym.EffectiveParamCount()
+		for _, pIdx := range paramCands {
+			if pIdx < 0 || pIdx >= paramCount {
+				emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("返回溯源形参下标 %d 超出有效范围 [0, %d)", pIdx, paramCount))
+				return false
+			}
+			pt := fn.FuncSym.EffectiveParamType(pIdx, tctx)
+			if pt == types.Invalid {
+				emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("返回溯源形参 #%d 缺少有效类型 (Invalid)", pIdx))
+				return false
+			}
+			pInfo := tctx.Info(pt)
+			if isMut {
+				pLabel := fn.FuncSym.EffectiveParamName(pIdx)
+				if pLabel == "" {
+					pLabel = fmt.Sprintf("#%d", pIdx+1)
+				}
+				switch pInfo.Kind {
+				case types.KindRef:
+					if !pInfo.IsMut {
 						emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
 							Code:        "WON-MEM-004",
 							Severity:    "error",
@@ -753,6 +845,66 @@ func checkReturnOriginsValid(
 							File:        st.Span.File,
 							Span:        st.Span,
 							Explanation: "只有具备 &mut 独占可变权限的来源才可作为 &mut 返回候选。",
+						})
+						return false
+					}
+				case types.KindRawPtr:
+					emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+						Code:        "WON-MEM-003",
+						Severity:    "error",
+						Message:     fmt.Sprintf("函数 '%s' 不能将原生指针参数 '%s' 直接作为安全 '&mut' 返回", fn.Name, pLabel),
+						File:        st.Span.File,
+						Span:        st.Span,
+						Explanation: "原生指针来源缺乏安全生命周期保证，禁止直接逃逸为安全引用返回值。",
+					})
+					return false
+				default:
+					// 若参数本身为按值传入且包含引用字段的结构体/元组，只有其内部确实携带 &mut 叶子时才可起源为 &mut 返回
+					leaves, _ := collectTypeRefLeaves(tctx, symTab, pt, "")
+					hasMutLeaf := false
+					for _, lf := range leaves {
+						if lf.IsMut {
+							hasMutLeaf = true
+							break
+						}
+					}
+					if !hasMutLeaf {
+						emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+							Code:        "WON-MEM-004",
+							Severity:    "error",
+							Message:     fmt.Sprintf("函数 '%s' 参数 '%s' 不具备可导出的 '&mut' 来源权限", fn.Name, pLabel),
+							File:        st.Span.File,
+							Span:        st.Span,
+							Explanation: "按值或仅包含只读引用的参数无法授权 &mut 引用返回。",
+						})
+						return false
+					}
+				}
+				if st.Place.RootSymID != 0 && len(st.Place.Projections) > 0 {
+					pOut := validateParamDerefChainAuthority(fn, pIdx, st.Place, tctx, symTab)
+					if pOut.Internal {
+						emitInternalFlowDiag(fn, report, emitted, st.Span, pOut.Detail)
+						return false
+					}
+					if pOut.Authority == AuthorityShared {
+						emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+							Code:        "WON-MEM-004",
+							Severity:    "error",
+							Message:     fmt.Sprintf("函数 '%s' 返回路径包含只读共享外层引用，禁止作为 '&mut' 返回", fn.Name),
+							File:        st.Span.File,
+							Span:        st.Span,
+							Explanation: "经由共享外层引用的投影仅具只读权限。",
+						})
+						return false
+					}
+					if pOut.Authority == AuthorityUnsafeRawPtr {
+						emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+							Code:        "WON-MEM-003",
+							Severity:    "error",
+							Message:     fmt.Sprintf("函数 '%s' 试图通过原生指针路径返回安全 '&mut' 引用", fn.Name),
+							File:        st.Span.File,
+							Span:        st.Span,
+							Explanation: "原生指针解引用来源禁止直接逃逸为安全引用返回值。",
 						})
 						return false
 					}
@@ -781,6 +933,10 @@ func checkCallProvenanceAndDisjointness(
 
 	// 1. 若调用不透明/无体目标并返回引用（排除已分析内建如 .as_bytes() 与枚举变体构造器 Result::Ok/Err, Option::Some/None）
 	if st.Callee == nil || progCFG.BySymbol[st.Callee.ID] == nil {
+		if st.Type == types.Invalid {
+			emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("调用 '%s' 携带非零 ValTemp v%d 但缺少返回类型元数据", st.CalleeName, st.ValTemp))
+			return
+		}
 		if (st.Callee == nil || st.Callee.Kind != symbols.SymBuiltin) && !isPureEnumVariantCall(st) && typeHasRef(tctx, nil, st.Type, symTab) {
 			refArgCount := 0
 			for _, at := range st.ArgTemps {
@@ -810,40 +966,108 @@ func checkCallProvenanceAndDisjointness(
 		return
 	}
 
-	argTargetsFor := func(pIdx int) []resolvedTarget {
-		if pIdx < 0 || pIdx >= len(st.ArgTemps) {
-			return nil
+	resolveCandidateArgTargets := func(pIdx int, requireMutAuth bool) ([]resolvedTarget, authorityCheckOutcome) {
+		if st.Callee == nil {
+			return nil, internalAuthorityError("调用摘要存在但 Callee 符号为空")
+		}
+		effCount := st.Callee.EffectiveParamCount()
+		if pIdx < 0 || pIdx >= effCount {
+			return nil, internalAuthorityError(fmt.Sprintf("摘要候选下标 %d 超出被调函数 '%s' 规范参数范围 [0, %d)", pIdx, st.CalleeName, effCount))
+		}
+		if pIdx >= len(st.ArgTemps) {
+			return nil, internalAuthorityError(fmt.Sprintf("摘要候选下标 %d 超出调用 '%s' 实参切片长度 %d", pIdx, st.CalleeName, len(st.ArgTemps)))
 		}
 		argT := st.ArgTemps[pIdx]
 		if argT == cfg.InvalidValue {
-			return nil
+			return nil, internalAuthorityError(fmt.Sprintf("调用 '%s' 候选引用实参 #%d 缺少有效临时值 ValueID", st.CalleeName, pIdx))
 		}
-		argOrig := fwd.temps[argT]
+		argOrig, exists := fwd.temps[argT]
+		if !exists || argOrig.isEmpty() {
+			return nil, internalAuthorityError(fmt.Sprintf("调用 '%s' 候选实参 v%d 缺少调用点载体溯源 OriginSet", st.CalleeName, argT))
+		}
+
+		// 校验实参原点集合有效性（及可变候选的可变访问权限）
+		oCheck := validateCarrierOriginSet(fn, flow, argOrig, cfg.Place{}, true, requireMutAuth, tctx, symTab)
+		if oCheck.Internal {
+			return nil, oCheck
+		}
+		if requireMutAuth && !oCheck.Authority.PermitsMutableAccess() {
+			return nil, sharedAuthority(fmt.Sprintf("调用 '%s' 候选实参 #%d 不具备 &mut 访问权限", st.CalleeName, pIdx))
+		}
+
 		var tgts []resolvedTarget
-		for lid := range argOrig.Loans {
-			tgts = append(tgts, resolveLoanUnderlyingTargets(flow, lid, nil)...)
+		for _, lid := range argOrig.SortedLoans() {
+			resolved := resolveLoanUnderlyingTargets(flow, lid, nil)
+			if len(resolved) == 0 {
+				return nil, internalAuthorityError(fmt.Sprintf("调用 '%s' 候选实参借用 L%d 未解析出任何底层目标", st.CalleeName, lid))
+			}
+			tgts = append(tgts, resolved...)
 		}
-		for parIdx := range argOrig.Params {
+		for _, parIdx := range argOrig.SortedParams() {
 			tgts = append(tgts, resolvedTarget{paramIdx: parIdx})
 		}
 		if argOrig.Unknown {
 			tgts = append(tgts, resolvedTarget{paramIdx: -1, unknown: true})
 		}
-		return tgts
+		if argOrig.Static {
+			if requireMutAuth {
+				return nil, sharedAuthority(fmt.Sprintf("调用 '%s' 可变候选实参 #%d 不得源自 Static", st.CalleeName, pIdx))
+			}
+			// 静态共享来源可与调用者局部可变目标区分（仅以唯一哨兵 RootName 标识静态来源，不伪造为空切片）
+			tgts = append(tgts, resolvedTarget{place: cfg.Place{RootName: "<static>"}, paramIdx: -1})
+		}
+		if len(tgts) == 0 {
+			return nil, internalAuthorityError(fmt.Sprintf("调用 '%s' 候选实参 #%d 底层目标集合为空，拒绝以 targetsOverlap(nil, nil) 认证互不重叠", st.CalleeName, pIdx))
+		}
+		return tgts, okAuthority(oCheck.Authority)
 	}
 
 	keys := calSum.SortedFieldKeys()
-	// 2a. 单返回位置（标量 &mut 或聚合的某个 &mut 成员）若有 >=2 个候选实参，须证明互不重叠
+	resolvedCache := make(map[int][]resolvedTarget)
+	getTargets := func(pIdx int, requireMutAuth bool) ([]resolvedTarget, bool) {
+		tgts, out := resolveCandidateArgTargets(pIdx, requireMutAuth)
+		if out.Internal {
+			emitInternalFlowDiag(fn, report, emitted, st.Span, out.Detail)
+			return nil, false
+		}
+		if requireMutAuth && !out.Authority.PermitsMutableAccess() {
+			emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+				Code:        "WON-MEM-004",
+				Severity:    "error",
+				Message:     out.Detail,
+				File:        st.Span.File,
+				Span:        st.Span,
+				Explanation: "返回 &mut 借用候选位置要求全部可能实参具备独占 &mut 访问权限。",
+			})
+			return nil, false
+		}
+		resolvedCache[pIdx] = tgts
+		return tgts, true
+	}
+
+	// 2a. 先验证并解析全部候选实参，对单返回位置（标量 &mut 或聚合的某个 &mut 成员）若有 >=2 个候选实参则证明两两互不重叠
 	for _, k := range keys {
 		fp := calSum.FieldProvs[k]
-		if fp == nil || !fp.IsMut {
+		if fp == nil {
 			continue
 		}
 		cands := fp.SortedParamIndices()
+		for _, pIdx := range cands {
+			if _, ok := getTargets(pIdx, fp.IsMut); !ok {
+				return
+			}
+		}
+		if !fp.IsMut {
+			continue
+		}
 		for i := 0; i < len(cands); i++ {
-			ti := argTargetsFor(cands[i])
+			ti := resolvedCache[cands[i]]
 			for j := i + 1; j < len(cands); j++ {
-				tj := argTargetsFor(cands[j])
+				tj := resolvedCache[cands[j]]
+				if len(ti) == 0 || len(tj) == 0 {
+					emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("调用 '%s' 候选目标解析结果为空", st.CalleeName))
+					return
+				}
 				if targetsOverlap(ti, tj) {
 					emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
 						Code:        "WON-MEM-005",
@@ -859,7 +1083,7 @@ func checkCallProvenanceAndDisjointness(
 		}
 	}
 
-	// 2b. 聚合多字段跨成员别名校验：若字段 k1 与 k2 (k1 != k2) 至少其一为 &mut，则来自不同参数 i != j 的候选实参也不得指向重叠存储
+	// 2b. 聚合多字段跨成员别名校验：若字段 k1 与 k2 (k1 != k2) 至少其一为 &mut，则来自不同参数 p1 != p2 的候选实参也不得指向重叠存储
 	for i := 0; i < len(keys); i++ {
 		fp1 := calSum.FieldProvs[keys[i]]
 		if fp1 == nil {
@@ -873,12 +1097,17 @@ func checkCallProvenanceAndDisjointness(
 			}
 			cands2 := fp2.SortedParamIndices()
 			for _, p1 := range cands1 {
-				t1 := argTargetsFor(p1)
+				t1 := resolvedCache[p1]
 				for _, p2 := range cands2 {
 					if p1 == p2 {
 						continue
 					}
-					if targetsOverlap(t1, argTargetsFor(p2)) {
+					t2 := resolvedCache[p2]
+					if len(t1) == 0 || len(t2) == 0 {
+						emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("调用 '%s' 跨字段候选目标解析结果为空", st.CalleeName))
+						return
+					}
+					if targetsOverlap(t1, t2) {
 						code := "WON-MEM-004"
 						if fp1.IsMut && fp2.IsMut {
 							code = "WON-MEM-005"
@@ -897,5 +1126,4 @@ func checkCallProvenanceAndDisjointness(
 			}
 		}
 	}
-	_ = fn
 }

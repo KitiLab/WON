@@ -112,6 +112,7 @@ type LoanInfo struct {
 	FuncSymID    symbols.SymbolID
 	Kind         cfg.BorrowKind
 	Place        cfg.Place
+	Type         types.TypeID
 	IsMut        bool
 	IsReborrow   bool
 	ParentPlace  cfg.Place
@@ -289,6 +290,7 @@ func buildLoanFlowWithSummaries(fn *cfg.FuncCFG, view cfg.SemanticView, summarie
 				FuncSymID:    flow.FuncSymID,
 				Kind:         st.BorrowKind,
 				Place:        st.Place,
+				Type:         st.Type,
 				IsMut:        isMut,
 				IsReborrow:   st.IsReborrow,
 				ParentPlace:  st.ParentPlace,
