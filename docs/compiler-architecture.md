@@ -1,6 +1,6 @@
 # WON Compiler Architecture
 
-> **Document Status**: `IMPLEMENTED` (Phase 0B–2A.2.1 Frontend, Core Semantics & C11 Subset Contract; Phase 2B.1–2B.1.2 Ownership CFG, Definite Init & Match/Move Closure) / `SPECIFIED` (Phase 2B.2 Borrow/NLL/Provenance, Phase 2B.3 Drop, Phase 2C TIR Pending)  
+> **Document Status**: `IMPLEMENTED` (Phase 0B–2A.2.1 Frontend, Core Semantics & C11 Subset Contract; Phase 2B.1–2B.1.2 Ownership CFG, Definite Init & Match/Move Closure) / `IN PROGRESS` (Phase 2B.2 Borrow/NLL/Provenance) / `SPECIFIED` (Phase 2B.3 Drop, Phase 2C TIR)  
 > **Author**: KitiLab Engineering  
 > **Last Updated**: Phase 2B.1.2  
 > **Normative Specification**: [docs/language-spec/compiler-and-ir-requirements.md](language-spec/compiler-and-ir-requirements.md)  

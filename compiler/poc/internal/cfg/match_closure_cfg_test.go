@@ -49,7 +49,7 @@ fn probe(mut_flag: bool) -> u64:
 		}
 
 		// 验证两条引用绑定均产生对应 Borrow 事件且无针对主体 p 的 Move
-		if !strings.Contains(dump1, "BorrowShared(reserved)") || !strings.Contains(dump1, "BorrowMut(reserved)") {
+		if !strings.Contains(dump1, "BorrowShared ") || !strings.Contains(dump1, "BorrowMut ") {
 			t.Errorf("混合 & 与 &mut 引用元组必须同时保留 BorrowShared 与 BorrowMut 事件:\n%s", dump1)
 		}
 		if regexp.MustCompile(`Move p#`).MatchString(dump1) {

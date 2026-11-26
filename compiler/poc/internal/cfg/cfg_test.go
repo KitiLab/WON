@@ -135,7 +135,7 @@ fn split(pair: PairStr, flag: bool) -> u64:
 	if !regexp.MustCompile(`Move pair#\d+\.a`).MatchString(partialDump) {
 		t.Errorf("Direct StructPattern 非 ref 字段应对精确字段路径 pair.a 发出 OpMove:\n%s", partialDump)
 	}
-	if !regexp.MustCompile(`BorrowShared\(reserved\) pair#\d+\.b`).MatchString(partialDump) {
+	if !regexp.MustCompile(`BorrowShared pair#\d+\.b`).MatchString(partialDump) {
 		t.Errorf("Direct StructPattern ref 字段应对精确字段路径 pair.b 发出 OpBorrowShared:\n%s", partialDump)
 	}
 }

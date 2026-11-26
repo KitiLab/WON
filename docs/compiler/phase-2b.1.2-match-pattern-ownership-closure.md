@@ -1,6 +1,6 @@
 # Phase 2B.1.2 — Match Pattern Ownership Closure & Guard Control-Flow Correctness
 
-> **Document Status**: `IMPLEMENTED` (Verified in local Go test, fuzz, CLI, and C11 regression suites; pending CI run on commit push)  
+> **Document Status**: `IMPLEMENTED` (Verified in official GitHub Actions CI run `45808397443` at commit `91a6932f28f6d9c231958e4959ea29f5577c5f28`)  
 > **Milestone**: Phase 2B.1.2 (Follow-up closure on Phase 2B.1.1 `92fabc0b602246e9d64d77e78aa8f6a3c86cc4d8`)  
 > **Scope Boundary**: Preserves accepted ADR-011 semantics without inventing Phase 2B.2 borrow-conflict/NLL/provenance checks or Phase 2B.3 drop elaboration.
 

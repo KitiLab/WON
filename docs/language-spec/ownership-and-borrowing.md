@@ -1,8 +1,8 @@
 # WON Language Specification: Ownership and Borrowing (Normative Proposal)
 
 > **Specification Version**: Draft 0.2.1 (Phase 2B.0.1 Design Closure; ADR-011 Approved)  
-> **Status**: `SPECIFIED` (Architectural Direction **ACCEPTED** via [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) & [Owner Approval](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md))  
-> **Compiler Implementation Status**: Phase 2B.1–2B.1.2 (`Ownership CFG`, `@derive(Copy)`, Uninitialized `let`/`var`, Unbounded Lazy Field Tracking, Per-Arm `match` & Guard Control-Flow Closure, Fail-Closed `WON-INT-001` & Move/Init) `IMPLEMENTED`; Phase 2B.2 (`Borrow`/`NLL`/`Provenance`) & Phase 2B.3 (`Drop`) Remain `SPECIFIED` / Unimplemented  
+> **Status**: `ACCEPTED` (Architectural Direction **ACCEPTED** via [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) & [Owner Approval](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md))  
+> **Compiler Implementation Status**: Phase 2B.1–2B.1.2 (`Ownership CFG`, `@derive(Copy)`, Uninitialized `let`/`var`, Unbounded Lazy Field Tracking, Per-Arm `match` & Guard Control-Flow Closure, Fail-Closed `WON-INT-001` & Move/Init) `IMPLEMENTED`; Phase 2B.2 (`Borrow`/`NLL`/`Provenance`) Currently Under Active Implementation; Phase 2B.3 (`Drop`) Remains `SPECIFIED` / Unimplemented  
 > **Architecture & Closure Details**: [phase-2b.0-ownership-architecture.md](../compiler/phase-2b.0-ownership-architecture.md), [phase-2b.1.1-cfg-soundness-closure.md](../compiler/phase-2b.1.1-cfg-soundness-closure.md), [phase-2b.1.2-match-pattern-ownership-closure.md](../compiler/phase-2b.1.2-match-pattern-ownership-closure.md)
 > **Governing Architecture**: [Phase 2B.0 / 2B.0.1 Ownership Architecture](../compiler/phase-2b.0-ownership-architecture.md)  
 > **Related Core Spec**: [Ownership and Memory Overview](ownership-and-memory.md), [Syntax & Grammar](syntax-and-grammar.md), [ADR-003](../decisions/ADR-003-ownership-lite-memory-model.md)
@@ -16,7 +16,7 @@ This document specifies the formal language-level ownership, value-copy, initial
 Normative keywords **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **SHOULD**, and **MAY** follow [RFC 2119](https://tools.ietf.org/html/rfc2119). Every static error rule binds to a canonical diagnostic code (`WON-MEM-*`, `WON-MUT-*`, `WON-SEC-*`).
 
 > [!IMPORTANT]
-> **Implementation Boundary**: All rules in Sections 2–9 are **Proposed (`Awaiting Owner Approval`)** unless explicitly marked `IMPLEMENTED`. No Phase 2B borrow-checker pass is active in `wonc` yet.
+> **Implementation Boundary**: ADR-011 is `ACCEPTED`. Phase 2B.1–2B.1.2 (`WON-MEM-001`, `008`, `010`, `011`, `@derive(Copy)`, uninitialized `let`/`var`, `WON-INT-001`) are `IMPLEMENTED` in `wonc`. Phase 2B.2 borrow-conflict/NLL/provenance checks (`WON-MEM-002..006`) are currently being implemented; Phase 2B.3 (`Drop`) and trait/concurrency rules remain `SPECIFIED`/`PLANNED`.
 
 ---
 
@@ -137,7 +137,7 @@ $$\text{Prov}(e) \subseteq \{\text{Local}(p), \text{Param}(i), \text{Static}\}$$
 
 ## 9. Canonical Diagnostics Assigned to Ownership Rules
 
-*(Implemented in `wonc` today: `WON-MUT-001`, `WON-SEC-001`, `WON-SEC-002`, `WON-SEM-010`. Proposed Phases 2B.1–2B.3 / Phase 3: `WON-MEM-001`..`011`, `WON-CON-001`.)*
+*(Implemented in `wonc`: `WON-MUT-001`, `WON-SEC-001`, `WON-SEC-002`, `WON-SEM-010`, and Phase 2B.1–2B.1.2 `WON-MEM-001`, `008`, `010`, `011`. Phase 2B.2 active: `WON-MEM-002`–`006`; Future `2B.3` / Phase 3: `WON-MEM-007`, `WON-MEM-009`, `WON-CON-001`.)*
 
 - **`WON-MEM-001`**: Use of moved or partially moved value (`2B.1`).
 - **`WON-MEM-002`**: Ambiguous multi-reference provenance across opaque/bodyless signature (`2B.2`).

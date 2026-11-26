@@ -1,6 +1,6 @@
 # Phase 2B.1.1 — Ownership CFG Soundness Closure & Fail-Closed Analysis
 
-> **Document Status**: `IMPLEMENTED` (Verified in local compiler suite & fuzz tests; pending CI verification)  
+> **Document Status**: `IMPLEMENTED` (Verified in official GitHub Actions CI run `45806552788` at commit `92fabc0b602246e9d64d77e78aa8f6a3c86cc4d8`)  
 > **Milestone**: Phase 2B.1.1 (Hardening closure over Phase 2B.1 `90b2061`)  
 > **Baseline Design**: [phase-2b.0-ownership-architecture.md](phase-2b.0-ownership-architecture.md), [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`ACCEPTED`)  
 > **Scope Boundary**: Preserves accepted ADR-011 semantics without modification; does **not** implement Phase 2B.2 (borrow conflicts / NLL regions / provenance) or Phase 2B.3 (drop elaboration / drop flags).

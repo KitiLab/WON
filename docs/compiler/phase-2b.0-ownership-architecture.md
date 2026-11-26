@@ -1,30 +1,28 @@
 # WON Phase 2B.0 / 2B.0.1 — Ownership-Lite Architecture, Borrow Semantics & Design Closure
 
-> **Document Status**: `SPECIFIED` (Phase 2B.0.1 Design Closure; Normative Rules Awaiting Owner Approval)  
+> **Document Status**: `ACCEPTED` (Architectural Design Closed in 2B.0.1 & Ratified in [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md); Phase 2B.1–2B.1.2 `IMPLEMENTED`; Phase 2B.2 Currently In Implementation)  
 > **Milestone**: Phase 2B.0 / 2B.0.1 — Ownership Architecture & Semantic Design Closure  
-> **Target Compiler Packages**: `compiler/poc/internal/cfg`, `compiler/poc/internal/borrow` (Planned Phase 2B.1–2B.3), bridging `compiler/poc/internal/checker` (`TypedProgram`) to ADR-009 TIR (`Phase 2C`)  
+> **Target Compiler Packages**: `compiler/poc/internal/cfg`, `compiler/poc/internal/borrow` (`2B.1–2B.1.2` Implemented; `2B.2` Active; `2B.3` Planned), bridging `compiler/poc/internal/checker` (`TypedProgram`) to ADR-009 TIR (`Phase 2C`)  
 > **Companion Specifications**:
-> - [Ownership and Borrowing Normative Proposal](../language-spec/ownership-and-borrowing.md) (`Proposed / Awaiting Owner Approval`)
+> - [Ownership and Borrowing Specification](../language-spec/ownership-and-borrowing.md) (`ACCEPTED` Architectural Direction; `2B.1–2B.1.2` Implemented)
 > - [Ownership and Memory Overview](../language-spec/ownership-and-memory.md) (`SPECIFIED`)
-> - [Syntax and Formal Grammar](../language-spec/syntax-and-grammar.md) (`SPECIFIED` + Proposed 2B Extensions)
+> - [Syntax and Formal Grammar](../language-spec/syntax-and-grammar.md) (`SPECIFIED` + `2B.1` Extensions Implemented)
 > - [ADR-003: Ownership-Lite Memory Model](../decisions/ADR-003-ownership-lite-memory-model.md) (`ACCEPTED`)
 > - [ADR-008: Structured Concurrency and Zero-GIL](../decisions/ADR-008-structured-concurrency-and-zero-gil.md) (`ACCEPTED`)
 > - [ADR-009: Typed Intermediate Representation Architecture](../decisions/ADR-009-typed-intermediate-representation-architecture.md) (`ACCEPTED`)
-> - [ADR-011: Ownership and Borrow-Checking Semantics](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`Proposed / Awaiting Owner Approval`)
+> - [ADR-011: Ownership and Borrow-Checking Semantics](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`ACCEPTED` — Nov 25, 2026)
 
 ---
 
-## 1. Current Compiler Audit & Status Boundary
+## 1. Compiler Audit & Status Boundary
 
-At the Phase 2A.2.1 baseline (`compiler/poc/`), **implemented compiler behavior** is strictly distinguished from **proposed normative rules** and **designed future passes**:
+> [!NOTE]
+> **Implementation Status Reconciliation (Post-Phase 2B.1.2, Baseline `91a6932`)**: The initial Phase 2A.2.1 baseline audit below preceded owner approval of ADR-011. Following owner approval ([OWNER-APPROVAL-ADR-011-2026-11-25.md](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md)), Phases **2B.1**, **2B.1.1**, and **2B.1.2** are now **`IMPLEMENTED`** (`@derive(Copy)`, uninitialized `let`/`var`, `internal/cfg`, unbounded lazy struct field tracking, per-arm `match`/guard ownership, and move/definite-init analysis `WON-MEM-001/008/010/011` + `WON-INT-001`). **Phase 2B.2** (Borrow Checker, NLL Regions & Candidate Provenance) is currently in progress; **Phase 2B.3** (Drop Elaboration) and trait/concurrency milestones remain `SPECIFIED`/`PLANNED`.
 
-### 1.1 What Is Currently `IMPLEMENTED`
+### 1.1 Historical Baseline Context & Currently `IMPLEMENTED` Capabilities
 1. **Lexer & Parser (`internal/token`, `internal/lexer`, `internal/parser`)**:
-   - Supports canonical 4-space indentation blocks (`INDENT`, `DEDENT`, `NEWLINE`), `let`, `var`, `fn`, `struct`, `enum`, `impl`, `trait`, `match`, `?`, `unsafe:`, `scope`, `spawn`, `ref`/`mut` pattern modifiers, `&x` / `&mut x`, and `*p`.
-   - **Verified Parser/Token Gaps**:
-     - `token.go` has **no `@` (`AT`) token** and no `static` keyword. Attributes (`@derive(Copy)`, `@repr(C)`) are not parsed yet.
-     - `parseBindingStmt` (`parser.go:1290`) strictly requires `=` (`WON-SYN-009`); uninitialized deferred `let x: T` / `var x: T` is not parsed yet.
-     - `parsePostfix` (`parser.go:1715`) parses `.ident` field/method access, not numeric tuple indexing `t.0` (tuple destructuring `let (a, b) = t` is supported).
+   - Supports canonical 4-space indentation blocks (`INDENT`, `DEDENT`, `NEWLINE`), `let`, `var`, `@derive(Copy)` (`token.AT` added in `2B.1`), optional uninitialized simple `let x: T` / `var x: T` (`2B.1`), `fn`, `struct`, `enum`, `impl`, `trait`, `match`, `?`, `unsafe:`, `scope`, `spawn`, `ref`/`mut` pattern modifiers, `&x` / `&mut x`, and `*p`.
+   - `parsePostfix` (`parser.go:1715`) parses `.ident` field/method access, not numeric tuple indexing `t.0` (tuple destructuring `let (a, b) = t` is supported).
 2. **Canonical Type System & Semantic Checker (`internal/types`, `internal/symbols`, `internal/checker`)**:
    - `Checker.CheckProgram` constructs `TypedProgram` containing `AST`, `Types (*types.Context)`, `Symbols (*symbols.Table)`, `ExprTypes (map[ast.Expr]types.TypeID)`, `CallTargets`, `FieldRefs`, `VariantRefs`, and `CodegenSupported` (`WON-GEN-002`).
    - `types.Context.IsCopy(TypeID)` classifies scalars (`i8..i128`, `u8..u128`, `isize`, `usize`, `f32`, `f64`), `bool`, `char`, `unit`, `!`, raw pointers (`*const T`, `*mut T`), shared references (`&T`), function types (`fn`), and arrays/tuples of `Copy` elements as `Copy`. Mutable references (`&mut T`), `String`, `KindStruct`, `KindEnum`, and `KindTypeParam` evaluate to `!IsCopy` (`false`).
@@ -35,22 +33,23 @@ At the Phase 2A.2.1 baseline (`compiler/poc/`), **implemented compiler behavior*
 3. **Backend Boundary (`internal/checker/backend_caps.go`, `internal/codegen`)**:
    - Only the scalar/array/C-FFI vertical slice compiles through `verifyBackendCapabilities` to ISO C11 (`WON-GEN-002` rejects structs, enums, references, tuples, `String`, `?`, and closures at `wonc build`).
 
-### 1.2 What Does **Not** Exist Yet (`NOT IMPLEMENTED` / `SPECIFIED` / `PLANNED`)
-- No Ownership Control-Flow Graph (`internal/cfg`) exists in `compiler/poc/internal/`.
-- No definite-initialization, move invalidation (`WON-MEM-001`), partial-move, or reinitialization analysis exists.
-- No XOR aliasing / borrow checker (`WON-MEM-004`/`005`/`006`), NLL region solver, or `Prov(e)` provenance solver (`WON-MEM-002`/`003`) exists.
-- No RAII destructor runtime, drop elaboration, drop flags, or `WON-MEM-007` check exists.
-- No `@derive(Copy)` attribute parsing/resolution or `Send`/`Sync` auto-trait solver exists.
+### 1.2 Deferred Subsystems (`SPECIFIED` / `PLANNED` / In Progress)
+- Ownership CFG (`internal/cfg`) and definite-initialization / move / partial-move / reinitialization validation (`internal/borrow`, `WON-MEM-001/008/010/011`, `WON-INT-001`) are **`IMPLEMENTED`** (Phases `2B.1–2B.1.2`).
+- XOR aliasing / borrow checker (`WON-MEM-004`/`005`/`006`), NLL region solver, and `Prov(e)` candidate provenance (`WON-MEM-002`/`003`) are **`IN PROGRESS`** in **Phase 2B.2**.
+- RAII destructor runtime, drop elaboration, drop flags, and `WON-MEM-007` enforcement remain **`PLANNED`** (Phase **2B.3** / **2C**).
+- General `trait` coherence, conditional generic `@derive(Copy)`, `impl Drop`, and `Send`/`Sync` auto-traits remain **`PLANNED`** in separate post-2B milestones.
 
 ### 1.3 Status Classification Map
 
 | Layer | Current Status | Notes |
 | :--- | :--- | :--- |
 | Canonical AST (`BorrowExpr`, `AssignStmt`, `MatchExpr`, `IdentPattern`, `UnsafeExpr`, `ScopeExpr`, `SpawnExpr`) | `IMPLEMENTED` | Syntax parsed and spans retained. |
-| Attribute (`@derive(Copy)`) & Uninit `let x: T` Grammar | `SPECIFIED` (Proposed Extension) | Not yet tokenized or parsed in `wonc`. |
+| Attribute (`@derive(Copy)`) & Uninit `let x: T` Grammar | `IMPLEMENTED` (`2B.1`) | Tokenized, parsed, and checked in `wonc`. |
 | Shallow `WON-MUT-001` & `WON-SEC-001`/`002` | `IMPLEMENTED` | Enforced in AST-walk type checker. |
-| Normative Ownership-Lite Language Rules (`ownership-and-borrowing.md`) | `SPECIFIED` (Proposed; Awaiting Owner Approval) | Design closed in Phase 2B.0.1; not yet active in compiler. |
-| Ownership CFG, Move/Borrow/NLL/Provenance, Drop Flags (`internal/cfg`, `internal/borrow`) | `SPECIFIED` (Design Only) | Planned sequentially across Phases 2B.1, 2B.2, 2B.3. |
+| Ownership-Lite Architecture (`ADR-011`, `ownership-and-borrowing.md`) | `ACCEPTED` | Approved Nov 25, 2026 (`OWNER-APPROVAL-ADR-011-2026-11-25.md`). |
+| Ownership CFG & Move/Init Analysis (`internal/cfg`, `internal/borrow` — `2B.1–2B.1.2`) | `IMPLEMENTED` | Verified in CI (`91a6932`); fail-closed `WON-INT-001` & `OwnershipChecked` gate. |
+| Borrow Checker, NLL & Candidate Provenance (`2B.2`) | `IN PROGRESS` | Current implementation milestone (Stages A, B, C). |
+| Drop Elaboration & Drop Flags (`2B.3`) | `SPECIFIED` / `PLANNED` | Deferred to Phase 2B.3 / Phase 2C. |
 | General Traits (`trait`, `impl Drop`, generic `Copy`), `Send`/`Sync`, `scope`/`spawn` | `PLANNED` (Separate Future Milestone) | Rejected with `WON-SEM-010` until post-2B trait & concurrency milestones. |
 | ADR-009 TIR Lowering & Multi-Type C11 Codegen (`Drop` Emission) | `SPECIFIED` (Phase 2C) | Ownership CFG designed to lower 1:1 to TIR. |
 
@@ -156,7 +155,7 @@ Given two places $p_1 = (L_1, \pi_1)$ and $p_2 = (L_2, \pi_2)$:
      - The type MUST NOT define or acquire a custom `Drop` destructor (and no field may carry cleanup semantics).
      - Violation emits **`WON-MEM-011`**.
    - **Generic Composites**: `@derive(Copy)` on a `struct` or `enum` containing an unconstrained generic `TypeParam` (e.g., `struct Boxed[T]: val: T`) is **deferred / rejected (`WON-SEM-010`)** in Phase 2B rather than inventing ad-hoc conditional constraints. Full conditional `Copy` derivation (`T: Copy`) belongs to the future Trait Solver milestone.
-   - **Grammar Impact**: `wonc` Phase 2A.2 does not yet tokenize `@` or parse declaration attributes. Phase 2B.1 (or attribute pre-pass) must extend `token` (`AT`), `lexer`, and `parser` to accept `AttributeList` (`@derive(...)`) per [syntax-and-grammar.md](../language-spec/syntax-and-grammar.md).
+   - **Grammar Impact**: Resolved in **Phase 2B.1** (`token.AT`, lexer/parser attribute support for `@derive(Copy)` implemented).
 
 ### 4.4 Compiler-Internal Region & Provenance Model (`Static` Without Lifetime Syntax)
 WON enforces a strict **three-layer separation** so static provenance never leaks into user syntax:
@@ -323,17 +322,17 @@ All Phase 2B diagnostics map cleanly to `diagnostic.Diagnostic` (`Version: 1`). 
 
 | Code | Status | Short Stable Message | Exact Violated Rule | Primary Span | Secondary Span / Label (in `Explanation` / optional `Related`) | Safe Repair Suggestion |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`WON-MEM-001`** | `SPECIFIED` (2B.1) | `Use of moved value` | Read, move, or borrow of a `Moved` / partially moved / conditionally moved place. | Use / move site | Prior `MoveOriginSpan` ("value moved here"). | Advise borrowing (`&x`), `.clone()` (when available), or reinitializing `var` binding (no blind auto-edit). |
-| **`WON-MEM-002`** | `SPECIFIED` (2B.2) | `Ambiguous multi-reference return provenance` | Reference-returning abstract/bodyless signature (`fn` pointer or bodyless trait) with `>= 2` input refs lacks uniquely provable parameter origin. | Function/method signature return type or call | Conflicting candidate reference parameters listed. | Return owned `T`, `Shared[T]`, or accept explicit `&mut Out` parameter. |
-| **`WON-MEM-003`** | `SPECIFIED` (2B.2) | `Borrowed value does not live long enough / local reference escape` | Return provenance contains `Local(v)` OR owner drops/`StorageDead` occurs while loan region remains live. | Escaping `return &local` or `let r = &x` outliving drop | Owner declaration / drop scope exit span. | Return owned value or restructure owner scope to outlive last reference use. |
-| **`WON-MEM-004`** | `SPECIFIED` (2B.2) | `Borrow exclusivity conflict (&T vs &mut T)` | Taking `&mut p` while `&p` is live, OR reading / `&p` while `&mut p` is live (incl. `v.push(v.len())`). | Conflicting second access/borrow | Active prior loan `OriginSpan` & blocking last use. | Reorder last read before `&mut` borrow, or hoist sub-expression into temporary. |
-| **`WON-MEM-005`** | `SPECIFIED` (2B.2) | `Multiple active mutable borrows` | Creating second overlapping `&mut p` while another `&mut p` loan is live. | Second `&mut` expression/call | First active `&mut` loan `OriginSpan`. | Split disjoint struct fields (`&mut s.a`, `&mut s.b`) or finish first borrow's uses first. |
-| **`WON-MEM-006`** | `SPECIFIED` (2B.2) | `Cannot mutate or move borrowed value` | Assigning, modifying, or moving owner place `p` while `&p` or `&mut p` is live. | Mutation or move site | Active loan `OriginSpan` blocking write. | Complete all uses of the borrow before mutating/moving owner. |
-| **`WON-MEM-007`** | `SPECIFIED` (2B.1 / Future Drop) | `Cannot partially move out of Drop type` | Moving field/payload out of type defining root `Drop` destructor. | Field move expression | `Drop` impl definition span on parent type. | Borrow `&s.field` instead, or move whole struct. |
-| **`WON-MEM-008`** | `SPECIFIED` (2B.1) | `Cannot move out of borrowed reference` | Moving non-`Copy` value through `*r` or `r.field` when `r` is `&T` or `&mut T`. | Deref/field move expression | Parameter/borrow binding declaration of `r`. | Borrow (`&*r`), clone explicitly, or take parameter by value if ownership transfer is intended. |
+| **`WON-MEM-001`** | `IMPLEMENTED` (2B.1) | `Use of moved value` | Read, move, or borrow of a `Moved` / partially moved / conditionally moved place. | Use / move site | Prior `MoveOriginSpan` ("value moved here"). | Advise borrowing (`&x`), `.clone()` (when available), or reinitializing `var` binding (no blind auto-edit). |
+| **`WON-MEM-002`** | `SPECIFIED` (2B.2 Active) | `Ambiguous multi-reference return provenance` | Reference-returning abstract/bodyless signature (`fn` pointer or bodyless trait) with `>= 2` input refs lacks uniquely provable parameter origin. | Function/method signature return type or call | Conflicting candidate reference parameters listed. | Return owned `T`, `Shared[T]`, or accept explicit `&mut Out` parameter. |
+| **`WON-MEM-003`** | `SPECIFIED` (2B.2 Active) | `Borrowed value does not live long enough / local reference escape` | Return provenance contains `Local(v)` OR owner drops/`StorageDead` occurs while loan region remains live. | Escaping `return &local` or `let r = &x` outliving drop | Owner declaration / drop scope exit span. | Return owned value or restructure owner scope to outlive last reference use. |
+| **`WON-MEM-004`** | `SPECIFIED` (2B.2 Active) | `Borrow exclusivity conflict (&T vs &mut T)` | Taking `&mut p` while `&p` is live, OR reading / `&p` while `&mut p` is live (incl. `v.push(v.len())`). | Conflicting second access/borrow | Active prior loan `OriginSpan` & blocking last use. | Reorder last read before `&mut` borrow, or hoist sub-expression into temporary. |
+| **`WON-MEM-005`** | `SPECIFIED` (2B.2 Active) | `Multiple active mutable borrows` | Creating second overlapping `&mut p` while another `&mut p` loan is live. | Second `&mut` expression/call | First active `&mut` loan `OriginSpan`. | Split disjoint struct fields (`&mut s.a`, `&mut s.b`) or finish first borrow's uses first. |
+| **`WON-MEM-006`** | `SPECIFIED` (2B.2 Active) | `Cannot mutate or move borrowed value` | Assigning, modifying, or moving owner place `p` while `&p` or `&mut p` is live. | Mutation or move site | Active loan `OriginSpan` blocking write. | Complete all uses of the borrow before mutating/moving owner. |
+| **`WON-MEM-007`** | `SPECIFIED` (2B.3 / Future Drop) | `Cannot partially move out of Drop type` | Moving field/payload out of type defining root `Drop` destructor. | Field move expression | `Drop` impl definition span on parent type. | Borrow `&s.field` instead, or move whole struct. |
+| **`WON-MEM-008`** | `IMPLEMENTED` (2B.1) | `Cannot move out of borrowed reference` | Moving non-`Copy` value through `*r` or `r.field` when `r` is `&T` or `&mut T`. | Deref/field move expression | Parameter/borrow binding declaration of `r`. | Borrow (`&*r`), clone explicitly, or take parameter by value if ownership transfer is intended. |
 | **`WON-MEM-009`** | `SPECIFIED` (Optional Lint) | `Unnecessary var binding` | `var x` never reassigned, field-mutated, or mutably borrowed. | `var` binding name | `var` token span (`LetTokenSpan`). | Syntactic replacement edit `var` -> `let` (safe, unambiguous lint). |
-| **`WON-MEM-010`** | `SPECIFIED` (2B.1) | `Use of possibly uninitialized binding` | Read, borrow, or move of binding whose `InitState` is `Uninit` / `MaybeInit` never-initialized. | Use site | Declaration span (`let x: T` once optional uninit syntax exists). | Ensure every control-flow path initializes variable before use. |
-| **`WON-MEM-011`** | `SPECIFIED` (2B.1) | `Invalid @derive(Copy) attribute` | `@derive(Copy)` placed on type with non-`Copy` field/variant, custom `Drop`, or disallowed item kind. | `@derive(Copy)` attribute span | Offending non-`Copy` field/variant or `Drop` span. | Remove `@derive(Copy)` or replace non-`Copy` fields with `Copy` types (no blind removal if semantic intent unclear). |
+| **`WON-MEM-010`** | `IMPLEMENTED` (2B.1) | `Use of possibly uninitialized binding` | Read, borrow, or move of binding whose `InitState` is `Uninit` / `MaybeInit` never-initialized. | Use site | Declaration span (`let x: T` once optional uninit syntax exists). | Ensure every control-flow path initializes variable before use. |
+| **`WON-MEM-011`** | `IMPLEMENTED` (2B.1) | `Invalid @derive(Copy) attribute` | `@derive(Copy)` placed on type with non-`Copy` field/variant, custom `Drop`, or disallowed item kind. | `@derive(Copy)` attribute span | Offending non-`Copy` field/variant or `Drop` span. | Remove `@derive(Copy)` or replace non-`Copy` fields with `Copy` types (no blind removal if semantic intent unclear). |
 | **`WON-MUT-001`** | `IMPLEMENTED` | `Cannot mutate immutable binding` | Assignment, `&mut`, `as_mut_ptr`, or `&mut self` on `let` / `&T`. | Mutation / `&mut` site | Binding `let` token span (`LetTokenSpan`). | Deterministic AI edit `let` -> `var` when root is local `let` (no edit on `&T` deref). |
 | **`WON-SEC-001` / `002`** | `IMPLEMENTED` | `Unsafe boundary required` | Direct `#import` FFI call (`001`) or raw pointer `*p` deref (`002`) outside `unsafe:`. | Call / `*p` site | — | Wrap required minimal operation in explicit `unsafe:` block after auditing safety invariants. |
 | **`WON-CON-001`** | `SPECIFIED` (Phase 3) | `Mutable reference cannot cross task boundary` | Capturing `&mut` across `s.spawn:` nursery boundary. | Capture / `s.spawn:` expression | `scope s:` span. | Share synchronized `Mutex[T]` / `Atomic*` or pass owned `Send` channel message. |

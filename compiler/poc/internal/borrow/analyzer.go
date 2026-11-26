@@ -104,6 +104,11 @@ func analyzeFunctionWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *d
 		cur := cloneEnv(inStates[bb])
 		transferBlock(fn.Name, blk, cur, view, report, emitted)
 	}
+
+	// Phase 2B.2 Stage A: 构建并验证函数内显式借用标识 (LoanID)、重借用父子关系与引用值载体流
+	if !report.HasErrors() {
+		BuildLoanFlow(fn, view, report)
+	}
 }
 
 func computeReachable(fn *cfg.FuncCFG) []bool {
@@ -146,7 +151,7 @@ func transferBlock(fnName string, blk *cfg.BasicBlock, env funcEnv, view cfg.Sem
 
 	for _, st := range blk.Statements {
 		switch st.Kind {
-		case cfg.OpScopeEnter, cfg.OpNop:
+		case cfg.OpScopeEnter, cfg.OpNop, cfg.OpStaticRef, cfg.OpCall, cfg.OpAggregate, cfg.OpTempAssign:
 			continue
 
 		case cfg.OpStorageDead:

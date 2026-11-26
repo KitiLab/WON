@@ -150,11 +150,16 @@ func findMethodSymbol(ib *ast.ImplBlock, methodName string, symTab *symbols.Tabl
 }
 
 func buildFunction(name string, fnSym *symbols.Symbol, decl *ast.FunctionDecl, view SemanticView, report *diagnostic.Report) *FuncCFG {
+	var retType types.TypeID
+	if fnSym != nil {
+		retType = fnSym.ReturnType
+	}
 	f := &FuncCFG{
-		Name:    name,
-		FuncSym: fnSym,
-		Decl:    decl,
-		Locals:  make(map[symbols.SymbolID]*LocalMeta),
+		Name:       name,
+		FuncSym:    fnSym,
+		Decl:       decl,
+		ReturnType: retType,
+		Locals:     make(map[symbols.SymbolID]*LocalMeta),
 	}
 	b := &funcBuilder{
 		view:   view,
@@ -185,6 +190,96 @@ func buildFunction(name string, fnSym *symbols.Symbol, decl *ast.FunctionDecl, v
 
 	b.finalizeEdges()
 	return f
+}
+
+func (b *funcBuilder) nextTemp() ValueID {
+	b.fn.NextTemp++
+	return b.fn.NextTemp
+}
+
+func (b *funcBuilder) nextLoan() LoanID {
+	b.fn.NextLoan++
+	return b.fn.NextLoan
+}
+
+// isRefCarryingType 判断类型自身是否属于引用，或递归结构体/元组/数组/枚举中包含借用引用载体。
+func (b *funcBuilder) isRefCarryingType(tid types.TypeID) bool {
+	if tid == types.Invalid || b.view == nil || b.view.GetTypes() == nil {
+		return false
+	}
+	visited := make(map[types.TypeID]bool, 8)
+	return b.hasRefRec(tid, visited)
+}
+
+func (b *funcBuilder) hasRefRec(tid types.TypeID, visited map[types.TypeID]bool) bool {
+	if tid == types.Invalid || visited[tid] {
+		return false
+	}
+	visited[tid] = true
+	tctx := b.view.GetTypes()
+	symTab := b.view.GetSymbols()
+	info := tctx.Info(tid)
+	switch info.Kind {
+	case types.KindRef:
+		return true
+	case types.KindTuple, types.KindSlice:
+		if info.Elem != types.Invalid && b.hasRefRec(info.Elem, visited) {
+			return true
+		}
+		for _, el := range info.Elems {
+			if b.hasRefRec(el, visited) {
+				return true
+			}
+		}
+		return false
+	case types.KindArray:
+		return b.hasRefRec(info.Elem, visited)
+	case types.KindStruct:
+		if symTab == nil {
+			return false
+		}
+		if sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]; sym != nil {
+			for _, f := range sym.Fields {
+				ft := f.Type
+				if len(sym.GenericParamIDs) > 0 && len(sym.GenericParamIDs) == len(info.GenericArgs) {
+					subst := make(map[uint64]types.TypeID, len(info.GenericArgs))
+					for i, gid := range sym.GenericParamIDs {
+						subst[uint64(gid)] = info.GenericArgs[i]
+					}
+					ft = tctx.Substitute(ft, subst)
+				}
+				if b.hasRefRec(ft, visited) {
+					return true
+				}
+			}
+		}
+		return false
+	case types.KindEnum:
+		for _, ga := range info.GenericArgs {
+			if b.hasRefRec(ga, visited) {
+				return true
+			}
+		}
+		if symTab != nil {
+			if sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]; sym != nil {
+				for _, v := range sym.Variants {
+					for _, tp := range v.TupleTypes {
+						if b.hasRefRec(tp, visited) {
+							return true
+						}
+					}
+					for _, sf := range v.StructFields {
+						if b.hasRefRec(sf.Type, visited) {
+							return true
+						}
+					}
+				}
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 func (b *funcBuilder) emitInternalError(span diagnostic.Span, msg string) {
@@ -218,7 +313,7 @@ func (b *funcBuilder) emitUnsupportedError(span diagnostic.Span, msg, explanatio
 
 func (b *funcBuilder) registerFunctionParams(decl *ast.FunctionDecl) {
 	symTab := b.view.GetSymbols()
-	for _, p := range decl.Params {
+	for idx, p := range decl.Params {
 		matched := symTab.NodeSymbols[p]
 		if matched == nil {
 			pName := p.Name
@@ -236,7 +331,7 @@ func (b *funcBuilder) registerFunctionParams(decl *ast.FunctionDecl) {
 			b.emitInternalError(p.Span, fmt.Sprintf("函数参数 '%s' 缺少已解析符号记录", p.Name))
 			continue
 		}
-		b.registerLocal(matched, true, true, 0)
+		b.registerLocal(matched, true, idx, true, 0)
 		b.emit(Statement{
 			Kind:  OpInitAssign,
 			Place: b.placeForSym(matched, p.Span),
@@ -246,7 +341,7 @@ func (b *funcBuilder) registerFunctionParams(decl *ast.FunctionDecl) {
 	}
 }
 
-func (b *funcBuilder) registerLocal(sym *symbols.Symbol, isParam bool, hasInit bool, scopeID int) {
+func (b *funcBuilder) registerLocal(sym *symbols.Symbol, isParam bool, paramIdx int, hasInit bool, scopeID int) {
 	if sym == nil {
 		return
 	}
@@ -255,13 +350,14 @@ func (b *funcBuilder) registerLocal(sym *symbols.Symbol, isParam bool, hasInit b
 	}
 	b.fn.LocalOrder = append(b.fn.LocalOrder, sym.ID)
 	b.fn.Locals[sym.ID] = &LocalMeta{
-		Sym:     sym,
-		Type:    sym.Type,
-		IsParam: isParam,
-		IsMut:   sym.IsMut,
-		HasInit: hasInit,
-		ScopeID: scopeID,
-		Span:    sym.Span,
+		Sym:      sym,
+		Type:     sym.Type,
+		IsParam:  isParam,
+		ParamIdx: paramIdx,
+		IsMut:    sym.IsMut,
+		HasInit:  hasInit,
+		ScopeID:  scopeID,
+		Span:     sym.Span,
 	}
 }
 
@@ -345,6 +441,16 @@ func (b *funcBuilder) popScope(expectedID int, span diagnostic.Span) {
 		Locals:  localsCopy,
 		Span:    span,
 	})
+	if len(localsCopy) > 0 {
+		deadCopy := make([]symbols.SymbolID, len(localsCopy))
+		copy(deadCopy, localsCopy)
+		b.emit(Statement{
+			Kind:    OpStorageDead,
+			ScopeID: top.id,
+			Locals:  deadCopy,
+			Span:    span,
+		})
+	}
 	_ = expectedID
 }
 
@@ -365,6 +471,16 @@ func (b *funcBuilder) emitScopeExitsDownTo(depth int, span diagnostic.Span) {
 			Locals:  localsCopy,
 			Span:    span,
 		})
+		if len(localsCopy) > 0 {
+			deadCopy := make([]symbols.SymbolID, len(localsCopy))
+			copy(deadCopy, localsCopy)
+			b.emit(Statement{
+				Kind:    OpStorageDead,
+				ScopeID: frame.id,
+				Locals:  deadCopy,
+				Span:    span,
+			})
+		}
 	}
 }
 
@@ -442,15 +558,15 @@ func (b *funcBuilder) lowerStmt(stmt ast.Stmt) {
 
 	case *ast.ReturnStmt:
 		if s.Value != nil {
-			b.lowerExprValue(s.Value)
-			if p, ok := b.extractPlace(s.Value); ok {
-				b.emit(Statement{
-					Kind:  OpReturn,
-					Place: p,
-					Type:  b.view.ExprType(s.Value),
-					Span:  s.Span,
-				})
-			}
+			retTemp := b.lowerExprVal(s.Value)
+			retPlace, _ := b.extractPlace(s.Value)
+			b.emit(Statement{
+				Kind:    OpReturn,
+				Place:   retPlace,
+				SrcTemp: retTemp,
+				Type:    b.view.ExprType(s.Value),
+				Span:    s.Span,
+			})
 		}
 		b.emitScopeExitsDownTo(0, s.Span)
 		b.terminateReturn(b.curBB, s.Span)
@@ -505,7 +621,7 @@ func (b *funcBuilder) lowerLetStmt(s *ast.LetStmt) {
 			b.emitInternalError(s.Span, fmt.Sprintf("未初始化变量绑定 '%s' 缺少符号解析记录", s.Name))
 			return
 		}
-		b.registerLocal(sym, false, false, curScopeID)
+		b.registerLocal(sym, false, -1, false, curScopeID)
 		b.addLocalToTopScope(sym.ID)
 		b.emit(Statement{
 			Kind:  OpUninitDecl,
@@ -516,23 +632,24 @@ func (b *funcBuilder) lowerLetStmt(s *ast.LetStmt) {
 		return
 	}
 
-	b.lowerExprValue(s.Init)
+	initTemp := b.lowerExprVal(s.Init)
 
 	if s.Pattern != nil {
-		b.registerPatternLocals(s.Pattern, true, curScopeID, s.Span)
+		b.registerPatternLocals(s.Pattern, true, curScopeID, initTemp, s.Span)
 	} else if s.Name != "" && s.Name != "_" {
 		sym := b.lookupDeclSym(s)
 		if sym == nil {
 			b.emitInternalError(s.Span, fmt.Sprintf("变量绑定 '%s' 缺少符号解析记录", s.Name))
 			return
 		}
-		b.registerLocal(sym, false, true, curScopeID)
+		b.registerLocal(sym, false, -1, true, curScopeID)
 		b.addLocalToTopScope(sym.ID)
 		b.emit(Statement{
-			Kind:  OpInitAssign,
-			Place: b.placeForSym(sym, s.Span),
-			Type:  sym.Type,
-			Span:  s.Span,
+			Kind:    OpInitAssign,
+			Place:   b.placeForSym(sym, s.Span),
+			SrcTemp: initTemp,
+			Type:    sym.Type,
+			Span:    s.Span,
 		})
 	}
 }
@@ -550,7 +667,38 @@ func (b *funcBuilder) lookupDeclSym(s *ast.LetStmt) *symbols.Symbol {
 	return nil
 }
 
-func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curScopeID int, span diagnostic.Span) {
+func (b *funcBuilder) registerPatternLocalsWithSubProj(pat ast.Pattern, initNow bool, curScopeID int, srcTemp ValueID, proj Projection, span diagnostic.Span) {
+	if ip, ok := pat.(*ast.IdentPattern); ok && b.view.VariantRef(ip) == nil {
+		symTab := b.view.GetSymbols()
+		sym := symTab.NodeSymbols[ip]
+		if sym == nil {
+			b.emitInternalError(ip.Span, fmt.Sprintf("模式绑定标识符 '%s' 缺少 SymbolID 映射", ip.Name))
+			return
+		}
+		b.registerLocal(sym, false, -1, initNow, curScopeID)
+		b.addLocalToTopScope(sym.ID)
+		op := OpInitAssign
+		if !initNow {
+			op = OpUninitDecl
+		}
+		var pPlace Place
+		if srcTemp != InvalidValue {
+			pPlace = Place{Projections: []Projection{proj}}
+		}
+		b.emit(Statement{
+			Kind:        op,
+			Place:       b.placeForSym(sym, ip.Span),
+			SrcTemp:     srcTemp,
+			ParentPlace: pPlace,
+			Type:        sym.Type,
+			Span:        ip.Span,
+		})
+		return
+	}
+	b.registerPatternLocals(pat, initNow, curScopeID, srcTemp, span)
+}
+
+func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curScopeID int, srcTemp ValueID, span diagnostic.Span) {
 	if pat == nil {
 		return
 	}
@@ -568,57 +716,65 @@ func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curSc
 			b.emitInternalError(p.Span, fmt.Sprintf("模式绑定标识符 '%s' 缺少 SymbolID 映射", p.Name))
 			return
 		}
-		b.registerLocal(sym, false, initNow, curScopeID)
+		b.registerLocal(sym, false, -1, initNow, curScopeID)
 		b.addLocalToTopScope(sym.ID)
 		op := OpInitAssign
 		if !initNow {
 			op = OpUninitDecl
 		}
 		b.emit(Statement{
-			Kind:  op,
-			Place: b.placeForSym(sym, p.Span),
-			Type:  sym.Type,
-			Span:  p.Span,
+			Kind:    op,
+			Place:   b.placeForSym(sym, p.Span),
+			SrcTemp: srcTemp,
+			Type:    sym.Type,
+			Span:    p.Span,
 		})
 
 	case *ast.TuplePattern:
-		for _, sub := range p.Elems {
-			b.registerPatternLocals(sub, initNow, curScopeID, span)
+		for idx, sub := range p.Elems {
+			b.registerPatternLocalsWithSubProj(sub, initNow, curScopeID, srcTemp, Projection{Kind: ProjTupleField, FieldIndex: idx}, span)
 		}
 
 	case *ast.StructPattern:
 		for _, fp := range p.Fields {
+			subProj := Projection{Kind: ProjField, FieldName: fp.Name}
 			if fp.Pattern != nil {
-				b.registerPatternLocals(fp.Pattern, initNow, curScopeID, fp.Span)
+				b.registerPatternLocalsWithSubProj(fp.Pattern, initNow, curScopeID, srcTemp, subProj, fp.Span)
 			} else {
 				sym := symTab.NodeSymbols[fp]
 				if sym == nil {
 					b.emitInternalError(fp.Span, fmt.Sprintf("结构体简写模式字段 '%s' 缺少 SymbolID 映射", fp.Name))
 					return
 				}
-				b.registerLocal(sym, false, initNow, curScopeID)
+				b.registerLocal(sym, false, -1, initNow, curScopeID)
 				b.addLocalToTopScope(sym.ID)
 				op := OpInitAssign
 				if !initNow {
 					op = OpUninitDecl
 				}
+				var pPlace Place
+				if srcTemp != InvalidValue {
+					pPlace = Place{Projections: []Projection{subProj}}
+				}
 				b.emit(Statement{
-					Kind:  op,
-					Place: b.placeForSym(sym, fp.Span),
-					Type:  sym.Type,
-					Span:  fp.Span,
+					Kind:        op,
+					Place:       b.placeForSym(sym, fp.Span),
+					SrcTemp:     srcTemp,
+					ParentPlace: pPlace,
+					Type:        sym.Type,
+					Span:        fp.Span,
 				})
 			}
 		}
 
 	case *ast.EnumPattern:
 		for _, arg := range p.Args {
-			b.registerPatternLocals(arg, initNow, curScopeID, span)
+			b.registerPatternLocals(arg, initNow, curScopeID, srcTemp, span)
 		}
 
 	case *ast.SlicePattern:
 		for _, elem := range p.Elems {
-			b.registerPatternLocals(elem, initNow, curScopeID, span)
+			b.registerPatternLocals(elem, initNow, curScopeID, srcTemp, span)
 		}
 
 	default:
@@ -650,13 +806,14 @@ func (b *funcBuilder) lowerAssignStmt(s *ast.AssignStmt) {
 		})
 	}
 
-	b.lowerExprValue(s.Value)
+	valTemp := b.lowerExprVal(s.Value)
 
 	b.emit(Statement{
-		Kind:  OpAssign,
-		Place: lhsPlace,
-		Type:  lhsPlace.ElemType,
-		Span:  s.Span,
+		Kind:    OpAssign,
+		Place:   lhsPlace,
+		SrcTemp: valTemp,
+		Type:    lhsPlace.ElemType,
+		Span:    s.Span,
 	})
 }
 
@@ -703,6 +860,10 @@ func (b *funcBuilder) lowerAssignTargetSubExprs(lhs ast.Expr, isCompound bool, l
 }
 
 func (b *funcBuilder) lowerIfStmt(s *ast.IfStmt) {
+	b.lowerIfExpr(s, InvalidValue, types.Invalid)
+}
+
+func (b *funcBuilder) lowerIfExpr(s *ast.IfStmt, destTemp ValueID, destType types.TypeID) {
 	b.lowerExprValue(s.Cond)
 	condBB := b.curBB
 	thenBB := b.newBlock("if.then")
@@ -712,7 +873,11 @@ func (b *funcBuilder) lowerIfStmt(s *ast.IfStmt) {
 	b.terminateSwitch(condBB, []BlockID{thenBB, elseBB}, s.Span)
 
 	b.curBB = thenBB
-	b.lowerBlock(s.Then)
+	if destTemp != InvalidValue {
+		b.lowerBlockWithResult(s.Then, destTemp, destType)
+	} else {
+		b.lowerBlock(s.Then)
+	}
 	thenEnd := b.curBB
 	thenClosed := b.isTerminated(thenEnd)
 	if !thenClosed {
@@ -721,7 +886,13 @@ func (b *funcBuilder) lowerIfStmt(s *ast.IfStmt) {
 
 	b.curBB = elseBB
 	if s.Else != nil {
-		b.lowerStmt(s.Else)
+		if blk, isBlk := s.Else.(*ast.BlockStmt); isBlk && destTemp != InvalidValue {
+			b.lowerBlockWithResult(blk, destTemp, destType)
+		} else if innerIf, isIf := s.Else.(*ast.IfStmt); isIf && destTemp != InvalidValue {
+			b.lowerIfExpr(innerIf, destTemp, destType)
+		} else {
+			b.lowerStmt(s.Else)
+		}
 	}
 	elseEnd := b.curBB
 	elseClosed := b.isTerminated(elseEnd)
@@ -733,6 +904,46 @@ func (b *funcBuilder) lowerIfStmt(s *ast.IfStmt) {
 		b.fn.Blocks[mergeBB].Terminator = Terminator{Kind: TermUnreachable, Span: s.Span}
 	}
 	b.curBB = mergeBB
+}
+
+func (b *funcBuilder) lowerBlockWithResult(blk *ast.BlockStmt, destTemp ValueID, destType types.TypeID) {
+	if blk == nil {
+		return
+	}
+	sid := b.pushScope(blk.Span)
+	b.lowerBlockStmtsWithResult(blk, destTemp, destType)
+	if !b.isTerminated(b.curBB) {
+		b.popScope(sid, blk.Span)
+	} else {
+		b.discardTopScope()
+	}
+}
+
+func (b *funcBuilder) lowerBlockStmtsWithResult(blk *ast.BlockStmt, destTemp ValueID, destType types.TypeID) {
+	if blk == nil {
+		return
+	}
+	for i, stmt := range blk.Statements {
+		if b.isTerminated(b.curBB) {
+			deadBB := b.newBlock("unreachable")
+			b.curBB = deadBB
+		}
+		if destTemp != InvalidValue && i == len(blk.Statements)-1 {
+			if es, isExpr := stmt.(*ast.ExprStmt); isExpr {
+				if val := b.lowerExprVal(es.Expr); val != InvalidValue {
+					b.emit(Statement{
+						Kind:    OpTempAssign,
+						ValTemp: destTemp,
+						SrcTemp: val,
+						Type:    destType,
+						Span:    es.Span,
+					})
+				}
+				continue
+			}
+		}
+		b.lowerStmt(stmt)
+	}
 }
 
 func (b *funcBuilder) lowerWhileStmt(s *ast.WhileStmt) {
@@ -780,7 +991,7 @@ func (b *funcBuilder) lowerForStmt(s *ast.ForStmt) {
 	b.curBB = bodyBB
 	sid := b.pushScope(s.Span)
 	if s.Pattern != nil {
-		b.registerPatternLocals(s.Pattern, true, sid, s.Span)
+		b.registerPatternLocals(s.Pattern, true, sid, InvalidValue, s.Span)
 	}
 	b.lowerBlockStatements(s.Body)
 	if !b.isTerminated(b.curBB) {
@@ -796,6 +1007,10 @@ func (b *funcBuilder) lowerForStmt(s *ast.ForStmt) {
 
 // lowerMatchExpr 为 match 表达式的每个分支单独降低所有权语义，精确区分引用模式分支与按值移动分支，并忠实表达守卫落空流转。
 func (b *funcBuilder) lowerMatchExpr(m *ast.MatchExpr) {
+	b.lowerMatchExprVal(m, InvalidValue, types.Invalid)
+}
+
+func (b *funcBuilder) lowerMatchExprVal(m *ast.MatchExpr, destTemp ValueID, destType types.TypeID) {
 	subjPlace, hasSubjPlace := b.extractPlace(m.Subject)
 	if hasSubjPlace {
 		// 在分发点仅检查标签判别式可读性，绝不在进入具体分支前提前吞并整个主体
@@ -872,7 +1087,7 @@ func (b *funcBuilder) lowerMatchExpr(m *ast.MatchExpr) {
 			b.curBB = armBodyBB
 		}
 
-		b.lowerBlockStatements(arm.Body)
+		b.lowerBlockStmtsWithResult(arm.Body, destTemp, destType)
 		if !b.isTerminated(b.curBB) {
 			allDiverged = false
 			b.popScope(sid, arm.Span)
@@ -901,6 +1116,16 @@ func (b *funcBuilder) popScopeKeepFrame(span diagnostic.Span) {
 		Locals:  localsCopy,
 		Span:    span,
 	})
+	if len(localsCopy) > 0 {
+		deadCopy := make([]symbols.SymbolID, len(localsCopy))
+		copy(deadCopy, localsCopy)
+		b.emit(Statement{
+			Kind:    OpStorageDead,
+			ScopeID: top.id,
+			Locals:  deadCopy,
+			Span:    span,
+		})
+	}
 }
 
 // applyArmPatternOwnership 按单个 match 分支的实际模式种类生成独立的所有权/移动/借用事件与绑定初始化。
@@ -931,14 +1156,44 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 			b.emitInternalError(p.Span, fmt.Sprintf("match 分支绑定 '%s' 缺少 SymbolID", p.Name))
 			return
 		}
+		var initSrcTemp ValueID
 		if hasPlace {
 			if p.IsRef {
 				op := OpBorrowShared
+				bk := BorrowShared
 				if p.IsMut {
 					op = OpBorrowMut
+					bk = BorrowMut
 				}
+				borrowPlace := place
+				var parentPlace Place
+				reborrow := false
+				if isThroughRef && !place.HasDeref() {
+					borrowPlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: sym.Type}, sym.Type, p.Span)
+				}
+				if pPlace, isRB := b.extractReborrowParent(borrowPlace); isRB {
+					reborrow = true
+					parentPlace = pPlace
+					op = OpReborrow
+					if p.IsMut {
+						bk = BorrowReborrowMut
+					} else {
+						bk = BorrowReborrowShared
+					}
+				}
+				initSrcTemp = b.nextTemp()
 				b.emit(Statement{Kind: OpRead, Place: place, Type: place.ElemType, Span: p.Span})
-				b.emit(Statement{Kind: op, Place: place, Type: sym.Type, Span: p.Span})
+				b.emit(Statement{
+					Kind:        op,
+					Place:       borrowPlace,
+					Type:        sym.Type,
+					LoanID:      b.nextLoan(),
+					BorrowKind:  bk,
+					IsReborrow:  reborrow,
+					ParentPlace: parentPlace,
+					ValTemp:     initSrcTemp,
+					Span:        p.Span,
+				})
 			} else if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
 				if isThroughRef || place.HasDeref() || place.HasIndex() {
 					// 通过引用/解引用匹配出的非 Copy 值按值绑定与直接解引用移出一致，触发 WON-MEM-008 防线
@@ -946,22 +1201,32 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 					if isThroughRef && !place.HasDeref() {
 						pEmit = place.AppendProj(Projection{Kind: ProjDeref, ElemType: sym.Type}, sym.Type, p.Span)
 					}
-					b.emit(Statement{Kind: OpMove, Place: pEmit, Type: sym.Type, Span: p.Span})
+					if b.isRefCarryingType(sym.Type) {
+						initSrcTemp = b.nextTemp()
+					}
+					b.emit(Statement{Kind: OpMove, Place: pEmit, Type: sym.Type, ValTemp: initSrcTemp, Span: p.Span})
 				} else {
-					b.emit(Statement{Kind: OpMove, Place: place, Type: sym.Type, Span: p.Span})
+					if b.isRefCarryingType(sym.Type) {
+						initSrcTemp = b.nextTemp()
+					}
+					b.emit(Statement{Kind: OpMove, Place: place, Type: sym.Type, ValTemp: initSrcTemp, Span: p.Span})
 				}
 			} else {
 				// Copy 类型按值绑定同样记录显式 OpCopy 源读取，确保每个局部变量均有对应的源所有权操作且不产生伪 Move
-				b.emit(Statement{Kind: OpCopy, Place: place, Type: sym.Type, Span: p.Span})
+				if b.isRefCarryingType(sym.Type) {
+					initSrcTemp = b.nextTemp()
+				}
+				b.emit(Statement{Kind: OpCopy, Place: place, Type: sym.Type, ValTemp: initSrcTemp, Span: p.Span})
 			}
 		}
-		b.registerLocal(sym, false, true, scopeID)
+		b.registerLocal(sym, false, -1, true, scopeID)
 		b.addLocalToTopScope(sym.ID)
 		b.emit(Statement{
-			Kind:  OpInitAssign,
-			Place: b.placeForSym(sym, p.Span),
-			Type:  sym.Type,
-			Span:  p.Span,
+			Kind:    OpInitAssign,
+			Place:   b.placeForSym(sym, p.Span),
+			SrcTemp: initSrcTemp,
+			Type:    sym.Type,
+			Span:    p.Span,
 		})
 
 	case *ast.StructPattern:
@@ -988,20 +1253,25 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 					b.emitInternalError(fp.Span, fmt.Sprintf("结构体解构简写字段 '%s' 缺少 SymbolID", fp.Name))
 					continue
 				}
+				var fieldValTemp ValueID
 				if hasPlace {
+					if b.isRefCarryingType(sym.Type) {
+						fieldValTemp = b.nextTemp()
+					}
 					if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
-						b.emit(Statement{Kind: OpMove, Place: fieldPlace, Type: sym.Type, Span: fp.Span})
+						b.emit(Statement{Kind: OpMove, Place: fieldPlace, Type: sym.Type, ValTemp: fieldValTemp, Span: fp.Span})
 					} else {
-						b.emit(Statement{Kind: OpCopy, Place: fieldPlace, Type: sym.Type, Span: fp.Span})
+						b.emit(Statement{Kind: OpCopy, Place: fieldPlace, Type: sym.Type, ValTemp: fieldValTemp, Span: fp.Span})
 					}
 				}
-				b.registerLocal(sym, false, true, scopeID)
+				b.registerLocal(sym, false, -1, true, scopeID)
 				b.addLocalToTopScope(sym.ID)
 				b.emit(Statement{
-					Kind:  OpInitAssign,
-					Place: b.placeForSym(sym, fp.Span),
-					Type:  sym.Type,
-					Span:  fp.Span,
+					Kind:    OpInitAssign,
+					Place:   b.placeForSym(sym, fp.Span),
+					SrcTemp: fieldValTemp,
+					Type:    sym.Type,
+					Span:    fp.Span,
 				})
 				continue
 			}
@@ -1074,11 +1344,36 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 	tctx := b.view.GetTypes()
 	symTab := b.view.GetSymbols()
 
-	var bindings []*symbols.Symbol
+	type patBind struct {
+		sym     *symbols.Symbol
+		srcTemp ValueID
+	}
+	var bindings []patBind
 	var borrowOps []Statement
 	hasRef := false
 	hasCopyBind := false
 	hasNonCopyMove := false
+
+	borrowPlace := place
+	var parentPlace Place
+	isReborrow := false
+	if hasPlace {
+		if isThroughRef && !place.HasDeref() {
+			borrowPlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: place.ElemType}, place.ElemType, pat.GetSpan())
+		}
+		if pPlace, isRB := b.extractReborrowParent(borrowPlace); isRB {
+			isReborrow = true
+			parentPlace = pPlace
+		}
+	}
+
+	var aggReadTemp ValueID
+	ensureAggTemp := func() ValueID {
+		if aggReadTemp == InvalidValue {
+			aggReadTemp = b.nextTemp()
+		}
+		return aggReadTemp
+	}
 
 	var walk func(node ast.Pattern)
 	walk = func(node ast.Pattern) {
@@ -1097,20 +1392,52 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 				b.emitInternalError(p.Span, fmt.Sprintf("嵌套模式绑定 '%s' 缺少 SymbolID", p.Name))
 				return
 			}
-			bindings = append(bindings, sym)
 			if p.IsRef {
 				hasRef = true
 				op := OpBorrowShared
+				bk := BorrowShared
 				if p.IsMut {
 					op = OpBorrowMut
+					bk = BorrowMut
 				}
+				if isReborrow {
+					op = OpReborrow
+					if p.IsMut {
+						bk = BorrowReborrowMut
+					} else {
+						bk = BorrowReborrowShared
+					}
+				}
+				var bt ValueID
 				if hasPlace {
-					borrowOps = append(borrowOps, Statement{Kind: op, Place: place, Type: sym.Type, Span: p.Span})
+					bt = b.nextTemp()
+					borrowOps = append(borrowOps, Statement{
+						Kind:        op,
+						Place:       borrowPlace,
+						Type:        sym.Type,
+						LoanID:      b.nextLoan(),
+						BorrowKind:  bk,
+						IsReborrow:  isReborrow,
+						ParentPlace: parentPlace,
+						ValTemp:     bt,
+						Span:        p.Span,
+					})
 				}
+				bindings = append(bindings, patBind{sym: sym, srcTemp: bt})
 			} else if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
 				hasNonCopyMove = true
+				var st ValueID
+				if hasPlace && b.isRefCarryingType(sym.Type) {
+					st = ensureAggTemp()
+				}
+				bindings = append(bindings, patBind{sym: sym, srcTemp: st})
 			} else {
 				hasCopyBind = true
+				var st ValueID
+				if hasPlace && b.isRefCarryingType(sym.Type) {
+					st = ensureAggTemp()
+				}
+				bindings = append(bindings, patBind{sym: sym, srcTemp: st})
 			}
 		case *ast.TuplePattern:
 			for _, el := range p.Elems {
@@ -1125,12 +1452,16 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 				if fp.Pattern != nil {
 					walk(fp.Pattern)
 				} else if sym := symTab.NodeSymbols[fp]; sym != nil {
-					bindings = append(bindings, sym)
+					var st ValueID
 					if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
 						hasNonCopyMove = true
 					} else {
 						hasCopyBind = true
 					}
+					if hasPlace && b.isRefCarryingType(sym.Type) {
+						st = ensureAggTemp()
+					}
+					bindings = append(bindings, patBind{sym: sym, srcTemp: st})
 				} else {
 					b.emitInternalError(fp.Span, fmt.Sprintf("嵌套结构体简写字段 '%s' 缺少 SymbolID", fp.Name))
 				}
@@ -1163,7 +1494,7 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 			if isThroughRef && !place.HasDeref() {
 				movePlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: place.ElemType}, place.ElemType, pat.GetSpan())
 			}
-			b.emit(Statement{Kind: OpMove, Place: movePlace, Type: place.ElemType, Span: pat.GetSpan()})
+			b.emit(Statement{Kind: OpMove, Place: movePlace, Type: place.ElemType, ValTemp: aggReadTemp, Span: pat.GetSpan()})
 		} else {
 			if hasRef {
 				b.emit(Statement{Kind: OpRead, Place: place, Type: place.ElemType, Span: pat.GetSpan()})
@@ -1172,19 +1503,20 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 				}
 			}
 			if hasCopyBind {
-				b.emit(Statement{Kind: OpCopy, Place: place, Type: place.ElemType, Span: pat.GetSpan()})
+				b.emit(Statement{Kind: OpCopy, Place: place, Type: place.ElemType, ValTemp: aggReadTemp, Span: pat.GetSpan()})
 			}
 		}
 	}
 
-	for _, sym := range bindings {
-		b.registerLocal(sym, false, true, scopeID)
-		b.addLocalToTopScope(sym.ID)
+	for _, bd := range bindings {
+		b.registerLocal(bd.sym, false, -1, true, scopeID)
+		b.addLocalToTopScope(bd.sym.ID)
 		b.emit(Statement{
-			Kind:  OpInitAssign,
-			Place: b.placeForSym(sym, sym.Span),
-			Type:  sym.Type,
-			Span:  sym.Span,
+			Kind:    OpInitAssign,
+			Place:   b.placeForSym(bd.sym, bd.sym.Span),
+			SrcTemp: bd.srcTemp,
+			Type:    bd.sym.Type,
+			Span:    bd.sym.Span,
 		})
 	}
 }
@@ -1217,18 +1549,35 @@ func findStructFieldType(structType types.TypeID, fieldName string, symTab *symb
 
 // lowerExprValue 按所有权与求值顺序降低任意右值表达式，并在末尾对任何未知 AST 表达式触发 WON-INT-001。
 func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
+	_ = b.lowerExprVal(expr)
+}
+
+func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 	if expr == nil {
-		return
+		return InvalidValue
 	}
 
 	if place, ok := b.extractPlace(expr); ok {
-		b.lowerPlaceValueAccess(expr, place)
-		return
+		return b.lowerPlaceValueAccess(expr, place)
 	}
 
+	exprType := b.view.ExprType(expr)
 	switch e := expr.(type) {
-	case *ast.IntegerLiteral, *ast.FloatLiteral, *ast.BoolLiteral, *ast.CharLiteral, *ast.ByteLiteral, *ast.StringLiteral, *ast.PathExpr:
-		return
+	case *ast.IntegerLiteral, *ast.FloatLiteral, *ast.BoolLiteral, *ast.CharLiteral, *ast.ByteLiteral, *ast.PathExpr:
+		return InvalidValue
+
+	case *ast.StringLiteral:
+		if b.isRefCarryingType(exprType) {
+			v := b.nextTemp()
+			b.emit(Statement{
+				Kind:    OpStaticRef,
+				ValTemp: v,
+				Type:    exprType,
+				Span:    e.Span,
+			})
+			return v
+		}
+		return InvalidValue
 
 	case *ast.InterpolatedStringExpr:
 		for _, part := range e.Parts {
@@ -1236,38 +1585,76 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 				b.lowerExprValue(part.Expr)
 			}
 		}
+		return InvalidValue
 
 	case *ast.ArrayLiteral:
-		for _, el := range e.Elems {
-			b.lowerExprValue(el)
-		}
-
-	case *ast.ArrayRepeatLiteral:
-		b.lowerExprValue(e.Elem)
-
-	case *ast.TupleLiteral:
-		for _, el := range e.Elems {
-			b.lowerExprValue(el)
-		}
-
-	case *ast.StructLiteral:
-		for _, f := range e.Fields {
-			if f.Value != nil {
-				b.lowerExprValue(f.Value)
+		var aggTemps []AggTemp
+		for idx, el := range e.Elems {
+			if tv := b.lowerExprVal(el); tv != InvalidValue {
+				aggTemps = append(aggTemps, AggTemp{Index: idx, Temp: tv})
 			}
 		}
+		if len(aggTemps) > 0 || b.isRefCarryingType(exprType) {
+			v := b.nextTemp()
+			b.emit(Statement{Kind: OpAggregate, AggTemps: aggTemps, ValTemp: v, Type: exprType, Span: e.Span})
+			return v
+		}
+		return InvalidValue
+
+	case *ast.ArrayRepeatLiteral:
+		var aggTemps []AggTemp
+		if tv := b.lowerExprVal(e.Elem); tv != InvalidValue {
+			aggTemps = append(aggTemps, AggTemp{Index: -1, Temp: tv})
+		}
+		if len(aggTemps) > 0 || b.isRefCarryingType(exprType) {
+			v := b.nextTemp()
+			b.emit(Statement{Kind: OpAggregate, AggTemps: aggTemps, ValTemp: v, Type: exprType, Span: e.Span})
+			return v
+		}
+		return InvalidValue
+
+	case *ast.TupleLiteral:
+		var aggTemps []AggTemp
+		for idx, el := range e.Elems {
+			if tv := b.lowerExprVal(el); tv != InvalidValue {
+				aggTemps = append(aggTemps, AggTemp{Index: idx, Temp: tv})
+			}
+		}
+		if len(aggTemps) > 0 || b.isRefCarryingType(exprType) {
+			v := b.nextTemp()
+			b.emit(Statement{Kind: OpAggregate, AggTemps: aggTemps, ValTemp: v, Type: exprType, Span: e.Span})
+			return v
+		}
+		return InvalidValue
+
+	case *ast.StructLiteral:
+		var aggTemps []AggTemp
+		for idx, f := range e.Fields {
+			if f.Value != nil {
+				if tv := b.lowerExprVal(f.Value); tv != InvalidValue {
+					aggTemps = append(aggTemps, AggTemp{FieldName: f.Name, Index: idx, Temp: tv})
+				}
+			}
+		}
+		if len(aggTemps) > 0 || b.isRefCarryingType(exprType) {
+			v := b.nextTemp()
+			b.emit(Statement{Kind: OpAggregate, AggTemps: aggTemps, ValTemp: v, Type: exprType, Span: e.Span})
+			return v
+		}
+		return InvalidValue
 
 	case *ast.Identifier:
 		// 非局部/参数标识符（如枚举单元构造器 / 函数名），检查符号确实已解析
 		if sym := b.view.GetSymbols().NodeSymbols[e]; sym == nil {
 			b.emitInternalError(e.Span, fmt.Sprintf("标识符表达式 '%s' 缺少已解析符号记录", e.Name))
 		}
+		return InvalidValue
 
 	case *ast.FieldAccessExpr:
-		b.lowerExprValue(e.Object)
+		return b.lowerExprVal(e.Object)
 
 	case *ast.IndexExpr:
-		b.lowerExprValue(e.Object)
+		objVal := b.lowerExprVal(e.Object)
 		if rng, isRng := e.Index.(*ast.RangeExpr); isRng {
 			if rng.Start != nil {
 				b.lowerExprValue(rng.Start)
@@ -1278,25 +1665,43 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 		} else {
 			b.lowerExprValue(e.Index)
 		}
+		return objVal
 
 	case *ast.RangeExpr:
 		b.lowerExprValue(e.Start)
 		b.lowerExprValue(e.End)
+		return InvalidValue
 
 	case *ast.CastExpr:
 		b.lowerExprValue(e.Expr)
+		return InvalidValue
 
 	case *ast.UnaryExpr:
-		b.lowerExprValue(e.Expr)
+		return b.lowerExprVal(e.Expr)
 
 	case *ast.BorrowExpr:
 		targetPlace, ok := b.extractPlace(e.Expr)
 		if ok {
 			b.lowerPlaceAddressSubExprs(e.Expr)
 			opKind := OpBorrowShared
+			bk := BorrowShared
 			if e.IsMut {
 				opKind = OpBorrowMut
+				bk = BorrowMut
 			}
+			var parentPlace Place
+			isReborrow := false
+			if pPlace, isRB := b.extractReborrowParent(targetPlace); isRB {
+				isReborrow = true
+				parentPlace = pPlace
+				opKind = OpReborrow
+				if e.IsMut {
+					bk = BorrowReborrowMut
+				} else {
+					bk = BorrowReborrowShared
+				}
+			}
+			v := b.nextTemp()
 			b.emit(Statement{
 				Kind:  OpRead,
 				Place: targetPlace,
@@ -1304,14 +1709,19 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 				Span:  e.Span,
 			})
 			b.emit(Statement{
-				Kind:  opKind,
-				Place: targetPlace,
-				Type:  b.view.ExprType(e),
-				Span:  e.Span,
+				Kind:        opKind,
+				Place:       targetPlace,
+				Type:        exprType,
+				LoanID:      b.nextLoan(),
+				BorrowKind:  bk,
+				IsReborrow:  isReborrow,
+				ParentPlace: parentPlace,
+				ValTemp:     v,
+				Span:        e.Span,
 			})
-		} else {
-			b.lowerExprValue(e.Expr)
+			return v
 		}
+		return b.lowerExprVal(e.Expr)
 
 	case *ast.BinaryExpr:
 		if e.Op == "and" || e.Op == "or" {
@@ -1326,13 +1736,14 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 				b.terminateGoto(b.curBB, mergeBB, e.Span)
 			}
 			b.curBB = mergeBB
-			return
+			return InvalidValue
 		}
 		b.lowerExprValue(e.Left)
 		b.lowerExprValue(e.Right)
+		return InvalidValue
 
 	case *ast.TryExpr:
-		b.lowerExprValue(e.Expr)
+		inner := b.lowerExprVal(e.Expr)
 		tryBB := b.curBB
 		okBB := b.newBlock("try.ok")
 		errBB := b.newBlock("try.err")
@@ -1341,21 +1752,28 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 		b.emitScopeExitsDownTo(0, e.Span)
 		b.terminateReturn(errBB, e.Span)
 		b.curBB = okBB
+		return inner
 
 	case *ast.CallExpr:
-		for _, arg := range e.Args {
-			b.lowerExprValue(arg)
+		if e.Callee == "" && e.CalleeExpr != nil {
+			b.lowerExprValue(e.CalleeExpr)
 		}
+		calSym := b.view.CallTarget(e)
+		return b.emitCallExpr(calSym, e.Callee, e.Args, exprType, e.Span, nil)
 
 	case *ast.NamespacedCallExpr:
-		for _, arg := range e.Args {
-			b.lowerExprValue(arg)
-		}
+		calSym := b.view.CallTarget(e)
+		name := e.Namespace + "::" + e.Function
+		return b.emitCallExpr(calSym, name, e.Args, exprType, e.Span, nil)
 
 	case *ast.MethodCallExpr:
 		calSym := b.view.CallTarget(e)
+		var recvPtr *ValueID
 		if calSym != nil && calSym.HasSelf && !calSym.SelfIsRef {
-			b.lowerExprValue(e.Receiver)
+			rv := b.lowerExprVal(e.Receiver)
+			if rv != InvalidValue {
+				recvPtr = &rv
+			}
 		} else if p, ok := b.extractPlace(e.Receiver); ok {
 			b.lowerPlaceAddressSubExprs(e.Receiver)
 			b.emit(Statement{
@@ -1364,37 +1782,93 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 				Type:  p.ElemType,
 				Span:  e.Receiver.GetSpan(),
 			})
-			opKind := OpBorrowShared
-			if (calSym != nil && calSym.SelfIsMut) || e.Method == "push_str" || e.Method == "as_mut_ptr" {
-				opKind = OpBorrowMut
+			isMut := (calSym != nil && calSym.SelfIsMut) || e.Method == "push_str" || e.Method == "as_mut_ptr"
+			borrowTarget := p
+			var parentPlace Place
+			isReborrow := false
+			recvType := b.view.ExprType(e.Receiver)
+			if recvType == types.Invalid {
+				recvType = p.ElemType
 			}
+			recvInfo := b.view.GetTypes().Info(recvType)
+			if recvInfo.Kind == types.KindRef {
+				// 当方法调用在 &T / &mut T 引用绑定上时，隐式自动解引用形成对其所借存储的重借用
+				isReborrow = true
+				parentPlace = p
+				borrowTarget = p.AppendProj(Projection{Kind: ProjDeref, ElemType: recvInfo.Elem}, recvInfo.Elem, e.Span)
+			} else if pPlace, isRB := b.extractReborrowParent(p); isRB {
+				isReborrow = true
+				parentPlace = pPlace
+			}
+			opKind := OpBorrowShared
+			bk := BorrowShared
+			if isMut {
+				opKind = OpBorrowMut
+				bk = BorrowMut
+			}
+			if isReborrow {
+				opKind = OpReborrow
+				if isMut {
+					bk = BorrowReborrowMut
+				} else {
+					bk = BorrowReborrowShared
+				}
+			}
+			rv := b.nextTemp()
 			b.emit(Statement{
-				Kind:  opKind,
-				Place: p,
-				Type:  p.ElemType,
-				Span:  e.Span,
+				Kind:        opKind,
+				Place:       borrowTarget,
+				Type:        borrowTarget.ElemType,
+				LoanID:      b.nextLoan(),
+				BorrowKind:  bk,
+				IsReborrow:  isReborrow,
+				ParentPlace: parentPlace,
+				ValTemp:     rv,
+				Span:        e.Span,
 			})
+			recvPtr = &rv
 		} else {
-			b.lowerExprValue(e.Receiver)
+			rv := b.lowerExprVal(e.Receiver)
+			if rv != InvalidValue {
+				recvPtr = &rv
+			}
 		}
-		for _, arg := range e.Args {
-			b.lowerExprValue(arg)
-		}
+		return b.emitCallExpr(calSym, e.Method, e.Args, exprType, e.Span, recvPtr)
 
 	case *ast.UnsafeExpr:
+		if b.isRefCarryingType(exprType) {
+			v := b.nextTemp()
+			b.lowerBlockWithResult(e.Block, v, exprType)
+			return v
+		}
 		b.lowerBlock(e.Block)
+		return InvalidValue
 
 	case *ast.IfStmt:
+		if b.isRefCarryingType(exprType) {
+			v := b.nextTemp()
+			b.lowerIfExpr(e, v, exprType)
+			return v
+		}
 		b.lowerIfStmt(e)
+		return InvalidValue
 
 	case *ast.WhileStmt:
 		b.lowerWhileStmt(e)
+		return InvalidValue
 
 	case *ast.ForStmt:
 		b.lowerForStmt(e)
+		return InvalidValue
 
 	case *ast.MatchExpr:
+		if b.isRefCarryingType(exprType) {
+			v := b.nextTemp()
+			b.lowerMatchExprVal(e, v, exprType)
+			return v
+		}
 		b.lowerMatchExpr(e)
+		return InvalidValue
 
 	case *ast.ScopeExpr, *ast.SpawnExpr:
 		b.emitUnsupportedError(
@@ -1402,10 +1876,57 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 			"结构化并发原语 (scope/spawn) 尚未在当前所有权阶段启用",
 			"结构化并发所有权校验属于后续独立里程碑。",
 		)
+		return InvalidValue
 
 	default:
 		b.emitInternalError(expr.GetSpan(), fmt.Sprintf("Encountered unhandled expression node %T in ownership CFG", expr))
+		return InvalidValue
 	}
+}
+
+func (b *funcBuilder) emitCallExpr(calSym *symbols.Symbol, fallbackName string, args []ast.Expr, exprType types.TypeID, span diagnostic.Span, selfTemp *ValueID) ValueID {
+	argTemps := make([]ValueID, 0, len(args)+1)
+	if selfTemp != nil {
+		argTemps = append(argTemps, *selfTemp)
+	}
+	for _, arg := range args {
+		argTemps = append(argTemps, b.lowerExprVal(arg))
+	}
+	name := fallbackName
+	if calSym != nil && calSym.Name != "" {
+		name = calSym.Name
+	}
+	var retTemp ValueID
+	if b.isRefCarryingType(exprType) {
+		retTemp = b.nextTemp()
+	}
+	b.emit(Statement{
+		Kind:       OpCall,
+		Callee:     calSym,
+		CalleeName: name,
+		ArgTemps:   argTemps,
+		ValTemp:    retTemp,
+		Type:       exprType,
+		Span:       span,
+	})
+	return retTemp
+}
+
+// extractReborrowParent 判断基于 Place 的取址或方法调用是否穿过安全引用 (&T / &mut T) 形成重借用关系。
+// 穿过裸指针 (*const T / *mut T) 解引用在 unsafe 中创建独立借用而非父借用衍生重借用。
+func (b *funcBuilder) extractReborrowParent(place Place) (Place, bool) {
+	parent, hasDeref := place.PrefixBeforeLastDeref()
+	if !hasDeref || b.view == nil || b.view.GetTypes() == nil {
+		return Place{}, false
+	}
+	pType := parent.ElemType
+	if pType == types.Invalid {
+		return Place{}, false
+	}
+	if b.view.GetTypes().Info(pType).Kind == types.KindRef {
+		return parent, true
+	}
+	return Place{}, false
 }
 
 func (b *funcBuilder) lowerPlaceAddressSubExprs(expr ast.Expr) {
@@ -1426,7 +1947,7 @@ func (b *funcBuilder) lowerPlaceAddressSubExprs(expr ast.Expr) {
 	}
 }
 
-func (b *funcBuilder) lowerPlaceValueAccess(expr ast.Expr, place Place) {
+func (b *funcBuilder) lowerPlaceValueAccess(expr ast.Expr, place Place) ValueID {
 	b.lowerPlacePrereqs(expr, place)
 
 	exprType := b.view.ExprType(expr)
@@ -1434,22 +1955,30 @@ func (b *funcBuilder) lowerPlaceValueAccess(expr ast.Expr, place Place) {
 		exprType = place.ElemType
 	}
 
+	var valTemp ValueID
+	if b.isRefCarryingType(exprType) {
+		valTemp = b.nextTemp()
+	}
+
 	if exprType != types.Invalid && b.view.GetTypes().IsCopy(exprType) {
 		b.emit(Statement{
-			Kind:  OpCopy,
-			Place: place,
-			Type:  exprType,
-			Span:  expr.GetSpan(),
+			Kind:    OpCopy,
+			Place:   place,
+			Type:    exprType,
+			ValTemp: valTemp,
+			Span:    expr.GetSpan(),
 		})
-		return
+		return valTemp
 	}
 
 	b.emit(Statement{
-		Kind:  OpMove,
-		Place: place,
-		Type:  exprType,
-		Span:  expr.GetSpan(),
+		Kind:    OpMove,
+		Place:   place,
+		Type:    exprType,
+		ValTemp: valTemp,
+		Span:    expr.GetSpan(),
 	})
+	return valTemp
 }
 
 func (b *funcBuilder) lowerPlacePrereqs(expr ast.Expr, place Place) {

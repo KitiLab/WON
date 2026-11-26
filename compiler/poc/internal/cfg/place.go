@@ -97,6 +97,42 @@ func (p Place) RootPlace() Place {
 	}
 }
 
+// PrefixBeforeLastDeref 返回最后一个解引用投影 (* / Deref) 之前的引用持有者位置。
+// 例如 &*parent 返回 parent；&*wrapper.ref 返回 wrapper.ref。
+func (p Place) PrefixBeforeLastDeref() (Place, bool) {
+	lastDeref := -1
+	for i, proj := range p.Projections {
+		if proj.Kind == ProjDeref {
+			lastDeref = i
+		}
+	}
+	if lastDeref < 0 {
+		return Place{}, false
+	}
+	elemType := p.RootType
+	var projs []Projection
+	if lastDeref > 0 {
+		projs = make([]Projection, lastDeref)
+		copy(projs, p.Projections[:lastDeref])
+		elemType = projs[lastDeref-1].ElemType
+	}
+	return Place{
+		RootSymID:   p.RootSymID,
+		RootName:    p.RootName,
+		RootType:    p.RootType,
+		ElemType:    elemType,
+		RootMut:     p.RootMut,
+		IsParam:     p.IsParam,
+		Projections: projs,
+		Span:        p.Span,
+	}, true
+}
+
+// Key 返回不依赖源码 Span 的确定性位置唯一键，供借用流追踪与重叠判别索引使用。
+func (p Place) Key() string {
+	return p.String()
+}
+
 // AppendField 返回在当前位置末尾追加结构体字段投影的新 Place。
 func (p Place) AppendField(fieldName string, fieldIdx int, elemType types.TypeID, span diagnostic.Span) Place {
 	projs := make([]Projection, len(p.Projections)+1)
