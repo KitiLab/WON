@@ -105,6 +105,10 @@ type Statement struct {
 	CalleeName  string
 	ArgTemps    []ValueID
 	AggTemps    []AggTemp
+
+	// Phase 2B.3 确定性析构标志与胶水描述符关联字段
+	DropFlag uint32
+	DropGlue string
 }
 
 // TermKind 定义基本块终结跳转指令类别。
@@ -244,6 +248,12 @@ func (f *FuncCFG) Dump() string {
 				sb.WriteString(fmt.Sprintf("    Aggregate items=%v dst=v%d\n", st.AggTemps, st.ValTemp))
 			case OpTempAssign:
 				sb.WriteString(fmt.Sprintf("    TempAssign v%d <- v%d\n", st.ValTemp, st.SrcTemp))
+			case OpDrop:
+				sb.WriteString(fmt.Sprintf("    Drop %s glue=%s\n", st.Place.String(), st.DropGlue))
+			case OpCondDrop:
+				sb.WriteString(fmt.Sprintf("    CondDrop %s flag=df%d glue=%s\n", st.Place.String(), st.DropFlag, st.DropGlue))
+			case OpFFITransfer:
+				sb.WriteString(fmt.Sprintf("    FFITransfer %s callee=%s glue=%s\n", st.Place.String(), st.CalleeName, st.DropGlue))
 			default:
 				sb.WriteString(fmt.Sprintf("    %s %s", st.Kind, st.Place.String()))
 				if st.SrcTemp != InvalidValue {
