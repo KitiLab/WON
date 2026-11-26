@@ -55,6 +55,8 @@ func FuzzOwnershipCFGAndDataflow(f *testing.F) {
 			sb.WriteString("    while cond:\n")
 			emitStep(op4, "        ")
 			sb.WriteString("        break\n")
+		} else {
+			sb.WriteString("    let _m = match p:\n        Box { a: ref ra, b: _ } if cond => ra.len()\n        _ => 0u64\n")
 		}
 		sb.WriteString(fmt.Sprintf("    return p.b.len()\n"))
 

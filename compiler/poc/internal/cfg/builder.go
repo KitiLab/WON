@@ -201,6 +201,21 @@ func (b *funcBuilder) emitInternalError(span diagnostic.Span, msg string) {
 	})
 }
 
+// emitUnsupportedError 对 Phase 2B.1 尚未提供等价安全 CFG 表示的受限语言结构发出 WON-SEM-010，避免误报为用户所有权违例。
+func (b *funcBuilder) emitUnsupportedError(span diagnostic.Span, msg, explanation string) {
+	if b.report == nil {
+		return
+	}
+	b.report.AddDiagnostic(diagnostic.Diagnostic{
+		Code:        "WON-SEM-010",
+		Severity:    "error",
+		Message:     msg,
+		File:        span.File,
+		Span:        span,
+		Explanation: explanation,
+	})
+}
+
 func (b *funcBuilder) registerFunctionParams(decl *ast.FunctionDecl) {
 	symTab := b.view.GetSymbols()
 	for _, p := range decl.Params {
@@ -467,16 +482,11 @@ func (b *funcBuilder) lowerStmt(stmt ast.Stmt) {
 		b.lowerExprValue(s.Expr)
 
 	case *ast.ScopeExpr, *ast.SpawnExpr:
-		if b.report != nil {
-			b.report.AddDiagnostic(diagnostic.Diagnostic{
-				Code:        "WON-SEM-010",
-				Severity:    "error",
-				Message:     "并发控制流原语 (scope/spawn) 尚未在当前所有权阶段启用",
-				File:        s.GetSpan().File,
-				Span:        s.GetSpan(),
-				Explanation: "结构化并发所有权校验属于后续独立里程碑。",
-			})
-		}
+		b.emitUnsupportedError(
+			s.GetSpan(),
+			"并发控制流原语 (scope/spawn) 尚未在当前所有权阶段启用",
+			"结构化并发所有权校验属于后续独立里程碑。",
+		)
 
 	default:
 		b.emitInternalError(stmt.GetSpan(), fmt.Sprintf("Encountered unhandled statement node %T in ownership CFG", stmt))
@@ -825,6 +835,19 @@ func (b *funcBuilder) lowerMatchExpr(m *ast.MatchExpr) {
 		b.curBB = armTests[i]
 		sid := b.pushScope(arm.Span)
 
+		// 保守拒绝带守卫 'if' 的非 Copy 按值消费模式，防止守卫失败前提前提交不可逆的 OpMove 污染后续分支状态。
+		if arm.Guard != nil && b.patternConsumesNonCopy(arm.Pattern) {
+			b.emitUnsupportedError(
+				arm.Pattern.GetSpan(),
+				"Phase 2B.1.2 暂不支持在带守卫 'if' 条件的 match 分支中按值移出非 Copy 绑定",
+				"当前尚未建立独立的守卫期临时借用语义；若提前提交 OpMove，守卫失败落空至后续分支时将产生错误的移动状态。请改用 'ref' 借用绑定或将条件判断移入分支体内部。",
+			)
+			b.popScope(sid, arm.Span)
+			b.terminateGoto(b.curBB, mergeBB, arm.Span)
+			allDiverged = false
+			continue
+		}
+
 		if arm.Pattern != nil {
 			b.applyArmPatternOwnership(arm.Pattern, subjPlace, hasSubjPlace, subjType, sid)
 		}
@@ -927,6 +950,9 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 				} else {
 					b.emit(Statement{Kind: OpMove, Place: place, Type: sym.Type, Span: p.Span})
 				}
+			} else {
+				// Copy 类型按值绑定同样记录显式 OpCopy 源读取，确保每个局部变量均有对应的源所有权操作且不产生伪 Move
+				b.emit(Statement{Kind: OpCopy, Place: place, Type: sym.Type, Span: p.Span})
 			}
 		}
 		b.registerLocal(sym, false, true, scopeID)
@@ -945,13 +971,10 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 			return
 		}
 
-		// 直接结构体解构拥有精确的 ProjField 投影标识：逐字段处理借用与按字段部分移动！
+		// 直接结构体解构拥有精确的 ProjField 投影标识：逐字段处理借用、Copy 读取与按字段部分移动
 		for _, fp := range p.Fields {
 			fieldPlace := place
-			var fType types.TypeID
-			if fi := findStructFieldInfo(baseType, fp.Name, symTab, tctx); fi != nil {
-				fType = fi.Type
-			}
+			fType := findStructFieldType(baseType, fp.Name, symTab, tctx)
 			if hasPlace {
 				if isThroughRef && !place.HasDeref() {
 					fieldPlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: baseType}, baseType, fp.Span)
@@ -965,8 +988,12 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 					b.emitInternalError(fp.Span, fmt.Sprintf("结构体解构简写字段 '%s' 缺少 SymbolID", fp.Name))
 					continue
 				}
-				if hasPlace && sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
-					b.emit(Statement{Kind: OpMove, Place: fieldPlace, Type: sym.Type, Span: fp.Span})
+				if hasPlace {
+					if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
+						b.emit(Statement{Kind: OpMove, Place: fieldPlace, Type: sym.Type, Span: fp.Span})
+					} else {
+						b.emit(Statement{Kind: OpCopy, Place: fieldPlace, Type: sym.Type, Span: fp.Span})
+					}
 				}
 				b.registerLocal(sym, false, true, scopeID)
 				b.addLocalToTopScope(sym.ID)
@@ -983,11 +1010,63 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 		}
 
 	case *ast.EnumPattern, *ast.TuplePattern, *ast.SlicePattern:
-		// 尚未实现 ProjDowncast / ProjTupleField 的聚合解构模式：按整臂叶子语义区分全借用/Copy vs 按值整主体 Move
+		// 尚未实现 ProjDowncast / ProjTupleField 的聚合解构模式：保持借用与移动事件完整，或对不支持混合体执行保守拒绝
 		b.lowerOpaqueAggregatePattern(p, place, hasPlace, isThroughRef, scopeID)
 
 	default:
 		b.emitInternalError(pat.GetSpan(), fmt.Sprintf("match 模式匹配遇到未处理的模式节点 %T", pat))
+	}
+}
+
+func (b *funcBuilder) patternConsumesNonCopy(pat ast.Pattern) bool {
+	if pat == nil {
+		return false
+	}
+	symTab := b.view.GetSymbols()
+	tctx := b.view.GetTypes()
+	switch p := pat.(type) {
+	case *ast.WildcardPattern, *ast.LiteralPattern:
+		return false
+	case *ast.IdentPattern:
+		if p.IsRef || b.view.VariantRef(p) != nil {
+			return false
+		}
+		sym := symTab.NodeSymbols[p]
+		return sym != nil && sym.Type != types.Invalid && !tctx.IsCopy(sym.Type)
+	case *ast.TuplePattern:
+		for _, el := range p.Elems {
+			if b.patternConsumesNonCopy(el) {
+				return true
+			}
+		}
+		return false
+	case *ast.EnumPattern:
+		for _, arg := range p.Args {
+			if b.patternConsumesNonCopy(arg) {
+				return true
+			}
+		}
+		return false
+	case *ast.StructPattern:
+		for _, fp := range p.Fields {
+			if fp.Pattern != nil {
+				if b.patternConsumesNonCopy(fp.Pattern) {
+					return true
+				}
+			} else if sym := symTab.NodeSymbols[fp]; sym != nil && sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
+				return true
+			}
+		}
+		return false
+	case *ast.SlicePattern:
+		for _, el := range p.Elems {
+			if b.patternConsumesNonCopy(el) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
 	}
 }
 
@@ -997,7 +1076,9 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 
 	var bindings []*symbols.Symbol
 	var borrowOps []Statement
-	needsMove := false
+	hasRef := false
+	hasCopyBind := false
+	hasNonCopyMove := false
 
 	var walk func(node ast.Pattern)
 	walk = func(node ast.Pattern) {
@@ -1018,6 +1099,7 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 			}
 			bindings = append(bindings, sym)
 			if p.IsRef {
+				hasRef = true
 				op := OpBorrowShared
 				if p.IsMut {
 					op = OpBorrowMut
@@ -1026,7 +1108,9 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 					borrowOps = append(borrowOps, Statement{Kind: op, Place: place, Type: sym.Type, Span: p.Span})
 				}
 			} else if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
-				needsMove = true
+				hasNonCopyMove = true
+			} else {
+				hasCopyBind = true
 			}
 		case *ast.TuplePattern:
 			for _, el := range p.Elems {
@@ -1043,7 +1127,9 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 				} else if sym := symTab.NodeSymbols[fp]; sym != nil {
 					bindings = append(bindings, sym)
 					if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
-						needsMove = true
+						hasNonCopyMove = true
+					} else {
+						hasCopyBind = true
 					}
 				} else {
 					b.emitInternalError(fp.Span, fmt.Sprintf("嵌套结构体简写字段 '%s' 缺少 SymbolID", fp.Name))
@@ -1060,17 +1146,33 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 
 	walk(pat)
 
+	// 无子元素投影的非直接聚合模式若同时混合 ref 借用与非 Copy 移动，
+	// 会在同一根位置上既 Borrow 又 Move 导致语义矛盾，故保守发出 WON-SEM-010 拒绝认证，绝不静默丢弃借用事件。
+	if hasRef && hasNonCopyMove {
+		b.emitUnsupportedError(
+			pat.GetSpan(),
+			"Phase 2B.1.2 暂不支持在枚举/元组/切片聚合模式中同时混合 'ref' 借用与非 Copy 按值移动绑定",
+			"当前 CFG 仅对直接结构体模式提供字段级 ProjField 拆分；请统一改用 'ref' 借用所有字段，或拆分为直接结构体字段匹配。",
+		)
+		return
+	}
+
 	if hasPlace {
-		if needsMove {
+		if hasNonCopyMove {
 			movePlace := place
 			if isThroughRef && !place.HasDeref() {
 				movePlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: place.ElemType}, place.ElemType, pat.GetSpan())
 			}
 			b.emit(Statement{Kind: OpMove, Place: movePlace, Type: place.ElemType, Span: pat.GetSpan()})
-		} else if len(borrowOps) > 0 {
-			b.emit(Statement{Kind: OpRead, Place: place, Type: place.ElemType, Span: pat.GetSpan()})
-			for _, bop := range borrowOps {
-				b.emit(bop)
+		} else {
+			if hasRef {
+				b.emit(Statement{Kind: OpRead, Place: place, Type: place.ElemType, Span: pat.GetSpan()})
+				for _, bop := range borrowOps {
+					b.emit(bop)
+				}
+			}
+			if hasCopyBind {
+				b.emit(Statement{Kind: OpCopy, Place: place, Type: place.ElemType, Span: pat.GetSpan()})
 			}
 		}
 	}
@@ -1087,19 +1189,30 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 	}
 }
 
-func findStructFieldInfo(structType types.TypeID, fieldName string, symTab *symbols.Table, tctx *types.Context) *symbols.FieldInfo {
+func findStructFieldType(structType types.TypeID, fieldName string, symTab *symbols.Table, tctx *types.Context) types.TypeID {
 	if structType == types.Invalid || tctx == nil || symTab == nil {
-		return nil
+		return types.Invalid
 	}
 	info := tctx.Info(structType)
 	if info.Kind != types.KindStruct {
-		return nil
+		return types.Invalid
 	}
 	sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]
 	if sym == nil || sym.FieldMap == nil {
-		return nil
+		return types.Invalid
 	}
-	return sym.FieldMap[fieldName]
+	fi := sym.FieldMap[fieldName]
+	if fi == nil {
+		return types.Invalid
+	}
+	if len(sym.GenericParamIDs) > 0 && len(sym.GenericParamIDs) == len(info.GenericArgs) {
+		subst := make(map[uint64]types.TypeID, len(info.GenericArgs))
+		for i, gid := range sym.GenericParamIDs {
+			subst[uint64(gid)] = info.GenericArgs[i]
+		}
+		return tctx.Substitute(fi.Type, subst)
+	}
+	return fi.Type
 }
 
 // lowerExprValue 按所有权与求值顺序降低任意右值表达式，并在末尾对任何未知 AST 表达式触发 WON-INT-001。
@@ -1284,15 +1397,11 @@ func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
 		b.lowerMatchExpr(e)
 
 	case *ast.ScopeExpr, *ast.SpawnExpr:
-		if b.report != nil {
-			b.report.AddDiagnostic(diagnostic.Diagnostic{
-				Code:     "WON-SEM-010",
-				Severity: "error",
-				Message:  "结构化并发原语 (scope/spawn) 尚未在当前所有权阶段启用",
-				File:     expr.GetSpan().File,
-				Span:     expr.GetSpan(),
-			})
-		}
+		b.emitUnsupportedError(
+			expr.GetSpan(),
+			"结构化并发原语 (scope/spawn) 尚未在当前所有权阶段启用",
+			"结构化并发所有权校验属于后续独立里程碑。",
+		)
 
 	default:
 		b.emitInternalError(expr.GetSpan(), fmt.Sprintf("Encountered unhandled expression node %T in ownership CFG", expr))

@@ -2,8 +2,8 @@
 
 > **Specification Version**: Draft 0.2.1 (Phase 2B.0.1 Design Closure; ADR-011 Approved)  
 > **Status**: `SPECIFIED` (Architectural Direction **ACCEPTED** via [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) & [Owner Approval](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md))  
-> **Compiler Implementation Status**: Phase 2B.1 / 2B.1.1 (`Ownership CFG`, `@derive(Copy)`, Uninitialized `let`/`var`, Unbounded Lazy Field Tracking, Per-Arm `match` Lowering, Fail-Closed `WON-INT-001` & Move/Init) `IMPLEMENTED`; Phase 2B.2 (`Borrow`/`NLL`/`Provenance`) & Phase 2B.3 (`Drop`) Remain `SPECIFIED` / Unimplemented  
-> **Architecture & Closure Details**: [phase-2b.0-ownership-architecture.md](../compiler/phase-2b.0-ownership-architecture.md), [phase-2b.1.1-cfg-soundness-closure.md](../compiler/phase-2b.1.1-cfg-soundness-closure.md)
+> **Compiler Implementation Status**: Phase 2B.1–2B.1.2 (`Ownership CFG`, `@derive(Copy)`, Uninitialized `let`/`var`, Unbounded Lazy Field Tracking, Per-Arm `match` & Guard Control-Flow Closure, Fail-Closed `WON-INT-001` & Move/Init) `IMPLEMENTED`; Phase 2B.2 (`Borrow`/`NLL`/`Provenance`) & Phase 2B.3 (`Drop`) Remain `SPECIFIED` / Unimplemented  
+> **Architecture & Closure Details**: [phase-2b.0-ownership-architecture.md](../compiler/phase-2b.0-ownership-architecture.md), [phase-2b.1.1-cfg-soundness-closure.md](../compiler/phase-2b.1.1-cfg-soundness-closure.md), [phase-2b.1.2-match-pattern-ownership-closure.md](../compiler/phase-2b.1.2-match-pattern-ownership-closure.md)
 > **Governing Architecture**: [Phase 2B.0 / 2B.0.1 Ownership Architecture](../compiler/phase-2b.0-ownership-architecture.md)  
 > **Related Core Spec**: [Ownership and Memory Overview](ownership-and-memory.md), [Syntax & Grammar](syntax-and-grammar.md), [ADR-003](../decisions/ADR-003-ownership-lite-memory-model.md)
 

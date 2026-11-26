@@ -102,7 +102,39 @@ fn main() -> u64:
 		t.Fatalf("wonc build 非标量程序期望仅报 WON-GEN-002，实际 err=%v out=%s", err, string(nsOut))
 	}
 
-	// 3. 所有权非法程序（标量未初始化 / Move 后使用 / 不可达解引用移出 / 非法 derive(Copy)）：check 与 build 均拒绝且不留 .won.c
+	// 2b. 所有权合法但暂不支持 C11 后端的带守卫 ref match：check 成功，build 仅触发 WON-GEN-002 且不混淆为所有权/不支持模式错误
+	validGuardMatch := filepath.Join(tmpDir, "own_ok_guard_ref_match.won")
+	guardMatchSrc := `enum Opt:
+    Some(String)
+    None
+
+fn keep(o: Opt) -> u64:
+    return 1u64
+
+fn main(cond: bool) -> u64:
+    let o = Opt::Some(String::from("ok"))
+    let n = match o:
+        Opt::Some(ref r) if cond => r.len()
+        _ => 0u64
+    return n + keep(o)
+`
+	if err := os.WriteFile(validGuardMatch, []byte(guardMatchSrc), 0644); err != nil {
+		t.Fatalf("写入 guard_ref_match 文件失败: %v", err)
+	}
+	if out, err := exec.Command(absBin, "check", validGuardMatch).CombinedOutput(); err != nil {
+		t.Fatalf("wonc check 合法带守卫引用 match 应通过: %v\n%s", err, string(out))
+	}
+	cmdGM := exec.Command(absBin, "build", validGuardMatch)
+	cmdGM.Dir = tmpDir
+	gmOut, gmErr := cmdGM.CombinedOutput()
+	if gmErr == nil || !strings.Contains(string(gmOut), "WON-GEN-002") {
+		t.Fatalf("wonc build 合法 match 期望仅报 WON-GEN-002，实际 err=%v out=%s", gmErr, string(gmOut))
+	}
+	if _, stErr := os.Stat(filepath.Join(tmpDir, "own_ok_guard_ref_match.won.c")); stErr == nil {
+		t.Fatalf("WON-GEN-002 拒绝后不应在磁盘残留 .won.c 文件")
+	}
+
+	// 3. 所有权非法程序（标量未初始化 / Move 后使用 / 不可达解引用移出 / 非法 derive(Copy) / 受限 match 模式）：check 与 build 均拒绝且不留 .won.c
 	negCases := []struct {
 		name string
 		src  string
@@ -127,6 +159,16 @@ fn main() -> u64:
 			name: "invalid_derive_copy",
 			src:  "@derive(Copy)\nstruct Bad:\n    s: String\n",
 			code: "WON-MEM-011",
+		},
+		{
+			name: "guarded_consuming_match",
+			src:  "enum Opt:\n    Some(String)\n    None\n\nfn main(cond: bool) -> u64:\n    let o = Opt::Some(String::from(\"hi\"))\n    return match o:\n        Opt::Some(s) if cond => s.len()\n        _ => 0u64\n",
+			code: "WON-SEM-010",
+		},
+		{
+			name: "mixed_opaque_tuple_match",
+			src:  "fn eat(s: String) -> u64:\n    return s.len()\n\nfn main() -> u64:\n    let p = (String::from(\"a\"), String::from(\"b\"))\n    return match p:\n        (ref a, b) => a.len() + eat(b)\n",
+			code: "WON-SEM-010",
 		},
 	}
 
