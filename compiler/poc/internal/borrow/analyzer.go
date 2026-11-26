@@ -48,13 +48,50 @@ func AnalyzeProgram(progCFG *cfg.ProgramCFG, view cfg.SemanticView, report *diag
 	}
 }
 
+// MoveInitTrace 导出 Phase 2B.1 已收敛的可达基本块及每块入口精确初始化/移动/局部移动状态，
+// 供 Phase 2B.3 Drop Elaboration 直接消费，禁止重复发明两套移动判定规则。
+type MoveInitTrace struct {
+	Reachable []bool
+	InStates  []map[symbols.SymbolID]*PlaceState
+}
+
+// CloneInEnv 返回指定基本块入口状态环境的深拷贝。
+func (t *MoveInitTrace) CloneInEnv(bb cfg.BlockID) map[symbols.SymbolID]*PlaceState {
+	if t == nil || int(bb) < 0 || int(bb) >= len(t.InStates) || t.InStates[bb] == nil {
+		return make(map[symbols.SymbolID]*PlaceState)
+	}
+	return cloneEnv(t.InStates[bb])
+}
+
+// StepStatement 对单条 CFG 语句执行 Phase 2B.1 状态转移（不采集重复诊断），
+// 使 Drop Elaboration 能够在语句级别精确同步前/后状态。
+func StepStatement(fnName string, env map[symbols.SymbolID]*PlaceState, st cfg.Statement, view cfg.SemanticView) {
+	if view == nil {
+		return
+	}
+	stepBlockStmt(fnName, st, funcEnv(env), view.GetSymbols(), view.GetTypes(), nil, nil)
+}
+
+// SolveMoveInitTrace 对单个函数求解并导出 Phase 2B.1 Move/Init 不动点收敛结果。
+func SolveMoveInitTrace(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report) (*MoveInitTrace, bool) {
+	if fn == nil || view == nil || len(fn.Blocks) == 0 || fn.Entry < 0 {
+		return nil, false
+	}
+	maxIterations := len(fn.Blocks)*(len(fn.Locals)*8+64) + 256
+	return solveMoveInit(fn, view, report, maxIterations, false)
+}
+
 func analyzeFunctionWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report, maxIterations int) {
-	analyzeMoveInitWithBudget(fn, view, report, maxIterations)
+	_, _ = solveMoveInit(fn, view, report, maxIterations, true)
 }
 
 func analyzeMoveInitWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report, maxIterations int) {
+	_, _ = solveMoveInit(fn, view, report, maxIterations, true)
+}
+
+func solveMoveInit(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report, maxIterations int, emitDiags bool) (*MoveInitTrace, bool) {
 	if fn == nil || len(fn.Blocks) == 0 || fn.Entry < 0 {
-		return
+		return nil, false
 	}
 
 	reachable := computeReachable(fn)
@@ -71,15 +108,17 @@ func analyzeMoveInitWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *d
 			if fn.Decl != nil {
 				fnSpan = fn.Decl.GetSpan()
 			}
-			report.AddDiagnostic(diagnostic.Diagnostic{
-				Code:        "WON-INT-001",
-				Severity:    "error",
-				Message:     fmt.Sprintf("所有权数据流不动点迭代在函数 '%s' 中超过安全上限 (%d 轮) 仍未收敛", fn.Name, maxIterations),
-				File:        fnSpan.File,
-				Span:        fnSpan,
-				Explanation: "此错误表示编译器内部格传递函数或工作表在给定 CFG 上未按预期单调收敛；编译器按 Fail-Closed 原则拒绝认证该函数。",
-			})
-			return
+			if report != nil {
+				report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:        "WON-INT-001",
+					Severity:    "error",
+					Message:     fmt.Sprintf("所有权数据流不动点迭代在函数 '%s' 中超过安全上限 (%d 轮) 仍未收敛", fn.Name, maxIterations),
+					File:        fnSpan.File,
+					Span:        fnSpan,
+					Explanation: "此错误表示编译器内部格传递函数或工作表在给定 CFG 上未按预期单调收敛；编译器按 Fail-Closed 原则拒绝认证该函数。",
+				})
+			}
+			return nil, false
 		}
 		changed = false
 		for bbIdx, blk := range fn.Blocks {
@@ -112,16 +151,29 @@ func analyzeMoveInitWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *d
 		}
 	}
 
-	// 收敛后按确定性基本块顺序对可达路径执行唯一一次诊断采集 Pass，避免工作表中间迭代产生重复报错
-	emitted := make(map[diagDedupKey]bool)
-	for bbIdx, blk := range fn.Blocks {
-		bb := cfg.BlockID(bbIdx)
-		if !reachable[bb] {
-			continue
+	if emitDiags {
+		// 收敛后按确定性基本块顺序对可达路径执行唯一一次诊断采集 Pass，避免工作表中间迭代产生重复报错
+		emitted := make(map[diagDedupKey]bool)
+		for bbIdx, blk := range fn.Blocks {
+			bb := cfg.BlockID(bbIdx)
+			if !reachable[bb] {
+				continue
+			}
+			cur := cloneEnv(inStates[bb])
+			transferBlock(fn.Name, blk, cur, view, report, emitted)
 		}
-		cur := cloneEnv(inStates[bb])
-		transferBlock(fn.Name, blk, cur, view, report, emitted)
 	}
+
+	exported := make([]map[symbols.SymbolID]*PlaceState, len(inStates))
+	for i, env := range inStates {
+		if env != nil {
+			exported[i] = cloneEnv(env)
+		}
+	}
+	return &MoveInitTrace{
+		Reachable: reachable,
+		InStates:  exported,
+	}, true
 }
 
 func computeReachable(fn *cfg.FuncCFG) []bool {
@@ -163,98 +215,103 @@ func transferBlock(fnName string, blk *cfg.BasicBlock, env funcEnv, view cfg.Sem
 	tctx := view.GetTypes()
 
 	for _, st := range blk.Statements {
-		switch st.Kind {
-		case cfg.OpScopeEnter, cfg.OpNop, cfg.OpStaticRef, cfg.OpCall, cfg.OpAggregate, cfg.OpTempAssign:
-			continue
+		stepBlockStmt(fnName, st, env, symTab, tctx, report, emitted)
+	}
+}
 
-		case cfg.OpStorageDead:
-			for _, sid := range st.Locals {
-				delete(env, sid)
-			}
+func stepBlockStmt(fnName string, st cfg.Statement, env funcEnv, symTab *symbols.Table, tctx *types.Context, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
+	switch st.Kind {
+	case cfg.OpScopeEnter, cfg.OpNop, cfg.OpStaticRef, cfg.OpCall, cfg.OpAggregate, cfg.OpTempAssign,
+		cfg.OpDrop, cfg.OpCondDrop, cfg.OpFFITransfer:
+		return
 
-		case cfg.OpScopeExit:
-			for _, sid := range st.Locals {
-				delete(env, sid)
-			}
-
-		case cfg.OpUninitDecl:
-			if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil {
-				emitInternalViolation(fnName, st.Span, st.Place, "OpUninitDecl 缺少有效 SymbolID", report, emitted)
-				continue
-			}
-			env[st.Place.RootSymID] = newPlaceState(st.Type, st.Span, false)
-
-		case cfg.OpInitAssign, cfg.OpStorageDecl:
-			if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil {
-				emitInternalViolation(fnName, st.Span, st.Place, fmt.Sprintf("%s 缺少有效 SymbolID", st.Kind), report, emitted)
-				continue
-			}
-			env[st.Place.RootSymID] = newPlaceState(st.Type, st.Span, true)
-
-		case cfg.OpRead, cfg.OpCopy:
-			checkReadablePlace(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
-
-		case cfg.OpBorrowShared, cfg.OpBorrowMut, cfg.OpReborrow:
-			// Phase 2B.1 保留事件：借用冲突检查留待 Phase 2B.2，但仍严格要求被借用根符号拥有合法 CFG 状态
-			if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil || env[st.Place.RootSymID] == nil {
-				emitInternalViolation(fnName, st.Span, st.Place, fmt.Sprintf("%s 引用了未在 CFG 环境中追踪的位置", st.Kind), report, emitted)
-			}
-
-		case cfg.OpReturn:
-			if st.Place.RootSymID != 0 {
-				if symTab.ByID[st.Place.RootSymID] == nil || env[st.Place.RootSymID] == nil {
-					emitInternalViolation(fnName, st.Span, st.Place, "OpReturn 引用了缺失状态的返回源位置", report, emitted)
-				}
-			}
-
-		case cfg.OpMove:
-			if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil || env[st.Place.RootSymID] == nil {
-				emitInternalViolation(fnName, st.Span, st.Place, "OpMove 缺少有效符号或未追踪的根存储状态", report, emitted)
-				continue
-			}
-
-			if st.Place.HasDeref() {
-				checkReadablePlace(fnName, env, st.Place.RootPlace(), st.Span, symTab, tctx, report, emitted)
-				if report != nil {
-					emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
-						Code:        "WON-MEM-008",
-						Severity:    "error",
-						Message:     fmt.Sprintf("不能通过解引用 '%s' 移出非 Copy 类型 '%s' 的所有权", formatPlaceDisplay(st.Place), tctx.Format(st.Type)),
-						File:        st.Span.File,
-						Span:        st.Span,
-						Explanation: "安全借用或原生指针解引用只允许借用访问或读取 Copy 类型成员，禁止在不替换新值的情况下移出所有权。",
-					})
-				}
-				continue
-			}
-
-			if st.Place.HasIndex() {
-				checkReadablePlace(fnName, env, st.Place.RootPlace(), st.Span, symTab, tctx, report, emitted)
-				if report != nil {
-					emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
-						Code:        "WON-MEM-008",
-						Severity:    "error",
-						Message:     fmt.Sprintf("不能从数组或切片下标位置直接移出非 Copy 元素 ('%s')", formatPlaceDisplay(st.Place)),
-						File:        st.Span.File,
-						Span:        st.Span,
-						Explanation: "Phase 2B.1 保守禁止从动态或定长索引位置直接按值移出非 Copy 元素；请改用借用访问。",
-					})
-				}
-				continue
-			}
-
-			ok := checkReadablePlace(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
-			if ok {
-				applyMove(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
-			}
-
-		case cfg.OpAssign, cfg.OpReinit:
-			applyAssign(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
-
-		default:
-			// 对任何 Phase 2B.1 尚未接管的可执行/未知 CFG 操作一律快速失败，绝不静默跳过
-			emitInternalViolation(fnName, st.Span, st.Place, fmt.Sprintf("遇到未受支持的 CFG 操作 %s", st.Kind), report, emitted)
+	case cfg.OpStorageDead:
+		for _, sid := range st.Locals {
+			delete(env, sid)
 		}
+
+	case cfg.OpScopeExit:
+		for _, sid := range st.Locals {
+			delete(env, sid)
+		}
+
+	case cfg.OpUninitDecl:
+		if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil {
+			emitInternalViolation(fnName, st.Span, st.Place, "OpUninitDecl 缺少有效 SymbolID", report, emitted)
+			return
+		}
+		env[st.Place.RootSymID] = newPlaceState(st.Type, st.Span, false)
+
+	case cfg.OpInitAssign, cfg.OpStorageDecl:
+		if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil {
+			emitInternalViolation(fnName, st.Span, st.Place, fmt.Sprintf("%s 缺少有效 SymbolID", st.Kind), report, emitted)
+			return
+		}
+		env[st.Place.RootSymID] = newPlaceState(st.Type, st.Span, true)
+
+	case cfg.OpRead, cfg.OpCopy:
+		checkReadablePlace(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
+
+	case cfg.OpBorrowShared, cfg.OpBorrowMut, cfg.OpReborrow:
+		// Phase 2B.1 保留事件：借用冲突检查留待 Phase 2B.2，但仍严格要求被借用根符号拥有合法 CFG 状态
+		if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil || env[st.Place.RootSymID] == nil {
+			emitInternalViolation(fnName, st.Span, st.Place, fmt.Sprintf("%s 引用了未在 CFG 环境中追踪的位置", st.Kind), report, emitted)
+		}
+
+	case cfg.OpReturn:
+		if st.Place.RootSymID != 0 {
+			if symTab.ByID[st.Place.RootSymID] == nil || env[st.Place.RootSymID] == nil {
+				emitInternalViolation(fnName, st.Span, st.Place, "OpReturn 引用了缺失状态的返回源位置", report, emitted)
+			}
+		}
+
+	case cfg.OpMove:
+		if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil || env[st.Place.RootSymID] == nil {
+			emitInternalViolation(fnName, st.Span, st.Place, "OpMove 缺少有效符号或未追踪的根存储状态", report, emitted)
+			return
+		}
+
+		if st.Place.HasDeref() {
+			checkReadablePlace(fnName, env, st.Place.RootPlace(), st.Span, symTab, tctx, report, emitted)
+			if report != nil {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-MEM-008",
+					Severity:    "error",
+					Message:     fmt.Sprintf("不能通过解引用 '%s' 移出非 Copy 类型 '%s' 的所有权", formatPlaceDisplay(st.Place), tctx.Format(st.Type)),
+					File:        st.Span.File,
+					Span:        st.Span,
+					Explanation: "安全借用或原生指针解引用只允许借用访问或读取 Copy 类型成员，禁止在不替换新值的情况下移出所有权。",
+				})
+			}
+			return
+		}
+
+		if st.Place.HasIndex() {
+			checkReadablePlace(fnName, env, st.Place.RootPlace(), st.Span, symTab, tctx, report, emitted)
+			if report != nil {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-MEM-008",
+					Severity:    "error",
+					Message:     fmt.Sprintf("不能从数组或切片下标位置直接移出非 Copy 元素 ('%s')", formatPlaceDisplay(st.Place)),
+					File:        st.Span.File,
+					Span:        st.Span,
+					Explanation: "Phase 2B.1 保守禁止从动态或定长索引位置直接按值移出非 Copy 元素；请改用借用访问。",
+				})
+			}
+			return
+		}
+
+		ok := checkReadablePlace(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
+		if ok {
+			applyMove(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
+		}
+
+	case cfg.OpAssign, cfg.OpReinit:
+		applyAssign(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
+
+	default:
+		// 对任何尚未接管的可执行/未知 CFG 操作一律快速失败，绝不静默跳过
+		emitInternalViolation(fnName, st.Span, st.Place, fmt.Sprintf("遇到未受支持的 CFG 操作 %s", st.Kind), report, emitted)
 	}
 }
 

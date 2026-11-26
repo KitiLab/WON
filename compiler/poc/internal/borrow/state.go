@@ -92,6 +92,21 @@ func (ps *PlaceState) expandDirectFields(symTab *symbols.Table, tctx *types.Cont
 	return nil
 }
 
+// Clone 深拷贝当前 PlaceState（包含字段子树与 MoveSpans），供外部阶段如 Drop 展开只读消费。
+func (ps *PlaceState) Clone() *PlaceState {
+	return ps.clone()
+}
+
+// SummaryState 汇总节点及其已展开子树的可达初始化/移动状态。
+func (ps *PlaceState) SummaryState() (canUninit, canInit, canMoved bool, moveSpans []diagnostic.Span) {
+	return ps.summaryState()
+}
+
+// ExpandDirectFields 对结构体节点惰性展开一层直接字段状态，供外部状态求解器共享使用。
+func (ps *PlaceState) ExpandDirectFields(symTab *symbols.Table, tctx *types.Context) error {
+	return ps.expandDirectFields(symTab, tctx)
+}
+
 func (ps *PlaceState) clone() *PlaceState {
 	if ps == nil {
 		return nil

@@ -214,11 +214,11 @@ func (k OpKind) String() string {
 	case OpTempAssign:
 		return "TempAssign"
 	case OpDrop:
-		return "Drop(reserved)"
+		return "Drop"
 	case OpCondDrop:
-		return "CondDrop(reserved)"
+		return "CondDrop"
 	case OpFFITransfer:
-		return "FFITransfer(reserved)"
+		return "FFITransfer"
 	default:
 		return "Nop"
 	}

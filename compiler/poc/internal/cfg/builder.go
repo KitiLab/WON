@@ -33,13 +33,14 @@ type loopFrame struct {
 }
 
 type funcBuilder struct {
-	view      SemanticView
-	report    *diagnostic.Report
-	fn        *FuncCFG
-	curBB     BlockID
-	nextScope int
-	scopes    []scopeFrame
-	loops     []loopFrame
+	view       SemanticView
+	report     *diagnostic.Report
+	fn         *FuncCFG
+	curBB      BlockID
+	nextScope  int
+	tempSymSeq int
+	scopes     []scopeFrame
+	loops      []loopFrame
 }
 
 // BuildProgram 基于已完成语义检查的 AST 与 SemanticView 构建全程序所有权 CFG。
@@ -1592,6 +1593,11 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 		return InvalidValue
 
 	case *ast.ArrayLiteral:
+		if v, ok := b.lowerAggregateExprsWithCleanup(e.Elems, func(i int, tv ValueID) AggTemp {
+			return AggTemp{Index: i, Temp: tv}
+		}, exprType, e.Span); ok {
+			return v
+		}
 		var aggTemps []AggTemp
 		for idx, el := range e.Elems {
 			if tv := b.lowerExprVal(el); tv != InvalidValue {
@@ -1618,6 +1624,11 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 		return InvalidValue
 
 	case *ast.TupleLiteral:
+		if v, ok := b.lowerAggregateExprsWithCleanup(e.Elems, func(i int, tv ValueID) AggTemp {
+			return AggTemp{Index: i, Temp: tv}
+		}, exprType, e.Span); ok {
+			return v
+		}
 		var aggTemps []AggTemp
 		for idx, el := range e.Elems {
 			if tv := b.lowerExprVal(el); tv != InvalidValue {
@@ -1632,6 +1643,19 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 		return InvalidValue
 
 	case *ast.StructLiteral:
+		fieldExprs := make([]ast.Expr, 0, len(e.Fields))
+		fieldNames := make([]string, 0, len(e.Fields))
+		for _, f := range e.Fields {
+			if f.Value != nil {
+				fieldExprs = append(fieldExprs, f.Value)
+				fieldNames = append(fieldNames, f.Name)
+			}
+		}
+		if v, ok := b.lowerAggregateExprsWithCleanup(fieldExprs, func(i int, tv ValueID) AggTemp {
+			return AggTemp{FieldName: fieldNames[i], Index: i, Temp: tv}
+		}, exprType, e.Span); ok {
+			return v
+		}
 		var aggTemps []AggTemp
 		for idx, f := range e.Fields {
 			if f.Value != nil {
@@ -1890,6 +1914,166 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 		b.emitInternalError(expr.GetSpan(), fmt.Sprintf("Encountered unhandled expression node %T in ownership CFG", expr))
 		return InvalidValue
 	}
+}
+
+// lowerAggregateExprsWithCleanup 处理包含前置资源成员且后续存在 '?' 早退的聚合字面量。
+// 将早先完成求值的非 Copy 成员暂存至受作用域托管的合成局部槽位：一旦后续字段触发 '?' 早退，
+// OpScopeExit 仅清理已完成初始化的前置成员；若全部成员顺利就绪，则统一 OpMove 移入完整聚合。
+func (b *funcBuilder) lowerAggregateExprsWithCleanup(exprs []ast.Expr, buildItem func(int, ValueID) AggTemp, exprType types.TypeID, span diagnostic.Span) (ValueID, bool) {
+	if len(exprs) < 2 || b.view == nil || b.view.GetTypes() == nil || b.view.GetSymbols() == nil {
+		return InvalidValue, false
+	}
+	tctx := b.view.GetTypes()
+	symTab := b.view.GetSymbols()
+
+	lastTryIdx := -1
+	for i, ex := range exprs {
+		if containsTryExpr(ex) {
+			lastTryIdx = i
+		}
+	}
+	if lastTryIdx <= 0 {
+		return InvalidValue, false
+	}
+
+	hasPriorOwned := false
+	for i := 0; i < lastTryIdx; i++ {
+		et := b.view.ExprType(exprs[i])
+		if et != types.Invalid && !tctx.IsCopy(et) && !b.isRefCarryingType(et) {
+			hasPriorOwned = true
+			break
+		}
+	}
+	if !hasPriorOwned {
+		return InvalidValue, false
+	}
+
+	tmpScope := b.pushScope(span)
+	type heldTemp struct {
+		place Place
+		typ   types.TypeID
+		span  diagnostic.Span
+	}
+	var held []heldTemp
+	var aggTemps []AggTemp
+
+	for i, ex := range exprs {
+		tv := b.lowerExprVal(ex)
+		if tv != InvalidValue {
+			aggTemps = append(aggTemps, buildItem(i, tv))
+		}
+		if b.isTerminated(b.curBB) {
+			break
+		}
+		et := b.view.ExprType(ex)
+		if i < lastTryIdx && et != types.Invalid && !tctx.IsCopy(et) && !b.isRefCarryingType(et) {
+			b.tempSymSeq++
+			tmpSym := symTab.AllocSymbol(symbols.SymVar, fmt.Sprintf("__agg_tmp_%d", b.tempSymSeq), ex.GetSpan())
+			tmpSym.Type = et
+			tmpSym.IsMut = true
+			b.registerLocal(tmpSym, false, -1, true, tmpScope)
+			b.addLocalToTopScope(tmpSym.ID)
+			tmpPlace := b.placeForSym(tmpSym, ex.GetSpan())
+			b.emit(Statement{
+				Kind:    OpInitAssign,
+				Place:   tmpPlace,
+				SrcTemp: tv,
+				Type:    et,
+				Span:    ex.GetSpan(),
+			})
+			held = append(held, heldTemp{place: tmpPlace, typ: et, span: ex.GetSpan()})
+		}
+	}
+
+	if !b.isTerminated(b.curBB) {
+		for _, h := range held {
+			b.emit(Statement{
+				Kind:  OpMove,
+				Place: h.place,
+				Type:  h.typ,
+				Span:  h.span,
+			})
+		}
+		b.popScope(tmpScope, span)
+	} else {
+		b.discardTopScope()
+	}
+
+	var out ValueID
+	if len(aggTemps) > 0 || b.isRefCarryingType(exprType) {
+		out = b.nextTemp()
+		b.emit(Statement{Kind: OpAggregate, AggTemps: aggTemps, ValTemp: out, Type: exprType, Span: span})
+	}
+	return out, true
+}
+
+func containsTryExpr(expr ast.Expr) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.TryExpr:
+		return true
+	case *ast.UnaryExpr:
+		return containsTryExpr(e.Expr)
+	case *ast.BorrowExpr:
+		return containsTryExpr(e.Expr)
+	case *ast.CastExpr:
+		return containsTryExpr(e.Expr)
+	case *ast.FieldAccessExpr:
+		return containsTryExpr(e.Object)
+	case *ast.IndexExpr:
+		return containsTryExpr(e.Object) || containsTryExpr(e.Index)
+	case *ast.BinaryExpr:
+		return containsTryExpr(e.Left) || containsTryExpr(e.Right)
+	case *ast.RangeExpr:
+		return containsTryExpr(e.Start) || containsTryExpr(e.End)
+	case *ast.CallExpr:
+		if containsTryExpr(e.CalleeExpr) {
+			return true
+		}
+		for _, a := range e.Args {
+			if containsTryExpr(a) {
+				return true
+			}
+		}
+	case *ast.NamespacedCallExpr:
+		for _, a := range e.Args {
+			if containsTryExpr(a) {
+				return true
+			}
+		}
+	case *ast.MethodCallExpr:
+		if containsTryExpr(e.Receiver) {
+			return true
+		}
+		for _, a := range e.Args {
+			if containsTryExpr(a) {
+				return true
+			}
+		}
+	case *ast.ArrayLiteral:
+		for _, el := range e.Elems {
+			if containsTryExpr(el) {
+				return true
+			}
+		}
+	case *ast.ArrayRepeatLiteral:
+		return containsTryExpr(e.Elem)
+	case *ast.TupleLiteral:
+		for _, el := range e.Elems {
+			if containsTryExpr(el) {
+				return true
+			}
+		}
+	case *ast.StructLiteral:
+		for _, f := range e.Fields {
+			if containsTryExpr(f.Value) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (b *funcBuilder) emitCallExpr(calSym *symbols.Symbol, fallbackName string, args []ast.Expr, exprType types.TypeID, span diagnostic.Span, selfTemp *ValueID) ValueID {

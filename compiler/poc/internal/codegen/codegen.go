@@ -69,8 +69,10 @@ func (g *Generator) writeLine(s string) {
 
 // Generate 执行代码生成，返回严格符合 ISO C11 规范的 C 语言源码
 func (g *Generator) Generate() (string, error) {
-	if g.strictOwnershipGate && (g.typed == nil || !g.typed.OwnershipChecked) {
-		return "", fmt.Errorf("WON-INT-001: 所有权分析未通过认证 (OwnershipChecked=false)，拒绝执行 C11 代码生成")
+	if g.strictOwnershipGate && (g.typed == nil || !g.typed.OwnershipChecked || !g.typed.DropElaborated) {
+		return "", fmt.Errorf("WON-INT-001: 所有权或确定性 Drop 展开分析未通过认证 (OwnershipChecked=%v, DropElaborated=%v)，拒绝执行 C11 代码生成",
+			g.typed != nil && g.typed.OwnershipChecked,
+			g.typed != nil && g.typed.DropElaborated)
 	}
 	g.sb.Reset()
 

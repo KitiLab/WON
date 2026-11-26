@@ -26,45 +26,52 @@ func TestWonCLIWonInt001Gate(t *testing.T) {
 		End:   diagnostic.Position{Line: 2, Column: 12, Byte: 30},
 	}
 
-	for _, phase := range []string{"check", "build"} {
-		t.Run(phase, func(t *testing.T) {
-			rep := diagnostic.NewReport()
-			tp := &checker.TypedProgram{OwnershipChecked: false, CodegenSupported: true}
-			action := "拒绝生成 C11 代码"
-			if phase == "check" {
-				action = "拒绝通过语义检查"
-			}
-			enforceOwnershipCheckedGate(rep, tp, srcFile, span, action)
+	for _, tc := range []struct {
+		name string
+		tp   *checker.TypedProgram
+	}{
+		{name: "ownership_false", tp: &checker.TypedProgram{OwnershipChecked: false, DropElaborated: true, CodegenSupported: true}},
+		{name: "drop_false", tp: &checker.TypedProgram{OwnershipChecked: true, DropElaborated: false, CodegenSupported: true}},
+	} {
+		for _, phase := range []string{"check", "build"} {
+			t.Run(tc.name+"_"+phase, func(t *testing.T) {
+				rep := diagnostic.NewReport()
+				action := "拒绝生成 C11 代码"
+				if phase == "check" {
+					action = "拒绝通过语义检查"
+				}
+				enforceOwnershipCheckedGate(rep, tc.tp, srcFile, span, action)
 
-			if !rep.HasErrors() {
-				t.Fatalf("%s 在 OwnershipChecked=false 时必须失败", phase)
-			}
-			jsonOut, err := rep.ToJSON()
-			if err != nil {
-				t.Fatalf("ToJSON 失败: %v", err)
-			}
-			var decoded diagnostic.Report
-			if err := json.Unmarshal([]byte(jsonOut), &decoded); err != nil {
-				t.Fatalf("JSON 解析失败: %v\n%s", err, jsonOut)
-			}
-			if decoded.Status != "error" {
-				t.Fatalf("JSON status 期望 error，实际 %q", decoded.Status)
-			}
-			found := false
-			for _, d := range decoded.Diagnostics {
-				if d.Code == "WON-INT-001" && d.Span.Start.Line > 0 {
-					found = true
+				if !rep.HasErrors() {
+					t.Fatalf("%s/%s 必须失败", tc.name, phase)
 				}
-			}
-			if !found {
-				t.Fatalf("JSON 诊断缺少 WON-INT-001:\n%s", jsonOut)
-			}
-			entries, _ := os.ReadDir(tmpDir)
-			for _, e := range entries {
-				if strings.HasSuffix(e.Name(), ".won.c") || strings.HasSuffix(e.Name(), ".c") {
-					t.Fatalf("失败后不得残留 C 产物: %s", e.Name())
+				jsonOut, err := rep.ToJSON()
+				if err != nil {
+					t.Fatalf("ToJSON 失败: %v", err)
 				}
-			}
-		})
+				var decoded diagnostic.Report
+				if err := json.Unmarshal([]byte(jsonOut), &decoded); err != nil {
+					t.Fatalf("JSON 解析失败: %v\n%s", err, jsonOut)
+				}
+				if decoded.Status != "error" {
+					t.Fatalf("JSON status 期望 error，实际 %q", decoded.Status)
+				}
+				found := false
+				for _, d := range decoded.Diagnostics {
+					if d.Code == "WON-INT-001" && d.Span.Start.Line > 0 {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("JSON 诊断缺少 WON-INT-001:\n%s", jsonOut)
+				}
+				entries, _ := os.ReadDir(tmpDir)
+				for _, e := range entries {
+					if strings.HasSuffix(e.Name(), ".won.c") || strings.HasSuffix(e.Name(), ".c") {
+						t.Fatalf("失败后不得残留 C 产物: %s", e.Name())
+					}
+				}
+			})
+		}
 	}
 }

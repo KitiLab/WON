@@ -6,6 +6,7 @@ import (
 	"github.com/KitiLab/WON/compiler/poc/internal/borrow"
 	"github.com/KitiLab/WON/compiler/poc/internal/cfg"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
+	"github.com/KitiLab/WON/compiler/poc/internal/drop"
 	"github.com/KitiLab/WON/compiler/poc/internal/symbols"
 	"github.com/KitiLab/WON/compiler/poc/internal/types"
 )
@@ -59,14 +60,20 @@ func (c *Checker) CheckProgram(prog *ast.Program) *TypedProgram {
 		}
 	}
 
-	// Stage 4: Phase 2B.1 所有权 CFG 构建与确定性初始化 / Move 数据流校验
+	// Stage 4: Phase 2B.1~2B.3 所有权 CFG 构建、借用/溯源校验与确定性 Drop 展开
 	if !c.report.HasErrors() {
 		progCFG := cfg.BuildProgram(prog, c.typed, c.report)
 		c.typed.CFG = progCFG
 		if !c.report.HasErrors() {
 			borrow.AnalyzeProgram(progCFG, c.typed, c.report)
 		}
-		c.typed.OwnershipChecked = !c.report.HasErrors()
+		if !c.report.HasErrors() {
+			resReg := drop.NewResourceRegistry()
+			dropPlan := drop.ElaborateProgram(progCFG, c.typed, resReg, c.report)
+			c.typed.DropPlan = dropPlan
+			c.typed.DropElaborated = dropPlan != nil && dropPlan.DropElaborated && !c.report.HasErrors()
+		}
+		c.typed.OwnershipChecked = !c.report.HasErrors() && c.typed.DropElaborated
 	}
 
 	// Stage 5: 若尚未存在语义/词法/所有权错误，执行严谨的 C11 后端能力契约审核 (WON-GEN-002 边界)

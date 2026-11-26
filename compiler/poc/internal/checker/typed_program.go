@@ -6,6 +6,7 @@ import (
 	"github.com/KitiLab/WON/compiler/poc/internal/ast"
 	"github.com/KitiLab/WON/compiler/poc/internal/cfg"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
+	"github.com/KitiLab/WON/compiler/poc/internal/drop"
 	"github.com/KitiLab/WON/compiler/poc/internal/symbols"
 	"github.com/KitiLab/WON/compiler/poc/internal/types"
 )
@@ -21,9 +22,11 @@ type TypedProgram struct {
 	FieldRefs   map[ast.Node]*symbols.FieldInfo
 	VariantRefs map[ast.Node]*symbols.VariantInfo
 
-	// Phase 2B.1 所有权控制流图与初始化/移动分析状态
+	// Phase 2B.1~2B.3 所有权控制流图、借用校验与确定性 Drop 展开计划
 	CFG              *cfg.ProgramCFG
+	DropPlan         *drop.DropElaboratedProgram
 	OwnershipChecked bool
+	DropElaborated   bool
 
 	// CodegenSupported 标记该程序是否仅使用当前 Phase 0B/1B ISO C11 代码生成器已支持落地的语言子集。
 	// 当包含 Struct/Enum/Match/? 等已完成 Phase 2A 语义校验但尚未实现 C11 代码生成的结构时，

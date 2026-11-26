@@ -102,14 +102,14 @@ func runParse(args []string) {
 
 // resolveBindings 遍历程序中的 #import 声明并加载对应的 C 库绑定元数据
 func enforceOwnershipCheckedGate(report *diagnostic.Report, typedProg *checker.TypedProgram, srcFile string, span diagnostic.Span, actionDesc string) {
-	if !report.HasErrors() && typedProg != nil && !typedProg.OwnershipChecked {
+	if !report.HasErrors() && typedProg != nil && (!typedProg.OwnershipChecked || !typedProg.DropElaborated) {
 		report.AddDiagnostic(diagnostic.Diagnostic{
 			Code:        "WON-INT-001",
 			Severity:    "error",
-			Message:     fmt.Sprintf("所有权 CFG 分析未通过内部一致性认证 (OwnershipChecked=false)，%s", actionDesc),
+			Message:     fmt.Sprintf("所有权 CFG 或 Drop 展开分析未通过内部一致性认证 (OwnershipChecked=%v, DropElaborated=%v)，%s", typedProg.OwnershipChecked, typedProg.DropElaborated, actionDesc),
 			File:        srcFile,
 			Span:        span,
-			Explanation: "编译器遵循 Fail-Closed 原则，所有权分析未完整通过认证前绝不放行 check 或生成目标 C 代码。",
+			Explanation: "编译器遵循 Fail-Closed 原则，所有权与资源析构分析未完整通过认证前绝不放行 check 或生成目标 C 代码。",
 		})
 	}
 }
