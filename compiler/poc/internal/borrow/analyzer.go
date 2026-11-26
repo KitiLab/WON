@@ -105,9 +105,11 @@ func analyzeFunctionWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *d
 		transferBlock(fn.Name, blk, cur, view, report, emitted)
 	}
 
-	// Phase 2B.2 Stage A: 构建并验证函数内显式借用标识 (LoanID)、重借用父子关系与引用值载体流
+	// Phase 2B.2 Stage A & B: 构建借用标识与引用载体流，并执行 NLL 活跃域与借用排他性/作用域生命周期校验
 	if !report.HasErrors() {
-		BuildLoanFlow(fn, view, report)
+		if flow := BuildLoanFlow(fn, view, report); flow != nil && !report.HasErrors() {
+			AnalyzeBorrowConflicts(fn, flow, view, report)
+		}
 	}
 }
 

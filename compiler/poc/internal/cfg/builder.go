@@ -1375,8 +1375,8 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 		return aggReadTemp
 	}
 
-	var walk func(node ast.Pattern)
-	walk = func(node ast.Pattern) {
+	var walk func(node ast.Pattern, elemPlace Place)
+	walk = func(node ast.Pattern, elemPlace Place) {
 		if node == nil {
 			return
 		}
@@ -1413,7 +1413,7 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 					bt = b.nextTemp()
 					borrowOps = append(borrowOps, Statement{
 						Kind:        op,
-						Place:       borrowPlace,
+						Place:       elemPlace,
 						Type:        sym.Type,
 						LoanID:      b.nextLoan(),
 						BorrowKind:  bk,
@@ -1440,17 +1440,21 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 				bindings = append(bindings, patBind{sym: sym, srcTemp: st})
 			}
 		case *ast.TuplePattern:
-			for _, el := range p.Elems {
-				walk(el)
+			for idx, el := range p.Elems {
+				nextPlace := elemPlace
+				if hasPlace {
+					nextPlace = elemPlace.AppendProj(Projection{Kind: ProjTupleField, FieldIndex: idx}, types.Invalid, el.GetSpan())
+				}
+				walk(el, nextPlace)
 			}
 		case *ast.EnumPattern:
 			for _, arg := range p.Args {
-				walk(arg)
+				walk(arg, elemPlace)
 			}
 		case *ast.StructPattern:
 			for _, fp := range p.Fields {
 				if fp.Pattern != nil {
-					walk(fp.Pattern)
+					walk(fp.Pattern, elemPlace)
 				} else if sym := symTab.NodeSymbols[fp]; sym != nil {
 					var st ValueID
 					if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
@@ -1468,14 +1472,14 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 			}
 		case *ast.SlicePattern:
 			for _, el := range p.Elems {
-				walk(el)
+				walk(el, elemPlace)
 			}
 		default:
 			b.emitInternalError(node.GetSpan(), fmt.Sprintf("聚合模式内部包含未处理的节点 %T", node))
 		}
 	}
 
-	walk(pat)
+	walk(pat, borrowPlace)
 
 	// 无子元素投影的非直接聚合模式若同时混合 ref 借用与非 Copy 移动，
 	// 会在同一根位置上既 Borrow 又 Move 导致语义矛盾，故保守发出 WON-SEM-010 拒绝认证，绝不静默丢弃借用事件。
