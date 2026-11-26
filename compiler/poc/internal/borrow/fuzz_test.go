@@ -91,30 +91,39 @@ func FuzzBorrowNLLAndProvenance(f *testing.F) {
 	f.Fuzz(func(t *testing.T, a, b, c, d, e uint8) {
 		var sb strings.Builder
 		sb.WriteString("struct Pair:\n    var l: String\n    var r: String\n\n")
+		sb.WriteString("struct MixedRet:\n    a: &String\n    b: &mut String\n\n")
+		sb.WriteString("impl Pair:\n    fn peek(&self, cond: bool, ext: &String) -> &String:\n        if cond:\n            return &self.l\n        return ext\n\n")
 		sb.WriteString("fn choose(cond: bool, x: &String, y: &String) -> &String:\n")
 		if e%2 == 0 {
 			sb.WriteString("    if cond:\n        return x\n    return y\n\n")
 		} else {
 			sb.WriteString("    return x\n\n")
 		}
+		sb.WriteString("fn split_pair(p: &mut Pair) -> MixedRet:\n    return MixedRet { a: &p.l, b: &mut p.r }\n\n")
 		sb.WriteString("fn harness(cond: bool) -> i32:\n")
 		sb.WriteString("    var p = Pair { l: String::from(\"a\"), r: String::from(\"b\") }\n")
 		sb.WriteString("    var rx = &p.l\n")
-		if a%2 == 0 {
+		if a%3 == 0 {
 			sb.WriteString("    var mr = &mut p.r\n")
-		} else {
+		} else if a%3 == 1 {
 			sb.WriteString("    var mr = &mut p.l\n")
+		} else {
+			sb.WriteString("    var mr = &mut *rx\n")
 		}
 		if b%2 == 0 {
 			sb.WriteString("    let child = &*mr\n    println(child)\n")
+		} else {
+			sb.WriteString("    let mp = p.peek(cond, rx)\n    println(mp)\n")
 		}
-		switch c % 3 {
+		switch c % 4 {
 		case 0:
 			sb.WriteString("    let picked = choose(cond, rx, &p.r)\n    println(picked)\n")
 		case 1:
 			sb.WriteString("    p.l.push_str(\"!\")\n")
 		case 2:
 			sb.WriteString("    mr.push_str(\"?\")\n")
+		case 3:
+			sb.WriteString("    let mx = split_pair(&mut p)\n    mx.b.push_str(\"*\")\n")
 		}
 		if d%2 == 0 {
 			sb.WriteString("    println(rx)\n")

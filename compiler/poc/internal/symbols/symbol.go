@@ -100,3 +100,55 @@ type Symbol struct {
 	// 指向原始 AST 声明节点（可为 nil）
 	Decl ast.Node
 }
+
+// EffectiveParamCount 返回计入隐式 self 接收者（固定位于规范下标 0）后的形参总数。
+func (s *Symbol) EffectiveParamCount() int {
+	if s == nil {
+		return 0
+	}
+	n := len(s.ParamTypes)
+	if s.HasSelf {
+		n++
+	}
+	return n
+}
+
+// EffectiveParamType 返回与 CFG ParamIdx 及 OpCall.ArgTemps 一致的规范形参类型（HasSelf 时下标 0 为 self）。
+func (s *Symbol) EffectiveParamType(idx int, tctx *types.Context) types.TypeID {
+	if s == nil || idx < 0 {
+		return types.Invalid
+	}
+	if s.HasSelf {
+		if idx == 0 {
+			if s.OwnerType == types.Invalid {
+				return types.Invalid
+			}
+			if s.SelfIsRef && tctx != nil {
+				return tctx.Ref(s.SelfIsMut, s.OwnerType)
+			}
+			return s.OwnerType
+		}
+		idx--
+	}
+	if idx >= len(s.ParamTypes) {
+		return types.Invalid
+	}
+	return s.ParamTypes[idx]
+}
+
+// EffectiveParamName 返回规范下标对应的形参显示名称（self 或声明参数名）。
+func (s *Symbol) EffectiveParamName(idx int) string {
+	if s == nil || idx < 0 {
+		return ""
+	}
+	if s.HasSelf {
+		if idx == 0 {
+			return "self"
+		}
+		idx--
+	}
+	if idx >= len(s.ParamNames) {
+		return ""
+	}
+	return s.ParamNames[idx]
+}

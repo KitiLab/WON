@@ -353,7 +353,7 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt, scope *symbols.Scope) {
 					Explanation: "即使结构体实例本身绑定为可变，未标注 'var' 的结构体字段在语言规范中默认禁止就地修改。",
 				})
 			}
-			if !c.isLValueRootMutable(lhs.Object, scope) {
+			if !c.isLValueRootMutable(lhs, scope) {
 				c.report.AddDiagnostic(diagnostic.Diagnostic{
 					Code:        "WON-ADT-004",
 					Severity:    "error",
@@ -378,7 +378,7 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt, scope *symbols.Scope) {
 			})
 		}
 		targetType = c.unwrapIndexElement(objType, lhs.Span)
-		if !c.isLValueRootMutable(lhs.Object, scope) {
+		if !c.isLValueRootMutable(lhs, scope) {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code:     "WON-MUT-001",
 				Severity: "error",
@@ -404,7 +404,7 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt, scope *symbols.Scope) {
 						Explanation: "原生指针解引用读写脱离编译期生命周期保护，必须包裹在 'unsafe:' 块内。",
 					})
 				}
-				if !pInfo.IsMut {
+				if !pInfo.IsMut || c.analyzeRefCarrierChain(lhs.Expr, scope) == accessSharedRef {
 					c.report.AddDiagnostic(diagnostic.Diagnostic{
 						Code:     "WON-MUT-001",
 						Severity: "error",
@@ -442,25 +442,7 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt, scope *symbols.Scope) {
 }
 
 func (c *Checker) isLValueRootMutable(expr ast.Expr, scope *symbols.Scope) bool {
-	switch e := expr.(type) {
-	case *ast.Identifier:
-		sym := scope.Lookup(e.Name)
-		if sym == nil {
-			return false
-		}
-		if sym.IsMut {
-			return true
-		}
-		// 若标识符本身为 &mut T 参数或引用变量，则通过它可修改内部数据
-		tInfo := c.types.Info(sym.Type)
-		return (tInfo.Kind == types.KindRef || tInfo.Kind == types.KindRawPtr) && tInfo.IsMut
-	case *ast.FieldAccessExpr:
-		return c.isLValueRootMutable(e.Object, scope)
-	case *ast.IndexExpr:
-		return c.isLValueRootMutable(e.Object, scope)
-	default:
-		return false
-	}
+	return c.analyzePlaceMutability(expr, scope) == accessMutable
 }
 
 func (c *Checker) checkIfStmt(s *ast.IfStmt, expected types.TypeID, scope *symbols.Scope) types.TypeID {

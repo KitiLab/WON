@@ -553,6 +553,41 @@ func checkStmtBorrowConflicts(
 	report *diagnostic.Report,
 	emitted map[diagDedupKey]bool,
 ) {
+	// 1. 先检查不依赖本地活跃 Loan 集合的权限不变量：禁止从共享不可变引用 (&T) 重借用或解引用写入 &mut
+	switch st.Kind {
+	case cfg.OpBorrowShared, cfg.OpBorrowMut, cfg.OpReborrow:
+		if selfLoan := flow.LoanByID[st.LoanID]; selfLoan != nil && selfLoan.IsMut && selfLoan.IsReborrow {
+			if !hasMutableReborrowAuthority(fn, flow, fwd, selfLoan, tctx, symTab) {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-MEM-004",
+					Severity:    "error",
+					Message:     fmt.Sprintf("不能从共享不可变引用创建可变借用 '%s'", formatPlaceDisplay(selfLoan.Place)),
+					File:        st.Span.File,
+					Span:        st.Span,
+					Explanation: "父引用仅持有共享只读 (&T) 权限，WON 禁止通过重借用从共享引用制造独占可变引用 (&mut T)。",
+				})
+				return
+			}
+		}
+
+	case cfg.OpAssign, cfg.OpReinit:
+		if st.Place.RootSymID != 0 && st.Place.HasDeref() {
+			pref, _ := st.Place.PrefixBeforeLastDeref()
+			carrierOrig := lookupReborrowParentOrigins(fwd, flow, pref)
+			if !hasMutableCarrierOrigins(fn, flow, carrierOrig, st.Place, tctx, symTab) {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-MEM-004",
+					Severity:    "error",
+					Message:     fmt.Sprintf("不能通过只读共享引用解引用修改 '%s'", formatPlaceDisplay(st.Place)),
+					File:        st.Span.File,
+					Span:        st.Span,
+					Explanation: "解引用链上的父载体为共享只读 (&T) 引用，禁止写入数据。",
+				})
+				return
+			}
+		}
+	}
+
 	if len(activeAfter) == 0 {
 		return
 	}
@@ -738,6 +773,96 @@ func checkStmtBorrowConflicts(
 	}
 	_ = symTab
 	_ = liveAfter
+}
+
+func hasMutableReborrowAuthority(fn *cfg.FuncCFG, flow *FuncLoanFlow, fwd *carrierEnv, selfLoan *LoanInfo, tctx *types.Context, symTab *symbols.Table) bool {
+	if selfLoan == nil {
+		return false
+	}
+	for pid := range selfLoan.ParentLoans {
+		if pl := flow.LoanByID[pid]; pl != nil && !pl.IsMut {
+			return false
+		}
+	}
+	for pIdx := range selfLoan.ParentParams {
+		if !paramDerefChainMutable(fn, pIdx, selfLoan.Place, tctx, symTab) {
+			return false
+		}
+	}
+	if selfLoan.ParentPlace.RootSymID != 0 {
+		parentOrig := lookupReborrowParentOrigins(fwd, flow, selfLoan.ParentPlace)
+		if !hasMutableCarrierOrigins(fn, flow, parentOrig, selfLoan.Place, tctx, symTab) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasMutableCarrierOrigins(fn *cfg.FuncCFG, flow *FuncLoanFlow, orig OriginSet, derefPlace cfg.Place, tctx *types.Context, symTab *symbols.Table) bool {
+	for pid := range orig.Loans {
+		if pl := flow.LoanByID[pid]; pl != nil && !pl.IsMut {
+			return false
+		}
+	}
+	for pIdx := range orig.Params {
+		if !paramDerefChainMutable(fn, pIdx, derefPlace, tctx, symTab) {
+			return false
+		}
+	}
+	return true
+}
+
+func paramDerefChainMutable(fn *cfg.FuncCFG, pIdx int, derefPlace cfg.Place, tctx *types.Context, symTab *symbols.Table) bool {
+	if fn == nil || fn.FuncSym == nil || tctx == nil || pIdx < 0 {
+		return true
+	}
+	curType := fn.FuncSym.EffectiveParamType(pIdx, tctx)
+	if curType == types.Invalid {
+		return true
+	}
+	firstInfo := tctx.Info(curType)
+	if firstInfo.Kind == types.KindRef && !firstInfo.IsMut {
+		return false
+	}
+	for _, proj := range derefPlace.Projections {
+		info := tctx.Info(curType)
+		switch proj.Kind {
+		case cfg.ProjDeref:
+			if (info.Kind == types.KindRef || info.Kind == types.KindRawPtr) && !info.IsMut {
+				return false
+			}
+			if info.Kind == types.KindRef || info.Kind == types.KindRawPtr {
+				curType = info.Elem
+			} else if proj.ElemType != types.Invalid {
+				curType = proj.ElemType
+			}
+		case cfg.ProjField:
+			if (info.Kind == types.KindRef || info.Kind == types.KindRawPtr) && !info.IsMut {
+				return false
+			}
+			if info.Kind == types.KindRef || info.Kind == types.KindRawPtr {
+				curType = info.Elem
+			}
+			if curType != types.Invalid && symTab != nil {
+				cInfo := tctx.Info(curType)
+				if cInfo.Kind == types.KindStruct {
+					if sym := symTab.ByID[symbols.SymbolID(cInfo.SymbolID)]; sym != nil {
+						if fi := sym.FieldMap[proj.FieldName]; fi != nil {
+							curType = fi.Type
+							continue
+						}
+					}
+				}
+			}
+			curType = proj.ElemType
+		case cfg.ProjConstIdx, cfg.ProjIndex, cfg.ProjTupleField:
+			if (info.Kind == types.KindRef || info.Kind == types.KindRawPtr) && !info.IsMut {
+				return false
+			}
+			curType = proj.ElemType
+		}
+	}
+	return true
 }
 
 func checkScopeExitLoans(

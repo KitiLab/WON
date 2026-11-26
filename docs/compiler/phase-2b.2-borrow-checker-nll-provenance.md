@@ -1,6 +1,6 @@
 # Phase 2B.2 — Borrow Checker, Non-Lexical Lifetimes & Candidate-Origin Reference Provenance
 
-> **Document Status**: `IMPLEMENTED` (Verified across Stages A, B, and C in compiler unit, CLI, fuzz, and C11 regression suites; Stage C CI verification pending commit push)  
+> **Document Status**: `IMPLEMENTED` (Phase 2B.2 verified in CI [`9d2cda4`](https://github.com/KitiLab/WON/commit/9d2cda4811a81c4ed80f634597c73dd535a8954e), run `45814423072`; hardened in [Phase 2B.2.1](phase-2b.2.1-mutability-and-provenance-closure.md))  
 > **Milestone**: Phase 2B.2 (Ownership-Lite Borrow Enforcement & Reference Provenance)  
 > **Governing Specification**: [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`ACCEPTED`), [phase-2b.0-ownership-architecture.md](phase-2b.0-ownership-architecture.md), [ownership-and-borrowing.md](../language-spec/ownership-and-borrowing.md)  
 > **Scope Exclusions**: Phase 2B.3 (`Drop` elaboration, conditional drop flags, `.wonbind` FFI resource destruction), general `trait` coherence / `impl Drop` / generic `@derive(Copy)`, two-phase receiver borrows, and concurrency runtime (`Send`/`Sync`, `scope`/`spawn`) remain deferred to subsequent milestones.

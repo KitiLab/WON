@@ -1,6 +1,6 @@
 # WON Development Roadmap
 
-> **Document Status**: `SPECIFIED` (Phase 0B–2B.1 `IMPLEMENTED`; Phase 2B.2+ Planned)  
+> **Document Status**: `SPECIFIED` (Phase 0B–2B.2.1 `IMPLEMENTED`; Phase 2B.3+ Planned)  
 > **Author**: KitiLab Engineering  
 > **Last Updated**: Phase 2B.1 (Ownership CFG, Init & Move Analysis)
 
@@ -108,10 +108,10 @@ The implementation roadmap adheres to strict technical dependency ordering acros
     - *Objective*: Implement `@derive(Copy)` & uninitialized simple `let`/`var` extensions, `internal/cfg` (`Place`, `Projection`, `BasicBlock`), definite-initialization, move, reinitialization, non-`Drop` partial-move, and loop fixed-point analysis (`WON-MEM-001`, `008`, `010`, `011`), Phase 2B.1.1 fail-closed hardening (`WON-INT-001`, unbounded lazy field tracking, `OwnershipChecked` codegen gate, AST-to-CFG exhaustiveness), and Phase 2B.1.2 match pattern ownership closure (borrow event preservation in mixed aggregates, `OpCopy` on `Copy` pattern bindings, and `WON-SEM-010` conservative guards on mixed opaque aggregates and guarded non-`Copy` consuming arms).
     - *Deliverables*: `internal/cfg`, `internal/borrow`, [phase-2b.1.1-cfg-soundness-closure.md](compiler/phase-2b.1.1-cfg-soundness-closure.md), [phase-2b.1.2-match-pattern-ownership-closure.md](compiler/phase-2b.1.2-match-pattern-ownership-closure.md), `@derive(Copy)` & uninit `let`/`var` in lexer/parser/types/checker/codegen, fuzz + CLI C11 tests.
     - *Status*: `IMPLEMENTED` (Verified in official CI run `45808397443`).
-  - **2B.2 (Borrow Checking, NLL Regions & Candidate Provenance)**:
-    - *Objective*: Enforce shared/exclusive XOR loan conflicts (`WON-MEM-004`/`005`/`006`), disjoint field/const-index splitting, reborrowing parent/child freezing, NLL backward region liveness, deterministic left-to-right method borrowing, Strategy B candidate-origin return provenance via Tarjan SCC fixed point, local escape (`WON-MEM-003`), and opaque multi-ref boundary rejection (`WON-MEM-002`).
-    - *Deliverables*: `internal/borrow/{loans,liveness,provenance}.go`, [phase-2b.2-borrow-checker-nll-provenance.md](compiler/phase-2b.2-borrow-checker-nll-provenance.md), unit, CLI, and fuzz suites.
-    - *Status*: `IMPLEMENTED` (Stages A & B verified in official CI; Stage C complete locally, CI pending commit push).
+  - **2B.2 / 2B.2.1 (Borrow Checking, NLL Regions, Provenance & Mutability Soundness Closure)**:
+    - *Objective*: Enforce shared/exclusive XOR loan conflicts (`WON-MEM-004`/`005`/`006`), disjoint field/const-index splitting, reborrowing parent/child freezing & shared->mut prevention, NLL backward region liveness, deterministic left-to-right method borrowing, canonical `self` method indexing, Strategy B candidate-origin & per-field aggregate provenance via Tarjan SCC fixed point, local escape (`WON-MEM-003`), and opaque boundary rejection (`WON-MEM-002`).
+    - *Deliverables*: `internal/borrow/{loans,liveness,provenance}.go`, `internal/symbols/symbol.go`, [phase-2b.2-borrow-checker-nll-provenance.md](compiler/phase-2b.2-borrow-checker-nll-provenance.md), [phase-2b.2.1-mutability-and-provenance-closure.md](compiler/phase-2b.2.1-mutability-and-provenance-closure.md), unit, CLI, and fuzz suites.
+    - *Status*: `IMPLEMENTED` (Phase 2B.2 verified in CI run `45814423072` at `9d2cda4`; Phase 2B.2.1 closure implemented and verified).
   - **2B.3 (Drop Elaboration & Resource Lifecycle Integration — Proposed)**:
     - *Objective*: Lexical reverse-order cleanup, conditional drop flags, early-return / `?` cleanup edges, partial-move cleanup, and `.wonbind` ownership contract hooks (`WON-MEM-007` readiness).
     - *Status*: `PLANNED`.

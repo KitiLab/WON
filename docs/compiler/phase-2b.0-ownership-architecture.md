@@ -18,7 +18,7 @@
 ## 1. Compiler Audit & Status Boundary
 
 > [!NOTE]
-> **Implementation Status Reconciliation (Post-Phase 2B.1.2, Baseline `91a6932`)**: The initial Phase 2A.2.1 baseline audit below preceded owner approval of ADR-011. Following owner approval ([OWNER-APPROVAL-ADR-011-2026-11-25.md](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md)), Phases **2B.1**, **2B.1.1**, and **2B.1.2** are now **`IMPLEMENTED`** (`@derive(Copy)`, uninitialized `let`/`var`, `internal/cfg`, unbounded lazy struct field tracking, per-arm `match`/guard ownership, and move/definite-init analysis `WON-MEM-001/008/010/011` + `WON-INT-001`). **Phase 2B.2** (Borrow Checker, NLL Regions & Candidate Provenance) is currently in progress; **Phase 2B.3** (Drop Elaboration) and trait/concurrency milestones remain `SPECIFIED`/`PLANNED`.
+> **Implementation Status Reconciliation (Post-Phase 2B.2.1)**: Following owner approval ([OWNER-APPROVAL-ADR-011-2026-11-25.md](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md)), Phases **2B.1–2B.1.2** (Ownership CFG, `@derive(Copy)`, uninitialized `let`/`var`, move/init & match-pattern closure) and Phases **2B.2–2B.2.1** (Borrow Checker, NLL Regions, Reborrow & Reference Mutability Closure, Canonical `self` Method Indexing, Per-Field Aggregate & Candidate Provenance `WON-MEM-002..006`) are **`IMPLEMENTED`**. **Phase 2B.3** (Drop Elaboration) and trait/concurrency milestones remain `SPECIFIED`/`PLANNED`.
 
 ### 1.1 Historical Baseline Context & Currently `IMPLEMENTED` Capabilities
 1. **Lexer & Parser (`internal/token`, `internal/lexer`, `internal/parser`)**:
@@ -36,7 +36,7 @@
 
 ### 1.2 Deferred Subsystems (`SPECIFIED` / `PLANNED` / In Progress)
 - Ownership CFG (`internal/cfg`) and definite-initialization / move / partial-move / reinitialization validation (`internal/borrow`, `WON-MEM-001/008/010/011`, `WON-INT-001`) are **`IMPLEMENTED`** (Phases `2B.1–2B.1.2`).
-- XOR aliasing / borrow checker (`WON-MEM-004`/`005`/`006`), NLL region solver, and `Prov(e)` candidate provenance (`WON-MEM-002`/`003`) are **`IN PROGRESS`** in **Phase 2B.2**.
+- XOR aliasing / borrow checker (`WON-MEM-004`/`005`/`006`), NLL region solver, reborrow mutability enforcement, canonical `self` indexing, and `Prov(e)` per-field / candidate provenance (`WON-MEM-002`/`003`) are **`IMPLEMENTED`** (Phases **2B.2–2B.2.1**).
 - RAII destructor runtime, drop elaboration, drop flags, and `WON-MEM-007` enforcement remain **`PLANNED`** (Phase **2B.3** / **2C**).
 - General `trait` coherence, conditional generic `@derive(Copy)`, `impl Drop`, and `Send`/`Sync` auto-traits remain **`PLANNED`** in separate post-2B milestones.
 

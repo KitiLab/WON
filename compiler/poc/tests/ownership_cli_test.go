@@ -195,6 +195,31 @@ fn main(cond: bool) -> u64:
 			src:  "fn reg(cb: fn(&String, &String) -> &String):\n    println(\"ok\")\n",
 			code: "WON-MEM-002",
 		},
+		{
+			name: "mut_reborrow_from_shared_param",
+			src:  "fn bad(p: &i32):\n    let q = &mut *p\n    *q = 42\n",
+			code: "WON-MEM-004",
+		},
+		{
+			name: "method_self_shared_mut_return",
+			src:  "struct Box:\n    var v: i32\n\nimpl Box:\n    fn bad(&self, extra: &mut i32) -> &mut i32:\n        return &mut self.v\n",
+			code: "WON-MEM-004",
+		},
+		{
+			name: "aggregate_local_ref_escape",
+			src:  "fn esc(a: &String) -> (&String, &String):\n    let s = String::from(\"tmp\")\n    return (a, &s)\n",
+			code: "WON-MEM-003",
+		},
+		{
+			name: "unsupported_ref_enum_return",
+			src:  "enum OptRef:\n    Some(&String)\n    None\n\nfn bad(s: &String) -> OptRef:\n    return OptRef::Some(s)\n",
+			code: "WON-SEM-010",
+		},
+		{
+			name: "opaque_zero_arg_strview",
+			src:  "fn reg(cb: fn() -> &str):\n    println(\"ok\")\n",
+			code: "WON-MEM-002",
+		},
 	}
 
 	for _, nc := range negCases {

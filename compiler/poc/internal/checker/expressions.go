@@ -793,28 +793,52 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr, expected types.TypeID, scope 
 func (c *Checker) checkBorrowExpr(e *ast.BorrowExpr, scope *symbols.Scope) types.TypeID {
 	sub := c.checkExpr(e.Expr, types.Invalid, scope)
 	if e.IsMut {
-		if ident, ok := e.Expr.(*ast.Identifier); ok {
-			sym := scope.Lookup(ident.Name)
-			if sym != nil && !sym.IsMut {
+		switch c.analyzePlaceMutability(e.Expr, scope) {
+		case accessSharedRef:
+			c.report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-MEM-004",
+				Severity:    "error",
+				Message:     "不能从共享不可变引用创建可变借用 (&mut)",
+				File:        e.Span.File,
+				Span:        e.Span,
+				Explanation: "输入位置或解引用链中包含只读共享引用 (&T / *const T)，禁止将其直接重借用或提升为独占可变引用 (&mut T)。",
+			})
+		case accessImmutableBinding:
+			if ident, ok := e.Expr.(*ast.Identifier); ok {
+				sym := scope.Lookup(ident.Name)
+				if sym != nil && !sym.IsMut {
+					diag := diagnostic.Diagnostic{
+						Code:        "WON-MUT-001",
+						Severity:    "error",
+						Message:     fmt.Sprintf("无法对不可变变量 '%s' 进行可变借用 (&mut)", ident.Name),
+						File:        e.Span.File,
+						Span:        e.Span,
+						Explanation: fmt.Sprintf("变量 '%s' 使用 'let' 声明为不可变。向需要修改内容的函数传递 &mut 引用要求使用 'var' 声明。", ident.Name),
+					}
+					if sym.LetTokenSpan.End.Byte > sym.LetTokenSpan.Start.Byte {
+						diag.Fixes = []diagnostic.Fix{
+							{
+								Description: fmt.Sprintf("将变量 '%s' 声明修改为可变 ('var')", ident.Name),
+								Edits: []diagnostic.Edit{
+									{
+										Start:       sym.LetTokenSpan.Start.Byte,
+										End:         sym.LetTokenSpan.End.Byte,
+										Replacement: "var",
+									},
+								},
+							},
+						}
+					}
+					c.report.AddDiagnostic(diag)
+				}
+			} else {
 				c.report.AddDiagnostic(diagnostic.Diagnostic{
 					Code:        "WON-MUT-001",
 					Severity:    "error",
-					Message:     fmt.Sprintf("无法对不可变变量 '%s' 进行可变借用 (&mut)", ident.Name),
+					Message:     "无法对不可变绑定或只读成员进行可变借用 (&mut)",
 					File:        e.Span.File,
 					Span:        e.Span,
-					Explanation: fmt.Sprintf("变量 '%s' 使用 'let' 声明为不可变。向需要修改内容的函数传递 &mut 引用要求使用 'var' 声明。", ident.Name),
-					Fixes: []diagnostic.Fix{
-						{
-							Description: fmt.Sprintf("将变量 '%s' 声明修改为可变 ('var')", ident.Name),
-							Edits: []diagnostic.Edit{
-								{
-									Start:       sym.LetTokenSpan.Start.Byte,
-									End:         sym.LetTokenSpan.End.Byte,
-									Replacement: "var",
-								},
-							},
-						},
-					},
+					Explanation: "目标所有者使用 'let' 声明为不可变。创建 &mut 借用需要所有者使用 'var' 声明或源自 &mut 引用。",
 				})
 			}
 		}
@@ -1858,10 +1882,115 @@ func (c *Checker) emitReceiverMutabilityError(e *ast.MethodCallExpr, method stri
 	})
 }
 
+type placeAccessStatus int
+
+const (
+	accessTemporary placeAccessStatus = iota
+	accessMutable
+	accessImmutableBinding
+	accessSharedRef
+)
+
+// analyzePlaceMutability 统一判定左值位置（&mut 目标、成员写入及方法接收者）的访问可变性，
+// 严格区分绑定本身可否重赋值 (var/let) 与经由引用/解引用链访问目标时获得的权限 (&mut T vs &T)。
+func (c *Checker) analyzePlaceMutability(expr ast.Expr, scope *symbols.Scope) placeAccessStatus {
+	if expr == nil {
+		return accessTemporary
+	}
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		sym := scope.Lookup(e.Name)
+		if sym == nil {
+			return accessTemporary
+		}
+		if sym.IsMut {
+			return accessMutable
+		}
+		return accessImmutableBinding
+
+	case *ast.UnaryExpr:
+		if e.Op == "*" {
+			return c.analyzeDerefTargetMutability(e.Expr, scope)
+		}
+		return accessTemporary
+
+	case *ast.FieldAccessExpr:
+		objType := c.typed.ExprTypes[e.Object]
+		objInfo := c.types.Info(objType)
+		if objInfo.Kind == types.KindRef || objInfo.Kind == types.KindRawPtr {
+			return c.analyzeDerefTargetMutability(e.Object, scope)
+		}
+		return c.analyzePlaceMutability(e.Object, scope)
+
+	case *ast.IndexExpr:
+		objType := c.typed.ExprTypes[e.Object]
+		objInfo := c.types.Info(objType)
+		if objInfo.Kind == types.KindRef || objInfo.Kind == types.KindRawPtr {
+			return c.analyzeDerefTargetMutability(e.Object, scope)
+		}
+		return c.analyzePlaceMutability(e.Object, scope)
+
+	default:
+		return accessTemporary
+	}
+}
+
+// analyzeDerefTargetMutability 检查通过指针或引用表达式 refExpr 解引用所得存储位置的可变权限。
+// 对直接 &mut T 绑定（即使绑在 let 上）返回 accessMutable；若经由任意外层只读 &U 投射（如 &(&mut T) 或 (&Holder).m），降级为 accessSharedRef。
+func (c *Checker) analyzeDerefTargetMutability(refExpr ast.Expr, scope *symbols.Scope) placeAccessStatus {
+	if refExpr == nil {
+		return accessTemporary
+	}
+	refType := c.typed.ExprTypes[refExpr]
+	if refType == types.Invalid {
+		if ident, ok := refExpr.(*ast.Identifier); ok {
+			if sym := scope.Lookup(ident.Name); sym != nil {
+				refType = sym.Type
+			}
+		}
+	}
+	rInfo := c.types.Info(refType)
+	if rInfo.Kind != types.KindRef && rInfo.Kind != types.KindRawPtr {
+		return accessTemporary
+	}
+	if !rInfo.IsMut {
+		return accessSharedRef
+	}
+	return c.analyzeRefCarrierChain(refExpr, scope)
+}
+
+func (c *Checker) analyzeRefCarrierChain(expr ast.Expr, scope *symbols.Scope) placeAccessStatus {
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		return accessMutable
+	case *ast.UnaryExpr:
+		if e.Op == "*" {
+			return c.analyzeDerefTargetMutability(e.Expr, scope)
+		}
+		return accessMutable
+	case *ast.FieldAccessExpr:
+		objType := c.typed.ExprTypes[e.Object]
+		objInfo := c.types.Info(objType)
+		if objInfo.Kind == types.KindRef || objInfo.Kind == types.KindRawPtr {
+			return c.analyzeDerefTargetMutability(e.Object, scope)
+		}
+		return c.analyzeRefCarrierChain(e.Object, scope)
+	case *ast.IndexExpr:
+		objType := c.typed.ExprTypes[e.Object]
+		objInfo := c.types.Info(objType)
+		if objInfo.Kind == types.KindRef || objInfo.Kind == types.KindRawPtr {
+			return c.analyzeDerefTargetMutability(e.Object, scope)
+		}
+		return c.analyzeRefCarrierChain(e.Object, scope)
+	default:
+		return accessMutable
+	}
+}
+
 func (c *Checker) isReceiverMutable(recv ast.Expr, recType types.TypeID, scope *symbols.Scope) bool {
 	info := c.types.Info(recType)
-	if info.Kind == types.KindRef {
-		return info.IsMut
+	if info.Kind == types.KindRef || info.Kind == types.KindRawPtr {
+		return info.IsMut && c.analyzeRefCarrierChain(recv, scope) == accessMutable
 	}
-	return c.isLValueRootMutable(recv, scope)
+	return c.analyzePlaceMutability(recv, scope) == accessMutable
 }

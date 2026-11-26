@@ -3,6 +3,8 @@ package borrow
 import (
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/KitiLab/WON/compiler/poc/internal/cfg"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
@@ -405,7 +407,7 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 				o.Unknown = true
 			}
 			if st.IsReborrow {
-				parentOrig := lookupPlaceOrigins(env, st.ParentPlace)
+				parentOrig := lookupReborrowParentOrigins(env, flow, st.ParentPlace)
 				if collect && li != nil {
 					if parentOrig.isEmpty() {
 						emitFlowViolation(fn, report, st.Span, fmt.Sprintf("重借用 L%d 找不到父位置 '%s' 的引用载体溯源", st.LoanID, st.ParentPlace.String()))
@@ -451,6 +453,31 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 				cur := env.temps[st.ValTemp]
 				cur.merge(srcOrig)
 				env.temps[st.ValTemp] = cur
+				// 若拷贝/移动的是包含字段载体的聚合值（例如 Struct/Tuple 局部变量），同步提取子字段溯源至 ValTemp
+				if st.Place.RootSymID != 0 {
+					prefix := st.Place.Key()
+					for pk, pv := range env.places {
+						if len(pk) > len(prefix) && pk[:len(prefix)] == prefix {
+							var rel string
+							switch pk[len(prefix)] {
+							case '.':
+								rel = pk[len(prefix)+1:]
+							case '[':
+								rel = pk[len(prefix):]
+							}
+							if rel != "" {
+								dst := env.aggFields[st.ValTemp]
+								if dst == nil {
+									dst = make(map[string]OriginSet)
+									env.aggFields[st.ValTemp] = dst
+								}
+								cf := dst[rel]
+								cf.merge(pv)
+								dst[rel] = cf
+							}
+						}
+					}
+				}
 				if collect {
 					fc := flow.TempOrigins[st.ValTemp]
 					fc.merge(cur)
@@ -487,6 +514,15 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 					curF := fmap[key]
 					curF.merge(itemOrig)
 					fmap[key] = curF
+					// 嵌套聚合字段展开为完整投影路径（如 box.left / outer.[0]）
+					if subMap, hasSub := env.aggFields[item.Temp]; hasSub {
+						for subKey, subOrig := range subMap {
+							fullKey := joinAggFieldKey(key, subKey)
+							cf := fmap[fullKey]
+							cf.merge(subOrig)
+							fmap[fullKey] = cf
+						}
+					}
 				}
 				cur := env.temps[st.ValTemp]
 				cur.merge(unionOrig)
@@ -531,11 +567,20 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 		case cfg.OpInitAssign, cfg.OpAssign, cfg.OpReinit:
 			meta := fn.Locals[st.Place.RootSymID]
 			if meta != nil && meta.IsParam && st.Kind == cfg.OpInitAssign && st.SrcTemp == cfg.InvalidValue {
-				// 参数入口绑定：若参数自身为引用或包含引用成员，注入 Param(idx) 溯源
+				// 参数入口绑定：若参数自身为引用或包含引用成员，注入 Param(idx) 溯源，并展开可投影成员路径
 				if meta.Type != types.Invalid && tctx != nil && typeHasRef(tctx, nil, meta.Type, view.GetSymbols()) {
 					o := newOriginSet()
 					o.Params[meta.ParamIdx] = true
 					env.places[st.Place.Key()] = o
+					leaves, _ := collectTypeRefLeaves(tctx, view.GetSymbols(), meta.Type, "")
+					for _, leaf := range leaves {
+						if leaf.Path != "" {
+							childPlace := placeForFieldPath(st.Place, leaf.Path, st.Span)
+							co := newOriginSet()
+							co.Params[meta.ParamIdx] = true
+							env.places[childPlace.Key()] = co
+						}
+					}
 				}
 				continue
 			}
@@ -559,17 +604,10 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 					assignOrig = env.temps[st.SrcTemp].clone()
 				}
 				env.places[st.Place.Key()] = assignOrig
-				// 若来源值本身具备字段分解结构（如 let w = RefBox { a: &x, b: &mut y }），一并展开至 w.a / w.b 投影载体
+				// 若来源值本身具备字段分解结构（如 let w = RefBox { a: &x, b: &mut y }），一并展开至多级投影载体
 				if fmap, hasAgg := env.aggFields[st.SrcTemp]; hasAgg && len(st.ParentPlace.Projections) == 0 {
 					for fKey, fOrig := range fmap {
-						var childPlace cfg.Place
-						if len(fKey) > 0 && fKey[0] == '[' {
-							var idxVal int
-							_, _ = fmt.Sscanf(fKey, "[%d]", &idxVal)
-							childPlace = st.Place.AppendProj(cfg.Projection{Kind: cfg.ProjConstIdx, ConstIndex: int64(idxVal)}, types.Invalid, st.Span)
-						} else {
-							childPlace = st.Place.AppendField(fKey, -1, types.Invalid, st.Span)
-						}
+						childPlace := placeForFieldPath(st.Place, fKey, st.Span)
 						env.places[childPlace.Key()] = fOrig.clone()
 					}
 				}
@@ -604,6 +642,23 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 						if sum.Unknown {
 							retOrig.Unknown = true
 						}
+						// 若摘要携带按投影路径拆分的聚合字段溯源，逐字段实例化至 aggFields
+						if len(sum.FieldProvs) > 0 {
+							for fPath, fp := range sum.FieldProvs {
+								if fPath == "" || fp == nil {
+									continue
+								}
+								fo := instantiateFieldProvOrigin(fp, st.ArgTemps, env)
+								dst := env.aggFields[st.ValTemp]
+								if dst == nil {
+									dst = make(map[string]OriginSet, len(sum.FieldProvs))
+									env.aggFields[st.ValTemp] = dst
+								}
+								cf := dst[fPath]
+								cf.merge(fo)
+								dst[fPath] = cf
+							}
+						}
 					}
 				}
 				if !usedSummary {
@@ -618,7 +673,7 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 							hasArgOrigin = true
 						}
 					}
-					if !hasArgOrigin {
+					if !hasArgOrigin && !isPureEnumVariantCall(st) {
 						retOrig.Unknown = true
 					}
 				}
@@ -745,8 +800,258 @@ func typeHasRef(tctx *types.Context, visited map[types.TypeID]bool, tid types.Ty
 				return true
 			}
 		}
+		if symTab != nil {
+			if sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]; sym != nil {
+				for _, v := range sym.Variants {
+					for _, tt := range v.TupleTypes {
+						if typeHasRef(tctx, visited, tt, symTab) {
+							return true
+						}
+					}
+					for _, sf := range v.StructFields {
+						if typeHasRef(tctx, visited, sf.Type, symTab) {
+							return true
+						}
+					}
+				}
+			}
+		}
 		return false
 	default:
 		return false
 	}
+}
+
+type refLeafSpec struct {
+	Path  string
+	IsMut bool
+}
+
+func joinAggFieldKey(prefix, child string) string {
+	if prefix == "" {
+		return child
+	}
+	if strings.HasPrefix(child, "[") {
+		return prefix + child
+	}
+	return prefix + "." + child
+}
+
+func placeForFieldPath(base cfg.Place, path string, span diagnostic.Span) cfg.Place {
+	cur := base
+	rest := path
+	for rest != "" {
+		if rest[0] == '.' {
+			rest = rest[1:]
+			continue
+		}
+		if rest[0] == '[' {
+			end := strings.IndexByte(rest, ']')
+			if end < 0 {
+				break
+			}
+			idxStr := rest[1:end]
+			if idxVal, err := strconv.ParseInt(idxStr, 10, 64); err == nil {
+				cur = cur.AppendProj(cfg.Projection{Kind: cfg.ProjConstIdx, ConstIndex: idxVal}, types.Invalid, span)
+			}
+			rest = rest[end+1:]
+			continue
+		}
+		nextDot := strings.IndexByte(rest, '.')
+		nextBrk := strings.IndexByte(rest, '[')
+		sep := -1
+		if nextDot >= 0 && (nextBrk < 0 || nextDot < nextBrk) {
+			sep = nextDot
+		} else if nextBrk >= 0 {
+			sep = nextBrk
+		}
+		var seg string
+		if sep < 0 {
+			seg = rest
+			rest = ""
+		} else {
+			seg = rest[:sep]
+			rest = rest[sep:]
+		}
+		if seg != "" {
+			cur = cur.AppendField(seg, -1, types.Invalid, span)
+		}
+	}
+	return cur
+}
+
+// collectTypeRefLeaves 枚举返回类型中全部引用叶子投影路径；若存在不可精确投影拆分的含引用聚合（Enum/Array/Slice），返回 unsupported=true。
+func collectTypeRefLeaves(tctx *types.Context, symTab *symbols.Table, tid types.TypeID, prefix string) ([]refLeafSpec, bool) {
+	return collectTypeRefLeavesRec(tctx, symTab, tid, prefix, make(map[types.TypeID]bool, 8))
+}
+
+func collectTypeRefLeavesRec(tctx *types.Context, symTab *symbols.Table, tid types.TypeID, prefix string, activePath map[types.TypeID]bool) ([]refLeafSpec, bool) {
+	if tid == types.Invalid || tctx == nil {
+		return nil, false
+	}
+	info := tctx.Info(tid)
+	switch info.Kind {
+	case types.KindRef:
+		return []refLeafSpec{{Path: prefix, IsMut: info.IsMut}}, false
+
+	case types.KindArray, types.KindSlice:
+		if typeHasRef(tctx, nil, info.Elem, symTab) {
+			return nil, true
+		}
+		return nil, false
+
+	case types.KindEnum:
+		if activePath[tid] {
+			return nil, false
+		}
+		activePath[tid] = true
+		defer delete(activePath, tid)
+		if !typeHasRef(tctx, nil, tid, symTab) {
+			return nil, false
+		}
+		// Result[T, &str] 等仅含不可变字符串视图 (&str) 的 Result/Option 保持纯共享 Static/Arg 语义，
+		// 含 &mut 或任意一般引用载荷的枚举/容器按不支持精准投影的含引用聚合 Fail-Closed (WON-SEM-010) 拒止。
+		if isEnumWithOnlyStrView(tctx, tid, symTab) {
+			return []refLeafSpec{{Path: prefix, IsMut: false}}, false
+		}
+		return nil, true
+
+	case types.KindTuple:
+		var leaves []refLeafSpec
+		for i, el := range info.Elems {
+			sub, unsup := collectTypeRefLeavesRec(tctx, symTab, el, joinAggFieldKey(prefix, fmt.Sprintf("[%d]", i)), activePath)
+			if unsup {
+				return nil, true
+			}
+			leaves = append(leaves, sub...)
+		}
+		return leaves, false
+
+	case types.KindStruct:
+		if symTab == nil {
+			return nil, false
+		}
+		if activePath[tid] {
+			return nil, false
+		}
+		activePath[tid] = true
+		defer delete(activePath, tid)
+		sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]
+		if sym == nil {
+			return nil, false
+		}
+		var subst map[uint64]types.TypeID
+		if len(sym.GenericParamIDs) > 0 && len(sym.GenericParamIDs) == len(info.GenericArgs) {
+			subst = make(map[uint64]types.TypeID, len(info.GenericArgs))
+			for i, gid := range sym.GenericParamIDs {
+				subst[uint64(gid)] = info.GenericArgs[i]
+			}
+		}
+		var leaves []refLeafSpec
+		for _, f := range sym.Fields {
+			ft := f.Type
+			if subst != nil {
+				ft = tctx.Substitute(ft, subst)
+			}
+			sub, unsup := collectTypeRefLeavesRec(tctx, symTab, ft, joinAggFieldKey(prefix, f.Name), activePath)
+			if unsup {
+				return nil, true
+			}
+			leaves = append(leaves, sub...)
+		}
+		return leaves, false
+
+	default:
+		return nil, false
+	}
+}
+
+// lookupReborrowParentOrigins 查找重借用父位置（支持多层解引用如 **pp -> *pp -> pp）的引用载体溯源。
+func lookupReborrowParentOrigins(env *carrierEnv, flow *FuncLoanFlow, parentPlace cfg.Place) OriginSet {
+	orig := lookupPlaceOrigins(env, parentPlace)
+	if !orig.isEmpty() || !parentPlace.HasDeref() {
+		return orig
+	}
+	cur := parentPlace
+	for cur.HasDeref() {
+		pref, ok := cur.PrefixBeforeLastDeref()
+		if !ok {
+			break
+		}
+		pOrig := lookupPlaceOrigins(env, pref)
+		if !pOrig.isEmpty() {
+			// 通过外层引用载体解引用后尝试解析其指向的内部载体位置（如 pp -> p）
+			resolved := newOriginSet()
+			for lid := range pOrig.Loans {
+				if li := flow.LoanByID[lid]; li != nil {
+					if inner := lookupPlaceOrigins(env, li.Place); !inner.isEmpty() {
+						resolved.merge(inner)
+					} else {
+						resolved.Loans[lid] = true
+					}
+				}
+			}
+			for pIdx := range pOrig.Params {
+				resolved.Params[pIdx] = true
+			}
+			if pOrig.Static {
+				resolved.Static = true
+			}
+			if pOrig.Unknown {
+				resolved.Unknown = true
+			}
+			if !resolved.isEmpty() {
+				return resolved
+			}
+			return pOrig
+		}
+		cur = pref
+	}
+	return orig
+}
+
+func isPureEnumVariantCall(st cfg.Statement) bool {
+	if st.Callee != nil && st.Callee.Kind == symbols.SymEnumVariant {
+		return true
+	}
+	switch st.CalleeName {
+	case "Result::Ok", "Result::Err", "Option::Some", "Option::None":
+		return true
+	}
+	return false
+}
+
+func isEnumWithOnlyStrView(tctx *types.Context, enumTID types.TypeID, symTab *symbols.Table) bool {
+	if tctx == nil || tctx.StrView == types.Invalid {
+		return false
+	}
+	info := tctx.Info(enumTID)
+	if info.Kind != types.KindEnum {
+		return false
+	}
+	for _, ga := range info.GenericArgs {
+		if ga == tctx.StrView {
+			continue
+		}
+		if typeHasRef(tctx, nil, ga, symTab) {
+			return false
+		}
+	}
+	if symTab != nil {
+		if sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]; sym != nil {
+			for _, v := range sym.Variants {
+				for _, tt := range v.TupleTypes {
+					if tt != tctx.StrView && typeHasRef(tctx, nil, tt, symTab) {
+						return false
+					}
+				}
+				for _, sf := range v.StructFields {
+					if sf.Type != tctx.StrView && typeHasRef(tctx, nil, sf.Type, symTab) {
+						return false
+					}
+				}
+			}
+		}
+	}
+	return true
 }
