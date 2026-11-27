@@ -3,6 +3,7 @@ package drop
 import (
 	"fmt"
 
+	"github.com/KitiLab/WON/compiler/poc/internal/borrow"
 	"github.com/KitiLab/WON/compiler/poc/internal/cfg"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
 	"github.com/KitiLab/WON/compiler/poc/internal/symbols"
@@ -241,7 +242,7 @@ func verifyAbstractLifecycle(fn *cfg.FuncCFG, df *DropElaboratedFunc, cc *Classi
 			inFlags[bb] = mFlag
 			curLife := cloneLifeMap(mLife)
 			curFlags := cloneFlagMap(mFlag)
-			stepVerifyBlock(blk, fn, df, curLife, curFlags, nil, nil)
+			stepVerifyBlock(blk, fn, df, cc, curLife, curFlags, nil, nil)
 
 			if !equalLifeMaps(outLife[bb], curLife) || !equalFlagMaps(outFlags[bb], curFlags) {
 				outLife[bb] = curLife
@@ -259,12 +260,12 @@ func verifyAbstractLifecycle(fn *cfg.FuncCFG, df *DropElaboratedFunc, cc *Classi
 		}
 		curLife := cloneLifeMap(inLife[bb])
 		curFlags := cloneFlagMap(inFlags[bb])
-		stepVerifyBlock(blk, fn, df, curLife, curFlags, report, &ok)
+		stepVerifyBlock(blk, fn, df, cc, curLife, curFlags, report, &ok)
 	}
 	return ok
 }
 
-func stepVerifyBlock(blk *cfg.BasicBlock, fn *cfg.FuncCFG, df *DropElaboratedFunc, life map[string]absLifeBits, flags map[DropFlagID]absFlagBits, report *diagnostic.Report, ok *bool) {
+func stepVerifyBlock(blk *cfg.BasicBlock, fn *cfg.FuncCFG, df *DropElaboratedFunc, cc *ClassifyContext, life map[string]absLifeBits, flags map[DropFlagID]absFlagBits, report *diagnostic.Report, ok *bool) {
 	for _, st := range blk.Statements {
 		pk := canonicalPlaceKey(st.Place)
 		switch st.Kind {
@@ -272,6 +273,22 @@ func stepVerifyBlock(blk *cfg.BasicBlock, fn *cfg.FuncCFG, df *DropElaboratedFun
 			life[pk] = lifeUninit
 
 		case cfg.OpInitAssign, cfg.OpStorageDecl, cfg.OpAssign, cfg.OpReinit:
+			isNonOwningCopy := st.CopyPlace.RootSymID != 0 && cc != nil &&
+				(borrow.IsTrackableRawCopy(st.Type, st.CopyPlace, cc.Types, cc.Symbols, nil) || cc.NeedsDrop(st.Type))
+			if isNonOwningCopy {
+				if len(st.Place.Projections) == 0 {
+					setPlaceTreeLife(life, df, st.Place, lifeMoved)
+				} else {
+					life[pk] = lifeMoved
+				}
+				for _, fid := range df.FlagOrder {
+					fm := df.Flags[fid]
+					if placeCoversFlag(st.Place, fm.Place) {
+						flags[fid] = flagFalse
+					}
+				}
+				continue
+			}
 			if len(st.Place.Projections) == 0 {
 				setPlaceTreeLife(life, df, st.Place, lifeInit)
 			} else {

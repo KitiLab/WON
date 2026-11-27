@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
 	"github.com/KitiLab/WON/compiler/poc/internal/cfg"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
 	"github.com/KitiLab/WON/compiler/poc/internal/symbols"
@@ -275,14 +276,15 @@ func joinCarrierEnvs(envs []*carrierEnv) *carrierEnv {
 
 // FuncLoanFlow 汇总函数内部全部显式 LoanID、重借用父子拓扑及各控制流节点的引用载体溯源流。
 type FuncLoanFlow struct {
-	FuncName    string
-	FuncSymID   symbols.SymbolID
-	Loans       []*LoanInfo
-	LoanByID    map[cfg.LoanID]*LoanInfo
-	TempOrigins map[cfg.ValueID]OriginSet
-	InStates    []*carrierEnv
-	OutStates   []*carrierEnv
-	Summaries   map[symbols.SymbolID]*FuncSummary
+	FuncName     string
+	FuncSymID    symbols.SymbolID
+	Loans        []*LoanInfo
+	LoanByID     map[cfg.LoanID]*LoanInfo
+	TempOrigins  map[cfg.ValueID]OriginSet
+	InStates     []*carrierEnv
+	OutStates    []*carrierEnv
+	Summaries    map[symbols.SymbolID]*FuncSummary
+	FFIContracts map[string]bindgen.FFIFuncContract
 }
 
 // BuildLoanFlow 对单个函数 CFG 构建并校验 Phase 2B.2 Stage A 的借用身份表与引用载体前向流。
@@ -292,16 +294,21 @@ func BuildLoanFlow(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Re
 }
 
 func buildLoanFlowWithSummaries(fn *cfg.FuncCFG, view cfg.SemanticView, summaries map[symbols.SymbolID]*FuncSummary, report *diagnostic.Report) *FuncLoanFlow {
+	return buildLoanFlowWithSummariesAndFFI(fn, view, summaries, nil, report)
+}
+
+func buildLoanFlowWithSummariesAndFFI(fn *cfg.FuncCFG, view cfg.SemanticView, summaries map[symbols.SymbolID]*FuncSummary, ffiContracts map[string]bindgen.FFIFuncContract, report *diagnostic.Report) *FuncLoanFlow {
 	if fn == nil || len(fn.Blocks) == 0 || fn.Entry < 0 {
 		return nil
 	}
 	flow := &FuncLoanFlow{
-		FuncName:    fn.Name,
-		LoanByID:    make(map[cfg.LoanID]*LoanInfo),
-		TempOrigins: make(map[cfg.ValueID]OriginSet),
-		InStates:    make([]*carrierEnv, len(fn.Blocks)),
-		OutStates:   make([]*carrierEnv, len(fn.Blocks)),
-		Summaries:   summaries,
+		FuncName:     fn.Name,
+		LoanByID:     make(map[cfg.LoanID]*LoanInfo),
+		TempOrigins:  make(map[cfg.ValueID]OriginSet),
+		InStates:     make([]*carrierEnv, len(fn.Blocks)),
+		OutStates:    make([]*carrierEnv, len(fn.Blocks)),
+		Summaries:    summaries,
+		FFIContracts: ffiContracts,
 	}
 	if fn.FuncSym != nil {
 		flow.FuncSymID = fn.FuncSym.ID
@@ -717,6 +724,20 @@ func transferCarrierBlock(fn *cfg.FuncCFG, blk *cfg.BasicBlock, env *carrierEnv,
 								cf.merge(fo)
 								dst[fPath] = cf
 							}
+						}
+					}
+				}
+				if !usedSummary && st.Callee == nil && flow.FFIContracts != nil {
+					if fc, hasFFI := flow.FFIContracts[st.CalleeName]; hasFFI {
+						usedSummary = true
+						if fc.Return.BorrowsParam >= 0 && fc.Return.BorrowsParam < len(st.ArgTemps) && st.ArgTemps[fc.Return.BorrowsParam] != cfg.InvalidValue {
+							if argOrig, ok := env.temps[st.ArgTemps[fc.Return.BorrowsParam]]; ok && !argOrig.isEmpty() {
+								retOrig.merge(argOrig)
+							} else {
+								retOrig.Unknown = true
+							}
+						} else {
+							retOrig.Unknown = true
 						}
 					}
 				}

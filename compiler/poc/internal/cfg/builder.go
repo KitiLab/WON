@@ -634,8 +634,27 @@ func (b *funcBuilder) lowerLetStmt(s *ast.LetStmt) {
 	}
 
 	initTemp := b.lowerExprVal(s.Init)
+	copySrc, _ := b.extractCopySourcePlace(s.Init)
 
 	if s.Pattern != nil {
+		if ip, ok := s.Pattern.(*ast.IdentPattern); ok && b.view.VariantRef(ip) == nil {
+			sym := b.view.GetSymbols().NodeSymbols[ip]
+			if sym == nil {
+				b.emitInternalError(ip.Span, fmt.Sprintf("模式绑定标识符 '%s' 缺少 SymbolID 映射", ip.Name))
+				return
+			}
+			b.registerLocal(sym, false, -1, true, curScopeID)
+			b.addLocalToTopScope(sym.ID)
+			b.emit(Statement{
+				Kind:      OpInitAssign,
+				Place:     b.placeForSym(sym, ip.Span),
+				SrcTemp:   initTemp,
+				CopyPlace: copySrc,
+				Type:      sym.Type,
+				Span:      ip.Span,
+			})
+			return
+		}
 		b.registerPatternLocals(s.Pattern, true, curScopeID, initTemp, s.Span)
 	} else if s.Name != "" && s.Name != "_" {
 		sym := b.lookupDeclSym(s)
@@ -646,11 +665,12 @@ func (b *funcBuilder) lowerLetStmt(s *ast.LetStmt) {
 		b.registerLocal(sym, false, -1, true, curScopeID)
 		b.addLocalToTopScope(sym.ID)
 		b.emit(Statement{
-			Kind:    OpInitAssign,
-			Place:   b.placeForSym(sym, s.Span),
-			SrcTemp: initTemp,
-			Type:    sym.Type,
-			Span:    s.Span,
+			Kind:      OpInitAssign,
+			Place:     b.placeForSym(sym, s.Span),
+			SrcTemp:   initTemp,
+			CopyPlace: copySrc,
+			Type:      sym.Type,
+			Span:      s.Span,
 		})
 	}
 }
@@ -809,13 +829,48 @@ func (b *funcBuilder) lowerAssignStmt(s *ast.AssignStmt) {
 
 	valTemp := b.lowerExprVal(s.Value)
 
+	var copySrc Place
+	if !isCompound {
+		copySrc, _ = b.extractCopySourcePlace(s.Value)
+	}
 	b.emit(Statement{
-		Kind:    OpAssign,
-		Place:   lhsPlace,
-		SrcTemp: valTemp,
-		Type:    lhsPlace.ElemType,
-		Span:    s.Span,
+		Kind:      OpAssign,
+		Place:     lhsPlace,
+		SrcTemp:   valTemp,
+		CopyPlace: copySrc,
+		Type:      lhsPlace.ElemType,
+		Span:      s.Span,
 	})
+}
+
+func (b *funcBuilder) extractCopySourcePlace(expr ast.Expr) (Place, bool) {
+	if expr == nil || b.view == nil || b.view.GetTypes() == nil {
+		return Place{}, false
+	}
+	tctx := b.view.GetTypes()
+	cur := expr
+	for {
+		if ce, ok := cur.(*ast.CastExpr); ok {
+			et := b.view.ExprType(ce.Expr)
+			if et != types.Invalid && tctx.Info(et).Kind == types.KindRawPtr {
+				cur = ce.Expr
+				continue
+			}
+		}
+		break
+	}
+	p, ok := b.extractPlace(cur)
+	if !ok {
+		return Place{}, false
+	}
+	et := b.view.ExprType(cur)
+	if et == types.Invalid {
+		et = p.ElemType
+	}
+	if et != types.Invalid && tctx.IsCopy(et) {
+		return p, true
+	}
+	return Place{}, false
 }
 
 func (b *funcBuilder) lowerAssignTargetSubExprs(lhs ast.Expr, isCompound bool, lhsPlace Place, span diagnostic.Span) {

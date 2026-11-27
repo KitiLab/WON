@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
 	"github.com/KitiLab/WON/compiler/poc/internal/cfg"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
 	"github.com/KitiLab/WON/compiler/poc/internal/symbols"
@@ -203,6 +204,11 @@ type ProvenanceResult struct {
 // 3) 检测所有可达 return 路径上的局部引用逃逸 (WON-MEM-003) 及调用点可变候选重叠 (WON-MEM-005)；
 // 4) 使用收敛摘要重构全程序精确引用载体流供 NLL 与排他检查消费。
 func InferAndVerifyProvenance(progCFG *cfg.ProgramCFG, view cfg.SemanticView, report *diagnostic.Report) *ProvenanceResult {
+	return InferAndVerifyProvenanceWithFFI(progCFG, view, nil, report)
+}
+
+// InferAndVerifyProvenanceWithFFI 在已知 FFI 契约上下文中执行 Stage C 候选引用溯源推理与验证。
+func InferAndVerifyProvenanceWithFFI(progCFG *cfg.ProgramCFG, view cfg.SemanticView, ffiContracts map[string]bindgen.FFIFuncContract, report *diagnostic.Report) *ProvenanceResult {
 	if progCFG == nil || view == nil || report == nil {
 		return nil
 	}
@@ -224,7 +230,7 @@ func InferAndVerifyProvenance(progCFG *cfg.ProgramCFG, view cfg.SemanticView, re
 			continue
 		}
 		res.Summaries[fn.FuncSym.ID] = newFuncSummary(fn, tctx, symTab)
-		flow := buildLoanFlowWithSummaries(fn, view, nil, report)
+		flow := buildLoanFlowWithSummariesAndFFI(fn, view, nil, ffiContracts, report)
 		if flow == nil || report.HasErrors() {
 			return nil
 		}
@@ -273,7 +279,7 @@ func InferAndVerifyProvenance(progCFG *cfg.ProgramCFG, view cfg.SemanticView, re
 			changed = false
 			for _, fn := range fnInSCC {
 				sid := fn.FuncSym.ID
-				refinedFlow := buildLoanFlowWithSummaries(fn, view, res.Summaries, report)
+				refinedFlow := buildLoanFlowWithSummariesAndFFI(fn, view, res.Summaries, ffiContracts, report)
 				if refinedFlow == nil || report.HasErrors() {
 					return nil
 				}
@@ -296,7 +302,7 @@ func InferAndVerifyProvenance(progCFG *cfg.ProgramCFG, view cfg.SemanticView, re
 		if fn.FuncSym == nil {
 			continue
 		}
-		flow := buildLoanFlowWithSummaries(fn, view, res.Summaries, report)
+		flow := buildLoanFlowWithSummariesAndFFI(fn, view, res.Summaries, ffiContracts, report)
 		if flow == nil || report.HasErrors() {
 			return nil
 		}
@@ -906,6 +912,59 @@ func checkCallProvenanceAndDisjointness(
 	report *diagnostic.Report,
 	emitted map[diagDedupKey]bool,
 ) {
+	if st.Callee == nil && flow != nil && flow.FFIContracts != nil {
+		if fc, hasFFI := flow.FFIContracts[st.CalleeName]; hasFFI && fc.Return.BorrowsParam >= 0 {
+			if st.Type == types.Invalid || tctx == nil || tctx.Info(st.Type).Kind != types.KindRef {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-SEM-010",
+					Severity:    "error",
+					Message:     fmt.Sprintf("FFI 契约 '%s' 的 borrows_param=%d 返回借用仅支持单一安全引用返回类型 (&T / &mut T)，不支持 '%s'", fc.ContractID, fc.Return.BorrowsParam, tctx.Format(st.Type)),
+					File:        st.Span.File,
+					Span:        st.Span,
+					Explanation: "当前引用溯源模型仅追踪安全引用 (&T / &mut T) 返回值生命周期；裸指针或非引用返回类型禁止静默接受 borrows_param。",
+				})
+				return
+			}
+			if st.ValTemp == cfg.InvalidValue {
+				emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("FFI 调用 '%s' 返回引用类型但缺少 ValTemp", st.CalleeName))
+				return
+			}
+			retMut := tctx.Info(st.Type).IsMut
+			expectMut := fc.Return.Ownership == bindgen.FFIBorrowedMut
+			if retMut != expectMut {
+				emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("FFI 调用 '%s' 返回类型可变性 (%v) 与契约 '%s' (%s) 矛盾", st.CalleeName, retMut, fc.ContractID, fc.Return.Ownership))
+				return
+			}
+			bp := fc.Return.BorrowsParam
+			if bp < 0 || bp >= len(st.ArgTemps) || st.ArgTemps[bp] == cfg.InvalidValue {
+				emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("FFI 调用 '%s' borrows_param=%d 缺少有效借用参数临时值", st.CalleeName, bp))
+				return
+			}
+			argOrig, ok := fwd.temps[st.ArgTemps[bp]]
+			if !ok || argOrig.isEmpty() {
+				emitInternalFlowDiag(fn, report, emitted, st.Span, fmt.Sprintf("FFI 调用 '%s' borrows_param=%d 缺少参数引用溯源 OriginSet", st.CalleeName, bp))
+				return
+			}
+			oCheck := validateCarrierOriginSet(fn, flow, argOrig, cfg.Place{}, true, expectMut, tctx, symTab)
+			if oCheck.Internal {
+				emitInternalFlowDiag(fn, report, emitted, st.Span, oCheck.Detail)
+				return
+			}
+			if expectMut && !oCheck.Authority.PermitsMutableAccess() {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-MEM-004",
+					Severity:    "error",
+					Message:     fmt.Sprintf("FFI 调用 '%s' 返回可变借用时来源参数 #%d 不具备 &mut 独占权限", st.CalleeName, bp),
+					File:        st.Span.File,
+					Span:        st.Span,
+					Explanation: "只有具备 &mut 或显式可变拥有权的参数才能派生 &mut 返回借用。",
+				})
+				return
+			}
+			return
+		}
+	}
+
 	if st.ValTemp == cfg.InvalidValue {
 		return
 	}

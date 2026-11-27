@@ -108,8 +108,9 @@ type Statement struct {
 	AggTemps    []AggTemp
 
 	// Phase 2B.3 确定性析构标志与胶水描述符关联字段
-	DropFlag uint32
-	DropGlue string
+	DropFlag  uint32
+	DropGlue  string
+	CopyPlace Place // 当赋值来自 Copy 位置时记录源位置（不改变 Dump 快照）
 }
 
 // TermKind 定义基本块终结跳转指令类别。

@@ -3,6 +3,7 @@ package borrow
 import (
 	"fmt"
 
+	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
 	"github.com/KitiLab/WON/compiler/poc/internal/cfg"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
 	"github.com/KitiLab/WON/compiler/poc/internal/symbols"
@@ -66,30 +67,27 @@ func (t *MoveInitTrace) CloneInEnv(bb cfg.BlockID) map[symbols.SymbolID]*PlaceSt
 // StepStatement 对单条 CFG 语句执行 Phase 2B.1 状态转移（不采集重复诊断），
 // 使 Drop Elaboration 能够在语句级别精确同步前/后状态。
 func StepStatement(fnName string, env map[symbols.SymbolID]*PlaceState, st cfg.Statement, view cfg.SemanticView) {
-	if view == nil {
-		return
-	}
-	stepBlockStmt(fnName, st, funcEnv(env), view.GetSymbols(), view.GetTypes(), nil, nil)
+	StepStatementWithFFI(fnName, env, st, view, nil)
 }
 
 // SolveMoveInitTrace 对单个函数求解并导出 Phase 2B.1 Move/Init 不动点收敛结果。
 func SolveMoveInitTrace(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report) (*MoveInitTrace, bool) {
-	if fn == nil || view == nil || len(fn.Blocks) == 0 || fn.Entry < 0 {
-		return nil, false
-	}
-	maxIterations := len(fn.Blocks)*(len(fn.Locals)*8+64) + 256
-	return solveMoveInit(fn, view, report, maxIterations, false)
+	return SolveMoveInitTraceWithFFI(fn, view, nil, report)
 }
 
 func analyzeFunctionWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report, maxIterations int) {
-	_, _ = solveMoveInit(fn, view, report, maxIterations, true)
+	_, _ = solveMoveInitWithFFI(fn, view, nil, report, maxIterations, true)
 }
 
 func analyzeMoveInitWithBudget(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report, maxIterations int) {
-	_, _ = solveMoveInit(fn, view, report, maxIterations, true)
+	_, _ = solveMoveInitWithFFI(fn, view, nil, report, maxIterations, true)
 }
 
 func solveMoveInit(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Report, maxIterations int, emitDiags bool) (*MoveInitTrace, bool) {
+	return solveMoveInitWithFFI(fn, view, nil, report, maxIterations, emitDiags)
+}
+
+func solveMoveInitWithFFI(fn *cfg.FuncCFG, view cfg.SemanticView, opaqueTypes map[string]bindgen.FFIReturnContract, report *diagnostic.Report, maxIterations int, emitDiags bool) (*MoveInitTrace, bool) {
 	if fn == nil || len(fn.Blocks) == 0 || fn.Entry < 0 {
 		return nil, false
 	}
@@ -142,7 +140,7 @@ func solveMoveInit(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Re
 
 			inStates[bb] = merged
 			cur := cloneEnv(merged)
-			transferBlock(fn.Name, blk, cur, view, nil, nil)
+			transferBlockWithFFI(fn.Name, blk, cur, view, opaqueTypes, nil, nil)
 
 			if outStates[bb] == nil || !equalEnvs(outStates[bb], cur) {
 				outStates[bb] = cur
@@ -160,7 +158,7 @@ func solveMoveInit(fn *cfg.FuncCFG, view cfg.SemanticView, report *diagnostic.Re
 				continue
 			}
 			cur := cloneEnv(inStates[bb])
-			transferBlock(fn.Name, blk, cur, view, report, emitted)
+			transferBlockWithFFI(fn.Name, blk, cur, view, opaqueTypes, report, emitted)
 		}
 	}
 
@@ -211,18 +209,26 @@ func emitInternalViolation(fnName string, span diagnostic.Span, place cfg.Place,
 }
 
 func transferBlock(fnName string, blk *cfg.BasicBlock, env funcEnv, view cfg.SemanticView, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
+	transferBlockWithFFI(fnName, blk, env, view, nil, report, emitted)
+}
+
+func transferBlockWithFFI(fnName string, blk *cfg.BasicBlock, env funcEnv, view cfg.SemanticView, opaqueTypes map[string]bindgen.FFIReturnContract, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
 	symTab := view.GetSymbols()
 	tctx := view.GetTypes()
 
 	for _, st := range blk.Statements {
-		stepBlockStmt(fnName, st, env, symTab, tctx, report, emitted)
+		stepBlockStmtWithFFI(fnName, st, env, symTab, tctx, opaqueTypes, report, emitted)
 	}
 }
 
 func stepBlockStmt(fnName string, st cfg.Statement, env funcEnv, symTab *symbols.Table, tctx *types.Context, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
+	stepBlockStmtWithFFI(fnName, st, env, symTab, tctx, nil, report, emitted)
+}
+
+func stepBlockStmtWithFFI(fnName string, st cfg.Statement, env funcEnv, symTab *symbols.Table, tctx *types.Context, opaqueTypes map[string]bindgen.FFIReturnContract, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
 	switch st.Kind {
 	case cfg.OpScopeEnter, cfg.OpNop, cfg.OpStaticRef, cfg.OpCall, cfg.OpAggregate, cfg.OpTempAssign,
-		cfg.OpDrop, cfg.OpCondDrop, cfg.OpFFITransfer:
+		cfg.OpDrop, cfg.OpCondDrop:
 		return
 
 	case cfg.OpStorageDead:
@@ -247,7 +253,11 @@ func stepBlockStmt(fnName string, st cfg.Statement, env funcEnv, symTab *symbols
 			emitInternalViolation(fnName, st.Span, st.Place, fmt.Sprintf("%s 缺少有效 SymbolID", st.Kind), report, emitted)
 			return
 		}
-		env[st.Place.RootSymID] = newPlaceState(st.Type, st.Span, true)
+		ps := newPlaceState(st.Type, st.Span, true)
+		if st.Kind == cfg.OpInitAssign && st.CopyPlace.RootSymID != 0 && isTrackableRawCopy(st.Type, st.CopyPlace, tctx, symTab, opaqueTypes) {
+			ps.markNonOwningCopy(collectCopyAliasRoots(env, st.CopyPlace))
+		}
+		env[st.Place.RootSymID] = ps
 
 	case cfg.OpRead, cfg.OpCopy:
 		checkReadablePlace(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
@@ -306,8 +316,56 @@ func stepBlockStmt(fnName string, st cfg.Statement, env funcEnv, symTab *symbols
 			applyMove(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
 		}
 
+	case cfg.OpFFITransfer:
+		if st.Place.RootSymID == 0 || symTab.ByID[st.Place.RootSymID] == nil || env[st.Place.RootSymID] == nil {
+			emitInternalViolation(fnName, st.Span, st.Place, "OpFFITransfer 缺少有效符号或未追踪的根存储状态", report, emitted)
+			return
+		}
+		if st.Place.HasDeref() || st.Place.HasIndex() {
+			checkReadablePlace(fnName, env, st.Place.RootPlace(), st.Span, symTab, tctx, report, emitted)
+			if report != nil {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-MEM-008",
+					Severity:    "error",
+					Message:     fmt.Sprintf("不能直接通过解引用或下标位置 '%s' 向 FFI @owned 移交所有权", formatPlaceDisplay(st.Place)),
+					File:        st.Span.File,
+					Span:        st.Span,
+					Explanation: "FFI @owned 所有权移交要求持有独立所有权的局部绑定或结构体字段路径。",
+				})
+			}
+			return
+		}
+		if !checkReadablePlace(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted) {
+			return
+		}
+		fields, ok := st.Place.FieldPath()
+		if !ok {
+			emitInternalViolation(fnName, st.Span, st.Place, "OpFFITransfer 路径包含不受支持的投影类型", report, emitted)
+			return
+		}
+		target, err := resolveFieldState(env[st.Place.RootSymID], fields, symTab, tctx)
+		if err != nil {
+			emitInternalViolation(fnName, st.Span, st.Place, err.Error(), report, emitted)
+			return
+		}
+		_, _, _, _, canNonOwningCopy, _, _ := target.summaryOwnership()
+		if canNonOwningCopy {
+			if report != nil {
+				emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+					Code:        "WON-MEM-001",
+					Severity:    "error",
+					Message:     fmt.Sprintf("不能通过复制得到的裸指针或句柄别名 '%s' 向 FFI 移交资源所有权", formatPlaceDisplay(st.Place)),
+					File:        st.Span.File,
+					Span:        st.Span,
+					Explanation: "复制 Copy 裸指针值仅拷贝地址本身，不赋予副本向外部 C 函数移交或释放底层资源的权限。",
+				})
+			}
+			return
+		}
+		applyMove(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
+
 	case cfg.OpAssign, cfg.OpReinit:
-		applyAssign(fnName, env, st.Place, st.Span, symTab, tctx, report, emitted)
+		applyAssignWithFFI(fnName, env, st, symTab, tctx, opaqueTypes, report, emitted)
 
 	default:
 		// 对任何尚未接管的可执行/未知 CFG 操作一律快速失败，绝不静默跳过
@@ -356,8 +414,32 @@ func checkReadablePlace(fnName string, env funcEnv, place cfg.Place, useSpan dia
 		return false
 	}
 
-	canUninit, _, canMoved, moveSpans := targetState.summaryState()
+	canUninit, _, _, canMoved, canNonOwningCopy, aliasRoots, moveSpans := targetState.summaryOwnership()
 	if !canUninit && !canMoved {
+		if canNonOwningCopy {
+			for _, ar := range aliasRoots {
+				if srcState := env[ar]; srcState != nil {
+					_, _, srcMoved, srcMoveSpans := srcState.summaryState()
+					if srcMoved {
+						if report != nil {
+							hint := ""
+							if len(srcMoveSpans) > 0 {
+								hint = fmt.Sprintf("（原所有权已于第 %d 行第 %d 列移出）", srcMoveSpans[0].Start.Line, srcMoveSpans[0].Start.Column)
+							}
+							emitUniqueDiag(report, emitted, diagnostic.Diagnostic{
+								Code:        "WON-MEM-001",
+								Severity:    "error",
+								Message:     fmt.Sprintf("使用底层资源已被移出的裸指针别名 '%s'%s", disp, hint),
+								File:        useSpan.File,
+								Span:        useSpan,
+								Explanation: "原持有所有权的指针/句柄已通过移动或 FFI @owned 移交失效，不能继续通过此前复制出的裸指针别名访问或移交该资源。",
+							})
+						}
+						return false
+					}
+				}
+			}
+		}
 		return true
 	}
 
@@ -429,6 +511,12 @@ func applyMove(fnName string, env funcEnv, place cfg.Place, moveSpan diagnostic.
 }
 
 func applyAssign(fnName string, env funcEnv, place cfg.Place, assignSpan diagnostic.Span, symTab *symbols.Table, tctx *types.Context, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
+	applyAssignWithFFI(fnName, env, cfg.Statement{Kind: cfg.OpAssign, Place: place, Span: assignSpan}, symTab, tctx, nil, report, emitted)
+}
+
+func applyAssignWithFFI(fnName string, env funcEnv, st cfg.Statement, symTab *symbols.Table, tctx *types.Context, opaqueTypes map[string]bindgen.FFIReturnContract, report *diagnostic.Report, emitted map[diagDedupKey]bool) {
+	place := st.Place
+	assignSpan := st.Span
 	if place.RootSymID == 0 || symTab.ByID[place.RootSymID] == nil {
 		emitInternalViolation(fnName, assignSpan, place, "赋值操作指向无效或缺失符号", report, emitted)
 		return
@@ -439,6 +527,8 @@ func applyAssign(fnName string, env funcEnv, place cfg.Place, assignSpan diagnos
 		emitInternalViolation(fnName, assignSpan, place, "赋值操作对应的根存储绑定在 CFG 中未预先声明", report, emitted)
 		return
 	}
+
+	isCopyAlias := st.CopyPlace.RootSymID != 0 && isTrackableRawCopy(st.Type, st.CopyPlace, tctx, symTab, opaqueTypes)
 
 	// 1. 简单整变量赋值 x = val
 	if len(place.Projections) == 0 {
@@ -476,7 +566,11 @@ func applyAssign(fnName string, env funcEnv, place cfg.Place, assignSpan diagnos
 				}
 			}
 		}
-		rootState.markInit()
+		if isCopyAlias {
+			rootState.markNonOwningCopy(collectCopyAliasRoots(env, st.CopyPlace))
+		} else {
+			rootState.markInit()
+		}
 		return
 	}
 
@@ -497,7 +591,77 @@ func applyAssign(fnName string, env funcEnv, place cfg.Place, assignSpan diagnos
 		emitInternalViolation(fnName, assignSpan, place, err.Error(), report, emitted)
 		return
 	}
-	target.markInit()
+	if isCopyAlias {
+		target.markNonOwningCopy(collectCopyAliasRoots(env, st.CopyPlace))
+	} else {
+		target.markInit()
+	}
+}
+
+func collectCopyAliasRoots(env funcEnv, copyPlace cfg.Place) map[symbols.SymbolID]bool {
+	roots := make(map[symbols.SymbolID]bool)
+	if copyPlace.RootSymID == 0 {
+		return roots
+	}
+	if src := env[copyPlace.RootSymID]; src != nil && len(src.CopyAliasRoots) > 0 {
+		for k := range src.CopyAliasRoots {
+			roots[k] = true
+		}
+	}
+	roots[copyPlace.RootSymID] = true
+	return roots
+}
+
+func isTrackableRawCopy(tid types.TypeID, copyPlace cfg.Place, tctx *types.Context, symTab *symbols.Table, opaqueTypes map[string]bindgen.FFIReturnContract) bool {
+	if tctx == nil {
+		return false
+	}
+	if tid == types.Invalid {
+		tid = copyPlace.ElemType
+	}
+	if tid == types.Invalid {
+		return false
+	}
+	return typeContainsRawPtrOrOpaque(tid, tctx, symTab, opaqueTypes, make(map[types.TypeID]bool, 4))
+}
+
+func typeContainsRawPtrOrOpaque(tid types.TypeID, tctx *types.Context, symTab *symbols.Table, opaqueTypes map[string]bindgen.FFIReturnContract, visited map[types.TypeID]bool) bool {
+	if tid == types.Invalid || tctx == nil || visited[tid] {
+		return false
+	}
+	visited[tid] = true
+	info := tctx.Info(tid)
+	switch info.Kind {
+	case types.KindRawPtr:
+		return true
+	case types.KindStruct:
+		if symTab != nil {
+			if sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]; sym != nil {
+				if len(opaqueTypes) > 0 {
+					if ot, ok := opaqueTypes[sym.Name]; ok && (ot.Ownership == bindgen.FFIOpaqueHandle || ot.Ownership == bindgen.FFIOwnedReturn) {
+						return true
+					}
+				}
+				for _, f := range sym.Fields {
+					if typeContainsRawPtrOrOpaque(f.Type, tctx, symTab, opaqueTypes, visited) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	case types.KindArray:
+		return typeContainsRawPtrOrOpaque(info.Elem, tctx, symTab, opaqueTypes, visited)
+	case types.KindTuple:
+		for _, el := range info.Elems {
+			if typeContainsRawPtrOrOpaque(el, tctx, symTab, opaqueTypes, visited) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 // resolveFieldState 基于惰性单层展开策略沿着字段路径向下定位精确 PlaceState，不存在任何硬编码深度限制。

@@ -13,15 +13,18 @@ import (
 )
 
 // PlaceState 采用有限子集格精确追踪绑定或其子字段在合并控制流后可能处于的所有状态，
-// 从而在控制流合流点严格保留“可能未初始化”与“可能已移动”的区分。
+// 从而在控制流合流点严格保留“可能未初始化”、“可能已移动”与“非拥有裸指针副本”的区分。
 type PlaceState struct {
-	CanBeUninit bool
-	CanBeInit   bool
-	CanBeMoved  bool
-	MoveSpans   []diagnostic.Span
-	DeclSpan    diagnostic.Span
-	Type        types.TypeID
-	Fields      map[string]*PlaceState
+	CanBeUninit        bool
+	CanBeInit          bool
+	CanBeOwned         bool
+	CanBeMoved         bool
+	CanBeNonOwningCopy bool
+	CopyAliasRoots     map[symbols.SymbolID]bool
+	MoveSpans          []diagnostic.Span
+	DeclSpan           diagnostic.Span
+	Type               types.TypeID
+	Fields             map[string]*PlaceState
 }
 
 type funcEnv map[symbols.SymbolID]*PlaceState
@@ -30,6 +33,7 @@ func newPlaceState(t types.TypeID, declSpan diagnostic.Span, initNow bool) *Plac
 	return &PlaceState{
 		CanBeUninit: !initNow,
 		CanBeInit:   initNow,
+		CanBeOwned:  initNow,
 		DeclSpan:    declSpan,
 		Type:        t,
 	}
@@ -38,11 +42,16 @@ func newPlaceState(t types.TypeID, declSpan diagnostic.Span, initNow bool) *Plac
 // uniformChild 根据父节点当前的统一状态构造尚未惰性展开的子字段状态快照。
 func (ps *PlaceState) uniformChild(fieldType types.TypeID) *PlaceState {
 	child := &PlaceState{
-		CanBeUninit: ps.CanBeUninit,
-		CanBeInit:   ps.CanBeInit,
-		CanBeMoved:  ps.CanBeMoved,
-		DeclSpan:    ps.DeclSpan,
-		Type:        fieldType,
+		CanBeUninit:        ps.CanBeUninit,
+		CanBeInit:          ps.CanBeInit,
+		CanBeOwned:         ps.CanBeOwned,
+		CanBeMoved:         ps.CanBeMoved,
+		CanBeNonOwningCopy: ps.CanBeNonOwningCopy,
+		DeclSpan:           ps.DeclSpan,
+		Type:               fieldType,
+	}
+	if len(ps.CopyAliasRoots) > 0 {
+		child.CopyAliasRoots = cloneSymSet(ps.CopyAliasRoots)
 	}
 	if len(ps.MoveSpans) > 0 {
 		child.MoveSpans = make([]diagnostic.Span, len(ps.MoveSpans))
@@ -102,6 +111,11 @@ func (ps *PlaceState) SummaryState() (canUninit, canInit, canMoved bool, moveSpa
 	return ps.summaryState()
 }
 
+// SummaryOwnership 汇总节点及子树的可达拥有权、非拥有副本标记及别名源集合，供 Drop 与 FFI 转移消费。
+func (ps *PlaceState) SummaryOwnership() (canUninit, canInit, canOwned, canMoved, canNonOwningCopy bool, aliasRoots []symbols.SymbolID, moveSpans []diagnostic.Span) {
+	return ps.summaryOwnership()
+}
+
 // ExpandDirectFields 对结构体节点惰性展开一层直接字段状态，供外部状态求解器共享使用。
 func (ps *PlaceState) ExpandDirectFields(symTab *symbols.Table, tctx *types.Context) error {
 	return ps.expandDirectFields(symTab, tctx)
@@ -112,11 +126,16 @@ func (ps *PlaceState) clone() *PlaceState {
 		return nil
 	}
 	cp := &PlaceState{
-		CanBeUninit: ps.CanBeUninit,
-		CanBeInit:   ps.CanBeInit,
-		CanBeMoved:  ps.CanBeMoved,
-		DeclSpan:    ps.DeclSpan,
-		Type:        ps.Type,
+		CanBeUninit:        ps.CanBeUninit,
+		CanBeInit:          ps.CanBeInit,
+		CanBeOwned:         ps.CanBeOwned,
+		CanBeMoved:         ps.CanBeMoved,
+		CanBeNonOwningCopy: ps.CanBeNonOwningCopy,
+		DeclSpan:           ps.DeclSpan,
+		Type:               ps.Type,
+	}
+	if len(ps.CopyAliasRoots) > 0 {
+		cp.CopyAliasRoots = cloneSymSet(ps.CopyAliasRoots)
 	}
 	if len(ps.MoveSpans) > 0 {
 		cp.MoveSpans = make([]diagnostic.Span, len(ps.MoveSpans))
@@ -147,48 +166,85 @@ func (ps *PlaceState) markMoved(span diagnostic.Span) {
 	}
 	ps.CanBeUninit = false
 	ps.CanBeInit = false
+	ps.CanBeOwned = false
+	ps.CanBeNonOwningCopy = false
 	ps.CanBeMoved = true
+	ps.CopyAliasRoots = nil
 	ps.MoveSpans = appendUniqueSpan(ps.MoveSpans, span)
 	for _, f := range ps.Fields {
 		f.markMoved(span)
 	}
 }
 
-// markInit 将当前节点及其全部子字段恢复为明确已初始化状态。
+// markInit 将当前节点及其全部子字段恢复为明确已初始化且具备所有权的状态。
 func (ps *PlaceState) markInit() {
 	if ps == nil {
 		return
 	}
 	ps.CanBeUninit = false
 	ps.CanBeInit = true
+	ps.CanBeOwned = true
+	ps.CanBeNonOwningCopy = false
 	ps.CanBeMoved = false
+	ps.CopyAliasRoots = nil
 	ps.MoveSpans = nil
 	for _, f := range ps.Fields {
 		f.markInit()
 	}
 }
 
-// summaryState 迭代/递归汇总节点的精确可达状态；
-// 对已展开子字段的聚合体，采用确定性键序汇总全部直接子字段（含自身层），禁止遗漏深层局部移动。
-func (ps *PlaceState) summaryState() (canUninit, canInit, canMoved bool, moveSpans []diagnostic.Span) {
+// markNonOwningCopy 将当前节点标记为通过裸指针/句柄 Copy 得到的非拥有别名，不允许自动释放或 @owned 移交。
+func (ps *PlaceState) markNonOwningCopy(roots map[symbols.SymbolID]bool) {
 	if ps == nil {
-		return false, false, false, nil
+		return
+	}
+	ps.CanBeUninit = false
+	ps.CanBeInit = true
+	ps.CanBeOwned = false
+	ps.CanBeNonOwningCopy = true
+	ps.CanBeMoved = false
+	ps.MoveSpans = nil
+	ps.CopyAliasRoots = cloneSymSet(roots)
+	for _, f := range ps.Fields {
+		f.markNonOwningCopy(roots)
+	}
+}
+
+func (ps *PlaceState) summaryState() (canUninit, canInit, canMoved bool, moveSpans []diagnostic.Span) {
+	canUninit, canInit, _, canMoved, _, _, moveSpans = ps.summaryOwnership()
+	return canUninit, canInit, canMoved, moveSpans
+}
+
+// summaryOwnership 迭代/递归汇总节点的精确可达初始化、所有权、移动与裸指针别名状态。
+func (ps *PlaceState) summaryOwnership() (canUninit, canInit, canOwned, canMoved, canNonOwningCopy bool, aliasRoots []symbols.SymbolID, moveSpans []diagnostic.Span) {
+	if ps == nil {
+		return false, false, false, false, false, nil, nil
 	}
 	if len(ps.Fields) == 0 {
-		return ps.CanBeUninit, ps.CanBeInit, ps.CanBeMoved, ps.MoveSpans
+		return ps.CanBeUninit, ps.CanBeInit, ps.CanBeOwned, ps.CanBeMoved, ps.CanBeNonOwningCopy, sortedSymIDs(ps.CopyAliasRoots), ps.MoveSpans
 	}
 	allInit := true
 	anyInit := false
+	rootSet := make(map[symbols.SymbolID]bool)
 	keys := make([]string, 0, len(ps.Fields))
 	for k := range ps.Fields {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		u, i, m, ms := ps.Fields[k].summaryState()
+		u, i, o, m, noc, ars, ms := ps.Fields[k].summaryOwnership()
 		if u {
 			canUninit = true
 			allInit = false
+		}
+		if o {
+			canOwned = true
+		}
+		if noc {
+			canNonOwningCopy = true
+		}
+		for _, ar := range ars {
+			rootSet[ar] = true
 		}
 		if m {
 			canMoved = true
@@ -204,7 +260,7 @@ func (ps *PlaceState) summaryState() (canUninit, canInit, canMoved bool, moveSpa
 		}
 	}
 	canInit = allInit || (anyInit && (canUninit || canMoved))
-	return canUninit, canInit, canMoved, moveSpans
+	return canUninit, canInit, canOwned, canMoved, canNonOwningCopy, sortedSymIDs(rootSet), moveSpans
 }
 
 // joinPlaceState 按格上确界逐位合并两个状态；若仅一侧惰性展开了 Fields，
@@ -217,11 +273,22 @@ func joinPlaceState(a, b *PlaceState) *PlaceState {
 		return a.clone()
 	}
 	res := &PlaceState{
-		CanBeUninit: a.CanBeUninit || b.CanBeUninit,
-		CanBeInit:   a.CanBeInit || b.CanBeInit,
-		CanBeMoved:  a.CanBeMoved || b.CanBeMoved,
-		DeclSpan:    a.DeclSpan,
-		Type:        a.Type,
+		CanBeUninit:        a.CanBeUninit || b.CanBeUninit,
+		CanBeInit:          a.CanBeInit || b.CanBeInit,
+		CanBeOwned:         a.CanBeOwned || b.CanBeOwned,
+		CanBeMoved:         a.CanBeMoved || b.CanBeMoved,
+		CanBeNonOwningCopy: a.CanBeNonOwningCopy || b.CanBeNonOwningCopy,
+		DeclSpan:           a.DeclSpan,
+		Type:               a.Type,
+	}
+	if len(a.CopyAliasRoots) > 0 || len(b.CopyAliasRoots) > 0 {
+		res.CopyAliasRoots = make(map[symbols.SymbolID]bool, len(a.CopyAliasRoots)+len(b.CopyAliasRoots))
+		for k := range a.CopyAliasRoots {
+			res.CopyAliasRoots[k] = true
+		}
+		for k := range b.CopyAliasRoots {
+			res.CopyAliasRoots[k] = true
+		}
 	}
 	if res.DeclSpan.Start.Line == 0 {
 		res.DeclSpan = b.DeclSpan
@@ -288,7 +355,12 @@ func equalPlaceState(a, b *PlaceState) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	if a.CanBeUninit != b.CanBeUninit || a.CanBeInit != b.CanBeInit || a.CanBeMoved != b.CanBeMoved {
+	if a.CanBeUninit != b.CanBeUninit || a.CanBeInit != b.CanBeInit ||
+		a.CanBeOwned != b.CanBeOwned || a.CanBeMoved != b.CanBeMoved ||
+		a.CanBeNonOwningCopy != b.CanBeNonOwningCopy {
+		return false
+	}
+	if !equalSymSets(a.CopyAliasRoots, b.CopyAliasRoots) {
 		return false
 	}
 	if !equalSpanSlices(a.MoveSpans, b.MoveSpans) {
@@ -324,6 +396,41 @@ func equalPlaceState(a, b *PlaceState) bool {
 		}
 	}
 	return true
+}
+
+func cloneSymSet(src map[symbols.SymbolID]bool) map[symbols.SymbolID]bool {
+	if len(src) == 0 {
+		return nil
+	}
+	cp := make(map[symbols.SymbolID]bool, len(src))
+	for k := range src {
+		cp[k] = true
+	}
+	return cp
+}
+
+func equalSymSets(a, b map[symbols.SymbolID]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedSymIDs(m map[symbols.SymbolID]bool) []symbols.SymbolID {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]symbols.SymbolID, 0, len(m))
+	for id := range m {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 func equalSpanSlices(a, b []diagnostic.Span) bool {

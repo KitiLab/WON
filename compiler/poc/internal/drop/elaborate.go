@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
 	"github.com/KitiLab/WON/compiler/poc/internal/borrow"
 	"github.com/KitiLab/WON/compiler/poc/internal/cfg"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
@@ -24,8 +25,22 @@ func ElaborateProgram(progCFG *cfg.ProgramCFG, view cfg.SemanticView, reg *Resou
 		}
 		return &DropElaboratedProgram{DropElaborated: false}
 	}
-
 	cloned := CloneProgramCFG(progCFG)
+	return elaborateStagedProgramWithFFI(cloned, view, reg, nil, report)
+}
+
+func elaborateStagedProgramWithFFI(cloned *cfg.ProgramCFG, view cfg.SemanticView, reg *ResourceRegistry, opaqueTypes map[string]bindgen.FFIReturnContract, report *diagnostic.Report) *DropElaboratedProgram {
+	if cloned == nil || view == nil || view.GetTypes() == nil || view.GetSymbols() == nil {
+		if report != nil {
+			report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:     "WON-INT-001",
+				Severity: "error",
+				Message:  "Drop Elaboration 缺乏有效的 CFG 或语义视图上下文，按 Fail-Closed 策略拒绝认证",
+			})
+		}
+		return &DropElaboratedProgram{DropElaborated: false}
+	}
+
 	cc := NewClassifyContext(view.GetTypes(), view.GetSymbols(), reg)
 
 	res := &DropElaboratedProgram{
@@ -40,12 +55,12 @@ func ElaborateProgram(progCFG *cfg.ProgramCFG, view cfg.SemanticView, reg *Resou
 		if fn == nil {
 			continue
 		}
-		trace, ok := borrow.SolveMoveInitTrace(fn, view, report)
+		trace, ok := borrow.SolveMoveInitTraceWithFFI(fn, view, opaqueTypes, report)
 		if !ok || trace == nil {
 			allOK = false
 			continue
 		}
-		df, fnOK := elaborateFunc(fn, trace, cc, view, report)
+		df, fnOK := elaborateFunc(fn, trace, cc, view, opaqueTypes, report)
 		if fn.FuncSym != nil {
 			res.Functions[fn.FuncSym.ID] = df
 		}
@@ -69,20 +84,21 @@ func ElaborateProgram(progCFG *cfg.ProgramCFG, view cfg.SemanticView, reg *Resou
 }
 
 type funcElaborator struct {
-	fn        *cfg.FuncCFG
-	trace     *borrow.MoveInitTrace
-	cc        *ClassifyContext
-	view      cfg.SemanticView
-	symTab    *symbols.Table
-	tctx      *types.Context
-	report    *diagnostic.Report
-	df        *DropElaboratedFunc
-	flagByKey map[string]DropFlagID
-	nextFlag  uint32
-	hadError  bool
+	fn          *cfg.FuncCFG
+	trace       *borrow.MoveInitTrace
+	cc          *ClassifyContext
+	view        cfg.SemanticView
+	symTab      *symbols.Table
+	tctx        *types.Context
+	opaqueTypes map[string]bindgen.FFIReturnContract
+	report      *diagnostic.Report
+	df          *DropElaboratedFunc
+	flagByKey   map[string]DropFlagID
+	nextFlag    uint32
+	hadError    bool
 }
 
-func elaborateFunc(fn *cfg.FuncCFG, trace *borrow.MoveInitTrace, cc *ClassifyContext, view cfg.SemanticView, report *diagnostic.Report) (*DropElaboratedFunc, bool) {
+func elaborateFunc(fn *cfg.FuncCFG, trace *borrow.MoveInitTrace, cc *ClassifyContext, view cfg.SemanticView, opaqueTypes map[string]bindgen.FFIReturnContract, report *diagnostic.Report) (*DropElaboratedFunc, bool) {
 	var symID symbols.SymbolID
 	if fn.FuncSym != nil {
 		symID = fn.FuncSym.ID
@@ -95,15 +111,16 @@ func elaborateFunc(fn *cfg.FuncCFG, trace *borrow.MoveInitTrace, cc *ClassifyCon
 		FFIContracts: make(map[cfg.ProgramPoint]string),
 	}
 	el := &funcElaborator{
-		fn:        fn,
-		trace:     trace,
-		cc:        cc,
-		view:      view,
-		symTab:    view.GetSymbols(),
-		tctx:      view.GetTypes(),
-		report:    report,
-		df:        df,
-		flagByKey: make(map[string]DropFlagID),
+		fn:          fn,
+		trace:       trace,
+		cc:          cc,
+		view:        view,
+		symTab:      view.GetSymbols(),
+		tctx:        view.GetTypes(),
+		opaqueTypes: opaqueTypes,
+		report:      report,
+		df:          df,
+		flagByKey:   make(map[string]DropFlagID),
 	}
 
 	// 预先判定该函数各基本块路径上是否经由 rootScope(ScopeID==1) 退出（标准函数均有 rootScope，独立构建单测可能省略）
@@ -157,7 +174,7 @@ func elaborateFunc(fn *cfg.FuncCFG, trace *borrow.MoveInitTrace, cc *ClassifyCon
 				outStmts = append(outStmts, st)
 			}
 
-			borrow.StepStatement(fn.Name, env, st, view)
+			borrow.StepStatementWithFFI(fn.Name, env, st, view, el.opaqueTypes)
 
 			// 标准函数体在 ScopeID==1 的 OpScopeExit 后、TermReturn / goto exit 前清理按值参数（确保体部局部变量先于参数析构）
 			if st.Kind == cfg.OpScopeExit && st.ScopeID == 1 && len(ownedParams) > 0 {
@@ -307,9 +324,9 @@ func (el *funcElaborator) emitCleanupForState(place cfg.Place, ps *borrow.PlaceS
 		return nil
 	}
 
-	canUninit, canInit, canMoved, _ := ps.SummaryState()
-	if !canInit {
-		// 确定未初始化或确定已移动：严禁发出任何析构调用，也绝不分配冗余 DropFlag
+	canUninit, canInit, canOwned, canMoved, canNonOwningCopy, _, _ := ps.SummaryOwnership()
+	if !canInit || !canOwned {
+		// 确定未初始化、确定已移动或非拥有裸指针副本：严禁发出任何析构调用，也绝不分配冗余 DropFlag
 		return nil
 	}
 
@@ -320,8 +337,8 @@ func (el *funcElaborator) emitCleanupForState(place cfg.Place, ps *borrow.PlaceS
 			return nil
 		}
 		if info.Kind == types.KindStruct {
-			// 若各已展开字段全部一致处于确定 Init 状态，整体发出单一 OpDrop，避免无意义碎裂
-			if !canUninit && !canMoved {
+			// 若各已展开字段全部一致处于确定 Init 拥有状态，整体发出单一 OpDrop，避免无意义碎裂
+			if !canUninit && !canMoved && !canNonOwningCopy {
 				glue, need := el.cc.ResolveDropGlue(tid)
 				if need && glue != nil {
 					return []cfg.Statement{{
@@ -380,7 +397,7 @@ func (el *funcElaborator) emitCleanupForState(place cfg.Place, ps *borrow.PlaceS
 		return nil
 	}
 
-	if canInit && !canUninit && !canMoved {
+	if canOwned && !canUninit && !canMoved && !canNonOwningCopy {
 		return []cfg.Statement{{
 			Kind:     cfg.OpDrop,
 			Place:    place,
@@ -450,13 +467,17 @@ func (el *funcElaborator) emitDropFlagEvents() {
 			pt := cfg.ProgramPoint{Block: blk.ID, StmtIdx: sIdx}
 			switch st.Kind {
 			case cfg.OpInitAssign, cfg.OpStorageDecl, cfg.OpAssign, cfg.OpReinit:
+				flagOp := FlagSetTrue
+				if st.CopyPlace.RootSymID != 0 && (borrow.IsTrackableRawCopy(st.Type, st.CopyPlace, el.tctx, el.symTab, el.opaqueTypes) || el.cc.NeedsDrop(st.Type)) {
+					flagOp = FlagSetFalse
+				}
 				for _, fid := range el.df.FlagOrder {
 					fm := el.df.Flags[fid]
 					if placeCoversFlag(st.Place, fm.Place) {
 						events = append(events, DropFlagEvent{
 							Point: pt,
 							Flag:  fid,
-							Op:    FlagSetTrue,
+							Op:    flagOp,
 							Place: fm.Place,
 							Span:  st.Span,
 						})

@@ -1,6 +1,9 @@
 package checker
 
 import (
+	"fmt"
+	"sort"
+
 	"github.com/KitiLab/WON/compiler/poc/internal/ast"
 	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
 	"github.com/KitiLab/WON/compiler/poc/internal/borrow"
@@ -64,20 +67,40 @@ func (c *Checker) CheckProgram(prog *ast.Program) *TypedProgram {
 	if !c.report.HasErrors() {
 		progCFG := cfg.BuildProgram(prog, c.typed, c.report)
 		c.typed.CFG = progCFG
-		if !c.report.HasErrors() {
-			borrow.AnalyzeProgram(progCFG, c.typed, c.report)
+		resReg := drop.NewResourceRegistry()
+		nsKeys := make([]string, 0, len(c.bindings))
+		for ns := range c.bindings {
+			nsKeys = append(nsKeys, ns)
 		}
-		if !c.report.HasErrors() {
-			resReg := drop.NewResourceRegistry()
-			var ffiCatalogs []*bindgen.FFIContractCatalog
-			for _, bm := range c.bindings {
-				if bm != nil && bm.Contracts != nil {
-					ffiCatalogs = append(ffiCatalogs, bm.Contracts)
-				}
+		sort.Strings(nsKeys)
+		var ffiCatalogs []*bindgen.FFIContractCatalog
+		for _, ns := range nsKeys {
+			bm := c.bindings[ns]
+			if bm != nil && bm.Contracts != nil {
+				ffiCatalogs = append(ffiCatalogs, bm.Contracts)
 			}
-			dropPlan := drop.ElaborateProgramWithFFI(progCFG, c.typed, resReg, ffiCatalogs, c.report)
-			c.typed.DropPlan = dropPlan
-			c.typed.DropElaborated = dropPlan != nil && dropPlan.DropElaborated && !c.report.HasErrors()
+		}
+		if len(ffiCatalogs) > 0 {
+			if err := bindgen.ValidateBindingContracts(c.bindings); err != nil {
+				c.report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:     "WON-INT-001",
+					Severity: "error",
+					Message:  fmt.Sprintf("FFI 所有权契约校验失败: %v", err),
+				})
+			} else if !c.report.HasErrors() {
+				dropPlan := drop.ElaborateProgramWithFFI(progCFG, c.typed, resReg, ffiCatalogs, c.report)
+				c.typed.DropPlan = dropPlan
+				c.typed.DropElaborated = dropPlan != nil && dropPlan.DropElaborated && !c.report.HasErrors()
+			}
+		} else {
+			if !c.report.HasErrors() {
+				borrow.AnalyzeProgram(progCFG, c.typed, c.report)
+			}
+			if !c.report.HasErrors() {
+				dropPlan := drop.ElaborateProgram(progCFG, c.typed, resReg, c.report)
+				c.typed.DropPlan = dropPlan
+				c.typed.DropElaborated = dropPlan != nil && dropPlan.DropElaborated && !c.report.HasErrors()
+			}
 		}
 		c.typed.OwnershipChecked = !c.report.HasErrors() && c.typed.DropElaborated
 	}

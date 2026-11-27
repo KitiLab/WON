@@ -257,7 +257,7 @@ func backwardTransferStmt(s *NLLState, st cfg.Statement) {
 			markPlaceLive(s, st.ParentPlace)
 		}
 
-	case cfg.OpRead, cfg.OpCopy, cfg.OpMove:
+	case cfg.OpRead, cfg.OpCopy, cfg.OpMove, cfg.OpFFITransfer:
 		if st.ValTemp != cfg.InvalidValue {
 			delete(s.Temps, st.ValTemp)
 		}
@@ -718,7 +718,7 @@ func checkStmtBorrowConflicts(
 			return
 		}
 
-	case cfg.OpMove:
+	case cfg.OpMove, cfg.OpFFITransfer:
 		if st.Place.RootSymID == 0 {
 			return
 		}
