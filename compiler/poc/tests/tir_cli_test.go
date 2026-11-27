@@ -93,4 +93,26 @@ fn main() -> i32:
 	if err == nil || !strings.Contains(string(buildOut), "WON-GEN-002") {
 		t.Fatalf("非 C11 子集程序 wonc build 必须维持 WON-GEN-002 阻断，实际 err=%v:\n%s", err, string(buildOut))
 	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "adt_drop.won.c")); statErr == nil {
+		t.Fatalf("WON-GEN-002 阻断后不得在磁盘生成 adt_drop.won.c")
+	}
+
+	// 3. Phase 2C.1: 验证 wonc build --emit-c 实际经由 TIR->C11 路径产出可执行文件及 C 文件
+	zlibOutBin := filepath.Join(tmpDir, "zlib_tir_bin")
+	buildZlibCmd := exec.Command(woncBin, "build", "--emit-c", "-o", zlibOutBin, zlibFile)
+	buildZlibCmd.Dir = tmpDir
+	if out, err := buildZlibCmd.CombinedOutput(); err != nil {
+		t.Fatalf("wonc build --emit-c zlib 失败: %v\n%s", err, string(out))
+	}
+	emittedCBytes, err := os.ReadFile(filepath.Join(tmpDir, "zlib_compression.won.c"))
+	if err != nil {
+		t.Fatalf("读取 --emit-c 产物失败: %v", err)
+	}
+	if !strings.Contains(string(emittedCBytes), "WON Phase 2C.1 TIR->C11") {
+		t.Fatalf("wonc build 未使用 TIR->C11 后端输出 C 代码:\n%s", string(emittedCBytes))
+	}
+	runZlibOut, err := exec.Command(zlibOutBin).CombinedOutput()
+	if err != nil || !strings.Contains(string(runZlibOut), "Zlib round-trip verification: PASS") {
+		t.Fatalf("TIR 构建的 zlib 可执行文件运行失败: err=%v\n%s", err, string(runZlibOut))
+	}
 }

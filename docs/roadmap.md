@@ -121,9 +121,10 @@ The implementation roadmap adheres to strict technical dependency ordering acros
     - *Objective*: Establish `internal/tir` (backend-neutral `TypeTable`, `Place`/`Projection`, explicit compute/ownership/call/Drop instructions, `TermBranchIf`/`TermSwitch`/`TermReturn`/`TermUnreachable` terminators, deterministic `Dump()`, independent `Verify()`), deterministic `TypedProgram + DropElaboratedProgram -> TIR` lowering (`internal/tir/lower`) via non-destructive CFG bridge metadata, and `wonc check` / `--dump-tir` integration while preserving `WON-GEN-002`.
     - *Deliverables*: `internal/tir/{ir,types,place,dump,verify}.go`, `internal/tir/lower/{lower,types}.go`, `internal/cfg/bridge.go`, [phase-2c.0-tir-foundation.md](compiler/phase-2c.0-tir-foundation.md), CLI, mutation, and fuzz suites (`FuzzTIRVerifyAndDump`, `FuzzFrontendToTIR`).
     - *Status*: `IMPLEMENTED` (Verified locally and via CLI checks; C11 TIR backend emission deferred to 2C.1).
-  - **2C.1 (TIR-Driven C11 Codegen, ADT Layout & Native Drop Execution)**:
-    - *Objective*: Switch `internal/codegen` to consume verified TIR (`C11Emitter`), emit ISO C11 code for structs/enums/`match`/reassignment/Drop glue execution, and retire direct AST-to-C translation.
-    - *Status*: `SPECIFIED` / `PLANNED`.
+  - **2C.1 (TIR-Driven C11 Codegen & Initial Native Drop Execution)**:
+    - *Objective*: Route `wonc build` / `wonc build --emit-c` strictly through verified TIR (`internal/codegen/c11`), enforce TIR-native `WON-GEN-002` capability gating, execute native `OpDrop`/`OpCondDrop`/`DropFlag` cleanup for contract-validated opaque foreign resources (`GlueForeignResource`), and mark legacy AST `internal/codegen` reference-only for differential testing.
+    - *Deliverables*: `internal/codegen/c11/{target,types,capabilities,emitter}.go`, [phase-2c.1-tir-c11-backend.md](compiler/phase-2c.1-tir-c11-backend.md), differential, GCC/Clang strict C11 resource-counter, CLI, and fuzz (`FuzzC11Emitter`) suites.
+    - *Status*: `IMPLEMENTED` (Verified for C11 subset & opaque foreign resource Drop; `String` allocator contract, user `struct`/`enum`/`match`/`?`/`for` layout lowering, and monomorphization remain `SPECIFIED`/`PLANNED` under `WON-GEN-002`).
 - **Separate Future Milestone — General Trait Solver & Structured Concurrency Safety (`scope` / `Send` / `Sync`)**:
   - *Objective*: User `trait` coherence, generic `Copy` conditional bounds, user `impl Drop`, `?` `From`/`Into` conversion (`WON-ERR-002`), auto-traits `Send`/`Sync`, and structured-concurrency task capture enforcement (`WON-CON-001`, Phase 3).
   - *Status*: `PLANNED` (Explicitly separated from Phase 2B core borrow checker).

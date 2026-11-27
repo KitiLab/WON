@@ -1,5 +1,5 @@
-// Package codegen 实现了从经过语义验证的 WON AST / TypedProgram 到严格 ISO C11 标准源码的生成器
-// 坚决剔除任何 GNU 语句表达式与非标准扩展，采用显式 fail-closed 类型映射、精确 Typed 整型常量宏与合法 C11 main ABI。
+// Package codegen 为 Phase 2A.2 遗留的参考 AST->C11 源码生成器（已于 Phase 2C.1 退出 wonc build 主链路）。
+// 仅保留供对照参考及历史差分测试使用；所有生产原生代码生成均已切换至基于 TIR 的 internal/codegen/c11。
 package codegen
 
 import (

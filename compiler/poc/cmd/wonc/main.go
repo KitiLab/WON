@@ -3,6 +3,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -12,10 +13,11 @@ import (
 	"github.com/KitiLab/WON/compiler/poc/internal/ast"
 	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
 	"github.com/KitiLab/WON/compiler/poc/internal/checker"
-	"github.com/KitiLab/WON/compiler/poc/internal/codegen"
+	"github.com/KitiLab/WON/compiler/poc/internal/codegen/c11"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
 	"github.com/KitiLab/WON/compiler/poc/internal/lexer"
 	"github.com/KitiLab/WON/compiler/poc/internal/parser"
+	"github.com/KitiLab/WON/compiler/poc/internal/tir"
 	"github.com/KitiLab/WON/compiler/poc/internal/tir/lower"
 	"github.com/KitiLab/WON/compiler/poc/internal/toolchain"
 )
@@ -311,51 +313,63 @@ func runBuild(args []string) {
 
 	enforceOwnershipCheckedGate(report, typedProg, srcFile, prog.GetSpan(), "拒绝生成 C11 代码")
 
+	var tirProg *tir.Program
 	if !report.HasErrors() && typedProg != nil {
-		if _, tirErr := lower.LowerProgram(typedProg, bindings); tirErr != nil {
+		var tirErr error
+		tirProg, tirErr = lower.LowerProgram(typedProg, bindings)
+		if tirErr != nil {
 			report.AddDiagnostic(diagnostic.Diagnostic{
 				Code:        "WON-INT-001",
 				Severity:    "error",
 				Message:     fmt.Sprintf("TIR 降级或结构验证失败: %v", tirErr),
 				File:        srcFile,
 				Span:        prog.GetSpan(),
-				Explanation: "Phase 2C.0 保持参考 AST->C11 生成路径的同时，强制要求通过后端无关 TIR 构建与结构验证。",
+				Explanation: "Phase 2C.1 强制要求所有原生构建经由后端无关 TIR 降级与结构验证。",
 			})
 		}
 	}
 
-	if !report.HasErrors() && typedProg != nil && !typedProg.CodegenSupported {
-		report.AddDiagnostic(diagnostic.Diagnostic{
-			Code:        "WON-GEN-002",
-			Severity:    "error",
-			Message:     typedProg.UnsupportedReason,
-			File:        srcFile,
-			Span:        typedProg.UnsupportedCodegen,
-			Explanation: "当前代码生成器仅覆盖 Phase 0B/1B 基准 C11 子集；请使用 wonc check 验证完整 Phase 2A 语义。",
-		})
+	// 2. 通过纯 TIR 驱动的 C11 后端执行能力校验并生成 ISO C11 源码（严禁回退至旧 AST 发射路径）
+	var cSource string
+	if !report.HasErrors() {
+		em := c11.NewEmitter(c11.DefaultLinuxX86_64())
+		var emitErr error
+		cSource, emitErr = em.Emit(tirProg)
+		if emitErr != nil {
+			var capErr *c11.CapabilityError
+			if errors.As(emitErr, &capErr) {
+				errSpan := prog.GetSpan()
+				if capErr.TIRSpan.StartLine > 0 {
+					errSpan = diagnostic.Span{
+						File:  capErr.TIRSpan.File,
+						Start: diagnostic.Position{Line: capErr.TIRSpan.StartLine, Column: capErr.TIRSpan.StartCol, Byte: capErr.TIRSpan.StartByte},
+						End:   diagnostic.Position{Line: capErr.TIRSpan.EndLine, Column: capErr.TIRSpan.EndCol, Byte: capErr.TIRSpan.EndByte},
+					}
+				}
+				if errSpan.File == "" {
+					errSpan.File = srcFile
+				}
+				report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:        capErr.Code,
+					Severity:    "error",
+					Message:     capErr.Message,
+					File:        errSpan.File,
+					Span:        errSpan,
+					Explanation: capErr.Explanation,
+				})
+			} else {
+				report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:     "WON-GEN-001",
+					Severity: "error",
+					Message:  emitErr.Error(),
+					File:     srcFile,
+					Span:     prog.GetSpan(),
+				})
+			}
+		}
 	}
 
 	if report.HasErrors() {
-		if *format == "json" {
-			jsonStr, _ := report.ToJSON()
-			fmt.Println(jsonStr)
-		} else {
-			fmt.Print(report.String())
-		}
-		os.Exit(1)
-	}
-
-	// 2. 生成 C 代码
-	gen := codegen.NewTyped(prog, typedProg, bindings)
-	cSource, err := gen.Generate()
-	if err != nil {
-		report.AddDiagnostic(diagnostic.Diagnostic{
-			Code:     "WON-GEN-001",
-			Severity: "error",
-			Message:  err.Error(),
-			File:     srcFile,
-			Span:     prog.GetSpan(),
-		})
 		if *format == "json" {
 			jsonStr, _ := report.ToJSON()
 			fmt.Println(jsonStr)
