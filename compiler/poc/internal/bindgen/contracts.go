@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"sort"
 	"strings"
 )
@@ -105,6 +106,9 @@ type FFIFuncContract struct {
 	Return          FFIReturnContract  `json:"return"`
 }
 
+// SupportedFFIContractSchemaVersion 定义当前编译器唯一支持的 FFI 所有权契约清单格式版本号。
+const SupportedFFIContractSchemaVersion = "1.0"
+
 // FFIContractCatalog 是与 Clang C 头文件元数据正交的旁路 FFI 所有权契约清单模型（供 .wonbind JSON 旁路集成）。
 type FFIContractCatalog struct {
 	SchemaVersion string                       `json:"schema_version"`
@@ -112,6 +116,55 @@ type FFIContractCatalog struct {
 	Namespace     string                       `json:"namespace"`
 	OpaqueTypes   map[string]FFIReturnContract `json:"opaque_types,omitempty"`
 	Functions     map[string]FFIFuncContract   `json:"functions,omitempty"`
+}
+
+// CanonicalizeFFIHeaderPath 对 FFI 契约与 C 绑定元数据中的头文件标识执行纯词法校验与规范化（不访问文件系统或解析符号链接）。
+func CanonicalizeFFIHeaderPath(raw string) (string, error) {
+	if raw == "" || strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("FFI 所有权契约缺少 header_path 头文件标识")
+	}
+	if strings.TrimSpace(raw) != raw {
+		return "", fmt.Errorf("FFI 头文件标识 %q 包含前导或尾随空白字符", raw)
+	}
+	if strings.HasSuffix(raw, "/") {
+		return "", fmt.Errorf("FFI 头文件标识 %q 不能以斜杠结尾", raw)
+	}
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("FFI 头文件标识 %q 包含非法控制字符", raw)
+		}
+		switch r {
+		case '\\', '<', '>', '"':
+			return "", fmt.Errorf("FFI 头文件标识 %q 包含非法字符 %q", raw, r)
+		}
+	}
+	for _, seg := range strings.Split(raw, "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("FFI 头文件标识 %q 禁止包含父目录跳转段 '..'", raw)
+		}
+	}
+	cleaned := path.Clean(raw)
+	if cleaned == "" || cleaned == "." || cleaned == "/" || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("FFI 头文件标识 %q 规范化后无效 (%q)", raw, cleaned)
+	}
+	return cleaned, nil
+}
+
+// ValidateEnvelope 校验 FFI 所有权契约清单的外层信封元数据（schema_version 与 header_path）。
+func (c *FFIContractCatalog) ValidateEnvelope() error {
+	if c == nil {
+		return fmt.Errorf("FFI 所有权契约清单为空")
+	}
+	if c.SchemaVersion != SupportedFFIContractSchemaVersion {
+		if strings.TrimSpace(c.SchemaVersion) == "" {
+			return fmt.Errorf("FFI 所有权契约缺少 schema_version（当前仅支持 %q）", SupportedFFIContractSchemaVersion)
+		}
+		return fmt.Errorf("不支持的 FFI 所有权契约 schema_version %q（当前仅支持 %q）", c.SchemaVersion, SupportedFFIContractSchemaVersion)
+	}
+	if _, err := CanonicalizeFFIHeaderPath(c.HeaderPath); err != nil {
+		return err
+	}
+	return nil
 }
 
 func isValidFFIIdent(s string) bool {
@@ -157,10 +210,10 @@ func ensureEOF(dec *json.Decoder) error {
 	return nil
 }
 
-// Validate 对外部加载或构建的 FFI 所有权契约执行严格一致性校验，缺失释放函数、未知形态、越界下标或矛盾借用关系按 Fail-Closed 报错。
+// Validate 对外部加载或构建的 FFI 所有权契约执行严格一致性校验，缺失版本/头文件标识、缺失释放函数、未知形态、越界下标或矛盾借用关系按 Fail-Closed 报错。
 func (c *FFIContractCatalog) Validate() error {
-	if c == nil {
-		return fmt.Errorf("FFI 所有权契约清单为空")
+	if err := c.ValidateEnvelope(); err != nil {
+		return err
 	}
 	if !isValidFFIIdent(c.Namespace) {
 		return fmt.Errorf("FFI 所有权契约缺少合法 namespace 声明 (%q)", c.Namespace)
@@ -313,10 +366,11 @@ func (c *FFIContractCatalog) Validate() error {
 	return nil
 }
 
-// IndexValidatedFFIContracts 校验并汇总多份 FFI 契约目录，按确定性键序检测重复或相互矛盾的函数与不透明类型声明。
+// IndexValidatedFFIContracts 校验并汇总多份 FFI 契约目录，按确定性键序检测重复、跨目录头文件不一致或相互矛盾的函数与不透明类型声明。
 func IndexValidatedFFIContracts(catalogs []*FFIContractCatalog) (map[string]FFIFuncContract, map[string]FFIReturnContract, error) {
 	fnOut := make(map[string]FFIFuncContract)
 	opaqueOut := make(map[string]FFIReturnContract)
+	nsHeaders := make(map[string]string)
 
 	for _, cat := range catalogs {
 		if cat == nil {
@@ -325,6 +379,14 @@ func IndexValidatedFFIContracts(catalogs []*FFIContractCatalog) (map[string]FFIF
 		if err := cat.Validate(); err != nil {
 			return nil, nil, err
 		}
+		canonHeader, err := CanonicalizeFFIHeaderPath(cat.HeaderPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		if prevHeader, exists := nsHeaders[cat.Namespace]; exists && prevHeader != canonHeader {
+			return nil, nil, fmt.Errorf("命名空间 '%s' 的多个 FFI 契约目录声明了不一致的头文件标识 %q 与 %q", cat.Namespace, prevHeader, canonHeader)
+		}
+		nsHeaders[cat.Namespace] = canonHeader
 
 		otKeys := make([]string, 0, len(cat.OpaqueTypes))
 		for k := range cat.OpaqueTypes {
@@ -386,6 +448,17 @@ func ValidateBindingContracts(bindings map[string]*BindingMeta) error {
 		}
 		if bm.Contracts.Namespace != ns {
 			return fmt.Errorf("命名空间 '%s' 绑定的 FFI 契约声明了不匹配的 namespace '%s'", ns, bm.Contracts.Namespace)
+		}
+		canonCatalogHeader, err := CanonicalizeFFIHeaderPath(bm.Contracts.HeaderPath)
+		if err != nil {
+			return err
+		}
+		canonBindingHeader, err := CanonicalizeFFIHeaderPath(bm.HeaderPath)
+		if err != nil {
+			return fmt.Errorf("命名空间 '%s' 的 C 绑定头文件标识非法: %w", ns, err)
+		}
+		if canonCatalogHeader != canonBindingHeader {
+			return fmt.Errorf("命名空间 '%s' 的 FFI 契约头文件标识 %q 与绑定头文件 %q 不一致", ns, canonCatalogHeader, canonBindingHeader)
 		}
 		for fnName, fc := range bm.Contracts.Functions {
 			if fnSig, exists := bm.Functions[fnName]; exists {

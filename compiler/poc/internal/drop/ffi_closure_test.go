@@ -666,7 +666,9 @@ func TestPhase2B3_1_OwnershipTransferAcrossBlocksJoinsLoops(t *testing.T) {
 					"peek_buf": {Name: "peek_buf", ReturnType: "void", ParamTypes: []string{"const unsigned char *"}},
 				},
 				Contracts: &bindgen.FFIContractCatalog{
-					Namespace: "mem",
+					SchemaVersion: bindgen.SupportedFFIContractSchemaVersion,
+					HeaderPath:    "mem.h",
+					Namespace:     "mem",
 					Functions: map[string]bindgen.FFIFuncContract{
 						"take_buf": {
 							ContractID: "mem.take_buf",
@@ -751,7 +753,9 @@ func TestPhase2B3_1_OwnershipTransferAcrossBlocksJoinsLoops(t *testing.T) {
 					"take_buf": {Name: "take_buf", ReturnType: "void", ParamTypes: []string{"unsigned char *", "unsigned long"}},
 				},
 				Contracts: &bindgen.FFIContractCatalog{
-					Namespace: "mem",
+					SchemaVersion: bindgen.SupportedFFIContractSchemaVersion,
+					HeaderPath:    "mem.h",
+					Namespace:     "mem",
 					Functions: map[string]bindgen.FFIFuncContract{
 						"take_buf": {
 							ContractID: "mem.take_buf",
@@ -1000,26 +1004,26 @@ func TestPhase2B3_1_ContractValidationAndBorrowsParam(t *testing.T) {
 		name string
 		raw  string
 	}{
-		{"unknown_param_ownership", `{"namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"bogus"}],"return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
-		{"unknown_return_ownership", `{"namespace":"demo","functions":{"f":{"contract_id":"c","return":{"ownership":"bogus","borrows_param":-1}}}}`},
-		{"unknown_opaque_ownership", `{"namespace":"demo","opaque_types":{"H":{"ownership":"bogus","borrows_param":-1}}}`},
-		{"negative_param_index", `{"namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":-1,"ownership":"borrow"}],"return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
-		{"non_contiguous_param_index", `{"namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":1,"ownership":"borrow"}],"return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
-		{"duplicate_param_index", `{"namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"borrow"},{"param_index":0,"ownership":"borrow_mut"}],"return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
-		{"missing_param_index_json", `{"namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"ownership":"borrow"}],"return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
-		{"invalid_release_fn_chars", `{"namespace":"demo","opaque_types":{"H":{"ownership":"opaque_handle","type_name":"H","release_fn":"bad fn()","borrows_param":-1}}}`},
-		{"release_fn_on_raw_unmanaged", `{"namespace":"demo","functions":{"f":{"contract_id":"c","return":{"ownership":"raw_unmanaged","release_fn":"demo::free","borrows_param":-1}}}}`},
-		{"contradictory_func_namespace", `{"namespace":"demo","functions":{"f":{"namespace":"other","contract_id":"c","return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
-		{"contradictory_func_name", `{"namespace":"demo","functions":{"f":{"function":"g","contract_id":"c","return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
-		{"contradictory_opaque_release", `{"namespace":"demo","opaque_types":{"H":{"ownership":"opaque_handle","type_name":"H","release_fn":"demo::free_a","borrows_param":-1}},"functions":{"make":{"contract_id":"m","return":{"ownership":"owned_return","type_name":"H","release_fn":"demo::free_b","borrows_param":-1}}}}`},
-		{"borrows_param_out_of_range", `{"namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"borrow"}],"return":{"ownership":"borrow","borrows_param":2}}}}`},
-		{"borrows_param_negative_invalid", `{"namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"borrow"}],"return":{"ownership":"borrow","borrows_param":-2}}}}`},
-		{"borrows_param_on_owned_transfer", `{"namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"owned_transfer"}],"return":{"ownership":"borrow","borrows_param":0}}}}`},
-		{"borrows_param_mut_from_shared", `{"namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"borrow"}],"return":{"ownership":"borrow_mut","borrows_param":0}}}}`},
-		{"borrows_param_on_owned_return", `{"namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"borrow"}],"return":{"ownership":"owned_return","release_fn":"demo::free","borrows_param":0}}}}`},
-		{"borrows_param_on_opaque_type", `{"namespace":"demo","opaque_types":{"H":{"ownership":"opaque_handle","type_name":"H","release_fn":"demo::free","borrows_param":0}}}`},
-		{"unknown_json_field", `{"namespace":"demo","bogus_field":1}`},
-		{"trailing_json_garbage", `{"namespace":"demo"} {"extra":1}`},
+		{"unknown_param_ownership", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"bogus"}],"return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
+		{"unknown_return_ownership", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","return":{"ownership":"bogus","borrows_param":-1}}}}`},
+		{"unknown_opaque_ownership", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","opaque_types":{"H":{"ownership":"bogus","borrows_param":-1}}}`},
+		{"negative_param_index", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":-1,"ownership":"borrow"}],"return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
+		{"non_contiguous_param_index", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":1,"ownership":"borrow"}],"return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
+		{"duplicate_param_index", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"borrow"},{"param_index":0,"ownership":"borrow_mut"}],"return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
+		{"missing_param_index_json", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"ownership":"borrow"}],"return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
+		{"invalid_release_fn_chars", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","opaque_types":{"H":{"ownership":"opaque_handle","type_name":"H","release_fn":"bad fn()","borrows_param":-1}}}`},
+		{"release_fn_on_raw_unmanaged", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","return":{"ownership":"raw_unmanaged","release_fn":"demo::free","borrows_param":-1}}}}`},
+		{"contradictory_func_namespace", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"namespace":"other","contract_id":"c","return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
+		{"contradictory_func_name", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"function":"g","contract_id":"c","return":{"ownership":"raw_unmanaged","borrows_param":-1}}}}`},
+		{"contradictory_opaque_release", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","opaque_types":{"H":{"ownership":"opaque_handle","type_name":"H","release_fn":"demo::free_a","borrows_param":-1}},"functions":{"make":{"contract_id":"m","return":{"ownership":"owned_return","type_name":"H","release_fn":"demo::free_b","borrows_param":-1}}}}`},
+		{"borrows_param_out_of_range", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"borrow"}],"return":{"ownership":"borrow","borrows_param":2}}}}`},
+		{"borrows_param_negative_invalid", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"borrow"}],"return":{"ownership":"borrow","borrows_param":-2}}}}`},
+		{"borrows_param_on_owned_transfer", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"owned_transfer"}],"return":{"ownership":"borrow","borrows_param":0}}}}`},
+		{"borrows_param_mut_from_shared", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"borrow"}],"return":{"ownership":"borrow_mut","borrows_param":0}}}}`},
+		{"borrows_param_on_owned_return", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"borrow"}],"return":{"ownership":"owned_return","release_fn":"demo::free","borrows_param":0}}}}`},
+		{"borrows_param_on_opaque_type", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","opaque_types":{"H":{"ownership":"opaque_handle","type_name":"H","release_fn":"demo::free","borrows_param":0}}}`},
+		{"unknown_json_field", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","bogus_field":1}`},
+		{"trailing_json_garbage", `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo"} {"extra":1}`},
 	}
 	for _, tc := range invalidJSONs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1031,7 +1035,7 @@ func TestPhase2B3_1_ContractValidationAndBorrowsParam(t *testing.T) {
 
 	// 22b. JSON 省略 borrows_param 时不得误当成 0
 	t.Run("omitted_borrows_param_defaults_to_minus_one", func(t *testing.T) {
-		raw := `{"namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"owned_transfer"}],"return":{"ownership":"raw_unmanaged"}}}}`
+		raw := `{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","functions":{"f":{"contract_id":"c","params":[{"param_index":0,"ownership":"owned_transfer"}],"return":{"ownership":"raw_unmanaged"}}}}`
 		cat, err := bindgen.ParseFFIContractJSON([]byte(raw))
 		if err != nil {
 			t.Fatalf("省略 borrows_param 的合法 raw_unmanaged 契约应当解析成功: %v", err)
@@ -1045,7 +1049,9 @@ func TestPhase2B3_1_ContractValidationAndBorrowsParam(t *testing.T) {
 	t.Run("duplicate_contract_across_catalogs", func(t *testing.T) {
 		tctx, symTab, _, _, cat, sp := buildFFITestEnv(t)
 		dupCat := &bindgen.FFIContractCatalog{
-			Namespace: "demo",
+			SchemaVersion: bindgen.SupportedFFIContractSchemaVersion,
+			HeaderPath:    "demo.h",
+			Namespace:     "demo",
 			Functions: map[string]bindgen.FFIFuncContract{
 				"handle_peek": {
 					Namespace:  "demo",
@@ -1283,6 +1289,151 @@ func TestPhase2B3_1_ContractValidationAndBorrowsParam(t *testing.T) {
 		plan := drop.ElaborateProgramWithFFI(progCFG, &mockSemView{tctx: tctx, symTab: symTab}, drop.NewResourceRegistry(), []*bindgen.FFIContractCatalog{cat}, rep)
 		if !rep.HasErrors() || !strings.Contains(rep.String(), "WON-SEC-001") || plan.DropElaborated {
 			t.Fatalf("unknown 入参契约必须触发 WON-SEC-001，实际:\n%s", rep.String())
+		}
+	})
+}
+
+func TestPhase2B3_2_PipelineEnvelopeAndHeaderFailClosed(t *testing.T) {
+	src := `fn run(p: *mut u8):
+    unsafe:
+        mem::take_buf(p)
+`
+
+	// 1. checker 管线在所有权/Drop 细化前按 Fail-Closed 拒绝缺失、不支持 schema_version 及头文件标识不匹配
+	badPipelineCases := []struct {
+		name          string
+		bindingHeader string
+		catalog       *bindgen.FFIContractCatalog
+	}{
+		{
+			name:          "missing_schema_version",
+			bindingHeader: "mem.h",
+			catalog: &bindgen.FFIContractCatalog{
+				HeaderPath: "mem.h",
+				Namespace:  "mem",
+				Functions: map[string]bindgen.FFIFuncContract{
+					"take_buf": {
+						ContractID: "mem.take_buf",
+						Params:     []bindgen.FFIParamContract{{ParamIndex: 0, Ownership: bindgen.FFIOwnedTransfer}},
+						Return:     bindgen.FFIReturnContract{Ownership: bindgen.FFINonOwningRaw, BorrowsParam: -1},
+					},
+				},
+			},
+		},
+		{
+			name:          "unsupported_schema_version",
+			bindingHeader: "mem.h",
+			catalog: &bindgen.FFIContractCatalog{
+				SchemaVersion: "2.0",
+				HeaderPath:    "mem.h",
+				Namespace:     "mem",
+				Functions: map[string]bindgen.FFIFuncContract{
+					"take_buf": {
+						ContractID: "mem.take_buf",
+						Params:     []bindgen.FFIParamContract{{ParamIndex: 0, Ownership: bindgen.FFIOwnedTransfer}},
+						Return:     bindgen.FFIReturnContract{Ownership: bindgen.FFINonOwningRaw, BorrowsParam: -1},
+					},
+				},
+			},
+		},
+		{
+			name:          "header_mismatch_distinct_names",
+			bindingHeader: "mem.h",
+			catalog: &bindgen.FFIContractCatalog{
+				SchemaVersion: bindgen.SupportedFFIContractSchemaVersion,
+				HeaderPath:    "other.h",
+				Namespace:     "mem",
+				Functions: map[string]bindgen.FFIFuncContract{
+					"take_buf": {
+						ContractID: "mem.take_buf",
+						Params:     []bindgen.FFIParamContract{{ParamIndex: 0, Ownership: bindgen.FFIOwnedTransfer}},
+						Return:     bindgen.FFIReturnContract{Ownership: bindgen.FFINonOwningRaw, BorrowsParam: -1},
+					},
+				},
+			},
+		},
+		{
+			name:          "header_mismatch_relative_vs_absolute",
+			bindingHeader: "/usr/include/mem.h",
+			catalog: &bindgen.FFIContractCatalog{
+				SchemaVersion: bindgen.SupportedFFIContractSchemaVersion,
+				HeaderPath:    "mem.h",
+				Namespace:     "mem",
+				Functions: map[string]bindgen.FFIFuncContract{
+					"take_buf": {
+						ContractID: "mem.take_buf",
+						Params:     []bindgen.FFIParamContract{{ParamIndex: 0, Ownership: bindgen.FFIOwnedTransfer}},
+						Return:     bindgen.FFIReturnContract{Ownership: bindgen.FFINonOwningRaw, BorrowsParam: -1},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range badPipelineCases {
+		t.Run("checker_"+tc.name, func(t *testing.T) {
+			bindings := map[string]*bindgen.BindingMeta{
+				"mem": {
+					HeaderPath: tc.bindingHeader,
+					Functions: map[string]bindgen.FunctionSig{
+						"take_buf": {Name: "take_buf", ReturnType: "void", ParamTypes: []string{"unsigned char *"}},
+					},
+					Contracts: tc.catalog,
+				},
+			}
+			tp, rep := checkWonWithBindings(t, src, bindings)
+			if !rep.HasErrors() || !strings.Contains(rep.String(), "WON-INT-001") {
+				t.Fatalf("%s 必须触发 WON-INT-001，实际:\n%s", tc.name, rep.String())
+			}
+			if tp != nil && (tp.OwnershipChecked || tp.DropElaborated || tp.DropPlan != nil) {
+				t.Fatalf("%s 校验失败后不得标记 OwnershipChecked/DropElaborated 或生成 DropPlan", tc.name)
+			}
+		})
+	}
+
+	// 2. drop.ElaborateProgramWithFFI 与 RegisterFFIContracts 直接入口同样必须在索引与细化前按 Fail-Closed 拒绝非法信封
+	t.Run("drop_entry_and_register_fail_closed", func(t *testing.T) {
+		tctx, symTab, handleType, _, validCat, sp := buildFFITestEnv(t)
+		reg := drop.NewResourceRegistry()
+
+		badVerCat := &bindgen.FFIContractCatalog{
+			SchemaVersion: "9.9",
+			HeaderPath:    "demo.h",
+			Namespace:     "demo",
+			OpaqueTypes:   validCat.OpaqueTypes,
+			Functions:     validCat.Functions,
+		}
+		if err := drop.RegisterFFIContracts(reg, symTab, tctx, badVerCat); err == nil {
+			t.Fatalf("RegisterFFIContracts 必须拒绝不受支持的 schema_version")
+		}
+
+		fnSym := symTab.AllocSymbol(symbols.SymFunc, "bad_env", sp)
+		hSym, hPlace := makeVar(symTab, "h", handleType, false, sp)
+		progCFG := &cfg.ProgramCFG{
+			Functions: []*cfg.FuncCFG{{
+				Name: fnSym.Name, FuncSym: fnSym, ReturnType: tctx.Unit, Entry: 0, Exit: 1,
+				LocalOrder: []symbols.SymbolID{hSym.ID},
+				Locals:     map[symbols.SymbolID]*cfg.LocalMeta{hSym.ID: {Sym: hSym, Type: handleType, ScopeID: 1, HasInit: true, Span: sp}},
+				Blocks: []*cfg.BasicBlock{
+					{
+						ID: 0, Label: "entry", Successors: []cfg.BlockID{1},
+						Terminator: cfg.Terminator{Kind: cfg.TermGoto, Targets: []cfg.BlockID{1}, Span: sp},
+						Statements: []cfg.Statement{
+							{Kind: cfg.OpInitAssign, Place: hPlace, Type: handleType, Span: sp},
+							{Kind: cfg.OpCall, CalleeName: "demo::handle_take", ArgTemps: []cfg.ValueID{0}, ArgPlaces: []cfg.Place{hPlace}, Type: tctx.Unit, Span: sp},
+							{Kind: cfg.OpScopeExit, ScopeID: 1, Locals: []symbols.SymbolID{hSym.ID}, Span: sp},
+							{Kind: cfg.OpStorageDead, ScopeID: 1, Locals: []symbols.SymbolID{hSym.ID}, Span: sp},
+						},
+					},
+					{ID: 1, Label: "exit", Predecessors: []cfg.BlockID{0}, Terminator: cfg.Terminator{Kind: cfg.TermReturn, Span: sp}},
+				},
+			}},
+		}
+
+		rep := diagnostic.NewReport()
+		plan := drop.ElaborateProgramWithFFI(progCFG, &mockSemView{tctx: tctx, symTab: symTab}, reg, []*bindgen.FFIContractCatalog{badVerCat}, rep)
+		if !rep.HasErrors() || !strings.Contains(rep.String(), "WON-INT-001") || plan.DropElaborated {
+			t.Fatalf("ElaborateProgramWithFFI 必须在所有权/Drop 细化前拒绝非法 schema_version 并报 WON-INT-001，实际:\n%s", rep.String())
 		}
 	})
 }

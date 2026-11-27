@@ -92,9 +92,10 @@ fn split(c: bool):
 
 // FuzzFFIContractJSON 对旁路 FFI 契约 JSON 解析与 Validate() 执行模糊测试。
 func FuzzFFIContractJSON(f *testing.F) {
-	f.Add(`{"namespace":"mem","functions":{"take_buf":{"contract_id":"mem.take","params":[{"param_index":0,"ownership":"owned_transfer"}],"return":{"ownership":"raw_unmanaged"}}}}`)
-	f.Add(`{"namespace":"mem","functions":{"take_buf":{"contract_id":"mem.take","params":[{"param_index":0,"ownership":"bogus"}],"return":{"ownership":"raw_unmanaged"}}}}`)
-	f.Add(`{"namespace":"demo","opaque_types":{"H":{"ownership":"opaque_handle","type_name":"H","release_fn":"demo::free","borrows_param":-1}}}`)
+	f.Add(`{"schema_version":"1.0","header_path":"mem.h","namespace":"mem","functions":{"take_buf":{"contract_id":"mem.take","params":[{"param_index":0,"ownership":"owned_transfer"}],"return":{"ownership":"raw_unmanaged"}}}}`)
+	f.Add(`{"schema_version":"1.0","header_path":"mem.h","namespace":"mem","functions":{"take_buf":{"contract_id":"mem.take","params":[{"param_index":0,"ownership":"bogus"}],"return":{"ownership":"raw_unmanaged"}}}}`)
+	f.Add(`{"schema_version":"1.0","header_path":"demo.h","namespace":"demo","opaque_types":{"H":{"ownership":"opaque_handle","type_name":"H","release_fn":"demo::free","borrows_param":-1}}}`)
+	f.Add(`{"schema_version":"2.0","header_path":"demo.h","namespace":"demo"}`)
 
 	f.Fuzz(func(t *testing.T, rawJSON string) {
 		if len(rawJSON) > 4096 {
@@ -137,7 +138,9 @@ func FuzzFFIOwnership(f *testing.F) {
 				"peek_buf": {Name: "peek_buf", ReturnType: "void", ParamTypes: []string{"const unsigned char *"}},
 			},
 			Contracts: &bindgen.FFIContractCatalog{
-				Namespace: "mem",
+				SchemaVersion: bindgen.SupportedFFIContractSchemaVersion,
+				HeaderPath:    "mem.h",
+				Namespace:     "mem",
 				Functions: map[string]bindgen.FFIFuncContract{
 					"take_buf": {
 						ContractID: "mem.take_buf",
