@@ -16,13 +16,15 @@ import (
 
 // Checker 实现了 WON Phase 2A 核心静态语义检查与类型系统校验器
 type Checker struct {
-	report    *diagnostic.Report
-	bindings  map[string]*bindgen.BindingMeta
-	types     *types.Context
-	symbols   *symbols.Table
-	typed     *TypedProgram
-	inUnsafe  bool
-	loopDepth int
+	report              *diagnostic.Report
+	bindings            map[string]*bindgen.BindingMeta
+	types               *types.Context
+	symbols             *symbols.Table
+	typed               *TypedProgram
+	inUnsafe            bool
+	loopDepth           int
+	opaqueForeignTypes  map[types.TypeID]string // 经 FFI 契约注册的不透明外部句柄 TypeID -> 命名空间
+	opaqueForeignByName map[string]types.TypeID // 不透明外部句柄类型名 -> TypeID
 }
 
 // New 创建语义分析器实例，注入已解析的 C 头文件绑定元数据
@@ -33,10 +35,12 @@ func New(report *diagnostic.Report, bindings map[string]*bindgen.BindingMeta) *C
 	tctx := types.NewContext()
 	symTab := symbols.NewTable(tctx)
 	return &Checker{
-		report:   report,
-		bindings: bindings,
-		types:    tctx,
-		symbols:  symTab,
+		report:              report,
+		bindings:            bindings,
+		types:               tctx,
+		symbols:             symTab,
+		opaqueForeignTypes:  make(map[types.TypeID]string),
+		opaqueForeignByName: make(map[string]types.TypeID),
 	}
 }
 

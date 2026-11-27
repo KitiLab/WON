@@ -2,9 +2,11 @@ package checker
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/KitiLab/WON/compiler/poc/internal/ast"
+	"github.com/KitiLab/WON/compiler/poc/internal/bindgen"
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
 	"github.com/KitiLab/WON/compiler/poc/internal/symbols"
 	"github.com/KitiLab/WON/compiler/poc/internal/types"
@@ -153,6 +155,9 @@ func (c *Checker) collectAndResolveDeclarations(prog *ast.Program) {
 		}
 	}
 
+	// Pass 1.5: 从已认证 FFI 契约目录注册不透明外部句柄符号（不得覆盖源码同名的显式 struct/enum）
+	c.registerFFIOpaqueTypes(prog, scope)
+
 	// Pass 2A: 解析类型别名
 	for _, pa := range pAliases {
 		pa.sym.Type = c.resolveAstType(pa.decl.TargetType, pa.gs)
@@ -179,6 +184,65 @@ func (c *Checker) collectAndResolveDeclarations(prog *ast.Program) {
 	// Pass 2E: 解析固有 impl 块并将其方法绑定至对应 Struct/Enum
 	for _, ib := range pImpls {
 		c.resolveImplBlock(ib, scope)
+	}
+}
+
+func isSimpleOpaqueIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		isLetter := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'
+		isDigit := ch >= '0' && ch <= '9'
+		if (i == 0 && !isLetter) || (!isLetter && !isDigit) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Checker) registerFFIOpaqueTypes(prog *ast.Program, scope *symbols.Scope) {
+	if len(c.bindings) == 0 {
+		return
+	}
+	nsList := make([]string, 0, len(c.bindings))
+	for ns := range c.bindings {
+		nsList = append(nsList, ns)
+	}
+	sort.Strings(nsList)
+
+	for _, ns := range nsList {
+		bm := c.bindings[ns]
+		if bm == nil || bm.Contracts == nil {
+			continue
+		}
+		names := make([]string, 0, len(bm.Contracts.OpaqueTypes)+len(bm.Contracts.Functions))
+		seen := make(map[string]bool)
+		for typeName, ot := range bm.Contracts.OpaqueTypes {
+			if (ot.Ownership == bindgen.FFIOpaqueHandle || ot.Ownership == bindgen.FFIOwnedReturn) && !seen[typeName] {
+				seen[typeName] = true
+				names = append(names, typeName)
+			}
+		}
+		for _, fc := range bm.Contracts.Functions {
+			if (fc.Return.Ownership == bindgen.FFIOwnedReturn || fc.Return.Ownership == bindgen.FFIOpaqueHandle) && fc.Return.TypeName != "" && !seen[fc.Return.TypeName] {
+				seen[fc.Return.TypeName] = true
+				names = append(names, fc.Return.TypeName)
+			}
+		}
+		sort.Strings(names)
+		for _, typeName := range names {
+			if !isSimpleOpaqueIdent(typeName) || scope.Lookup(typeName) != nil {
+				continue
+			}
+			sym := c.symbols.AllocSymbol(symbols.SymStruct, typeName, prog.GetSpan())
+			sym.Type = c.types.Struct(uint64(sym.ID), typeName, nil)
+			if _, ok := scope.Insert(sym); ok {
+				c.opaqueForeignTypes[sym.Type] = ns
+				c.opaqueForeignByName[typeName] = sym.Type
+			}
+		}
 	}
 }
 

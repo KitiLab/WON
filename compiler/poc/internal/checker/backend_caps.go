@@ -470,15 +470,20 @@ func (c *Checker) c11UnsupportedTypeReason(id types.TypeID, pos capTypePos) stri
 		if id == c.types.StrView {
 			return ""
 		}
-		if c.isC11Scalar(info.Elem) {
+		if c.isC11Scalar(info.Elem) || c.opaqueForeignTypes[info.Elem] != "" {
 			return ""
 		}
 		return fmt.Sprintf("使用引用类型 '%s'，当前 C11 后端尚不支持该底层目标类型", c.types.Format(id))
 	case types.KindRawPtr:
-		if c.isC11Scalar(info.Elem) || c.types.Info(info.Elem).Kind == types.KindUnit {
+		if c.isC11Scalar(info.Elem) || c.types.Info(info.Elem).Kind == types.KindUnit || c.opaqueForeignTypes[info.Elem] != "" {
 			return ""
 		}
 		return fmt.Sprintf("使用原生指针类型 '%s'，当前 C11 后端尚不支持该指向类型", c.types.Format(id))
+	case types.KindStruct:
+		if c.opaqueForeignTypes[id] != "" {
+			return ""
+		}
+		return fmt.Sprintf("使用结构体类型 '%s'，尚未在当前 C11 后端实现映射与代码生成", c.types.Format(id))
 	case types.KindArray:
 		return fmt.Sprintf("使用定长数组类型 '%s'，不能按值作为参数、返回值或常规表达式传递", c.types.Format(id))
 	default:

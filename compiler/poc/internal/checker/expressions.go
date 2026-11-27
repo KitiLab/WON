@@ -1628,42 +1628,90 @@ func isSupportedZlibFunc(name string) bool {
 func (c *Checker) mapExpectedCTypeToTypeID(cType string) types.TypeID {
 	clean := strings.TrimSpace(cType)
 	switch clean {
-	case "unsigned char *", "Bytef *", "Byte *":
+	case "unsigned char *", "Bytef *", "Byte *", "uint8_t *", "uint8_t*":
 		return c.types.RawPtr(true, c.types.U8)
-	case "const unsigned char *", "const Bytef *", "const Byte *":
+	case "const unsigned char *", "const Bytef *", "const Byte *", "const uint8_t *", "const uint8_t*":
 		return c.types.RawPtr(false, c.types.U8)
+	case "void *", "void*":
+		return c.types.RawPtr(true, c.types.Unit)
+	case "const void *", "const void*":
+		return c.types.RawPtr(false, c.types.Unit)
 	case "unsigned long *", "uLongf *", "uLong *":
 		return c.types.RawPtr(true, c.types.U64)
 	case "const unsigned long *":
 		return c.types.RawPtr(false, c.types.U64)
 	case "unsigned long", "uLong", "size_t":
 		return c.types.U64
-	case "uInt", "unsigned int":
+	case "uInt", "unsigned int", "uint32_t":
 		return c.types.U32
-	case "int":
+	case "int", "int32_t":
 		return c.types.I32
 	case "int64_t":
 		return c.types.I64
+	case "uint64_t":
+		return c.types.U64
 	case "const char *":
 		return c.types.StrView
 	default:
+		if tid, ok := c.lookupOpaqueCType(clean); ok {
+			return tid
+		}
 		return types.Invalid
 	}
 }
 
 func (c *Checker) mapCReturnTypeToTypeID(ret string) types.TypeID {
-	switch strings.TrimSpace(ret) {
-	case "int":
+	clean := strings.TrimSpace(ret)
+	switch clean {
+	case "int", "int32_t":
 		return c.types.I32
-	case "unsigned long", "uLong":
+	case "uInt", "unsigned int", "uint32_t":
+		return c.types.U32
+	case "int64_t":
+		return c.types.I64
+	case "unsigned long", "uLong", "uint64_t":
 		return c.types.U64
+	case "size_t":
+		return c.types.USize
 	case "const char *", "const char*":
 		return c.types.RawPtr(false, c.types.U8)
+	case "unsigned char *", "unsigned char*", "uint8_t *", "uint8_t*":
+		return c.types.RawPtr(true, c.types.U8)
+	case "void *", "void*":
+		return c.types.RawPtr(true, c.types.Unit)
 	case "void":
 		return c.types.Unit
 	default:
+		if tid, ok := c.lookupOpaqueValueCType(clean); ok {
+			return tid
+		}
 		return types.Invalid
 	}
+}
+
+func (c *Checker) lookupOpaqueValueCType(clean string) (types.TypeID, bool) {
+	base := strings.TrimSpace(strings.TrimPrefix(clean, "struct "))
+	tid, ok := c.opaqueForeignByName[base]
+	return tid, ok
+}
+
+func (c *Checker) lookupOpaqueCType(clean string) (types.TypeID, bool) {
+	if tid, ok := c.lookupOpaqueValueCType(clean); ok {
+		return tid, true
+	}
+	isConst := false
+	rest := clean
+	if strings.HasPrefix(rest, "const ") {
+		isConst = true
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, "const "))
+	}
+	if strings.HasSuffix(rest, "*") {
+		base := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(rest, "*"), "struct "))
+		if tid, ok := c.opaqueForeignByName[base]; ok {
+			return c.types.RawPtr(!isConst, tid), true
+		}
+	}
+	return types.Invalid, false
 }
 
 func (c *Checker) isCanonicalTypeCompatibleWithC(wonType types.TypeID, expectedCType string) bool {
@@ -1673,30 +1721,52 @@ func (c *Checker) isCanonicalTypeCompatibleWithC(wonType types.TypeID, expectedC
 	info := c.types.Info(wonType)
 	cleanC := strings.TrimSpace(expectedCType)
 	switch cleanC {
-	case "unsigned char *", "Bytef *", "Byte *":
+	case "unsigned char *", "Bytef *", "Byte *", "uint8_t *", "uint8_t*":
 		// 明确要求可变字节指针 (*mut u8, &mut u8 或可变数组切片引用)
 		if (info.Kind != types.KindRawPtr && info.Kind != types.KindRef) || !info.IsMut {
 			return false
 		}
 		ei := c.types.Info(info.Elem)
 		return ei.Kind == types.KindU8 || ((ei.Kind == types.KindArray || ei.Kind == types.KindSlice) && ei.Elem == c.types.U8)
-	case "const unsigned char *", "const Bytef *", "const Byte *":
+	case "const unsigned char *", "const Bytef *", "const Byte *", "const uint8_t *", "const uint8_t*":
 		// 可接受只读指针/引用或可变指针/引用 (协变)
 		if info.Kind != types.KindRawPtr && info.Kind != types.KindRef {
 			return false
 		}
 		ei := c.types.Info(info.Elem)
 		return ei.Kind == types.KindU8 || ((ei.Kind == types.KindArray || ei.Kind == types.KindSlice) && ei.Elem == c.types.U8)
+	case "void *", "void*":
+		return (info.Kind == types.KindRawPtr || info.Kind == types.KindRef) && info.IsMut && c.types.Info(info.Elem).Kind == types.KindUnit
+	case "const void *", "const void*":
+		return (info.Kind == types.KindRawPtr || info.Kind == types.KindRef) && c.types.Info(info.Elem).Kind == types.KindUnit
 	case "unsigned long *", "uLongf *", "uLong *":
 		// 明确要求指向 u64 的可变指针或可变引用 (*mut u64 / &mut u64)
 		return (info.Kind == types.KindRawPtr || info.Kind == types.KindRef) && info.IsMut && info.Elem == c.types.U64
 	case "const unsigned long *":
 		return (info.Kind == types.KindRawPtr || info.Kind == types.KindRef) && info.Elem == c.types.U64
-	case "unsigned long", "uLong", "uInt", "int", "int64_t", "size_t":
-		return wonType == c.types.U64 || wonType == c.types.I32 || wonType == c.types.I64 || wonType == c.types.U32
+	case "unsigned long", "uLong", "uInt", "unsigned int", "int", "int32_t", "uint32_t", "int64_t", "uint64_t", "size_t":
+		return wonType == c.types.U64 || wonType == c.types.I32 || wonType == c.types.I64 || wonType == c.types.U32 || wonType == c.types.USize
 	case "const char *":
 		return wonType == c.types.StrView || (info.Kind == types.KindRawPtr && !info.IsMut && info.Elem == c.types.U8)
 	default:
+		if tid, ok := c.lookupOpaqueValueCType(cleanC); ok {
+			return wonType == tid
+		}
+		isConst := false
+		rest := cleanC
+		if strings.HasPrefix(rest, "const ") {
+			isConst = true
+			rest = strings.TrimSpace(strings.TrimPrefix(rest, "const "))
+		}
+		if strings.HasSuffix(rest, "*") {
+			base := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(rest, "*"), "struct "))
+			if tid, ok := c.opaqueForeignByName[base]; ok {
+				if isConst {
+					return (info.Kind == types.KindRawPtr || info.Kind == types.KindRef) && info.Elem == tid
+				}
+				return (info.Kind == types.KindRawPtr || info.Kind == types.KindRef) && info.IsMut && info.Elem == tid
+			}
+		}
 		return false
 	}
 }
