@@ -61,7 +61,7 @@ func Verify(prog *Program) []VerifyError {
 	if !prog.OwnershipOK || !prog.DropOK {
 		addErr("", InvalidBlock, -1, "程序尚未通过前置所有权或 Drop 验证 (OwnershipOK=%v, DropOK=%v)", prog.OwnershipOK, prog.DropOK)
 	}
-	if prog.Types == nil || prog.Types.Len() <= 1 {
+	if prog.Types == nil || prog.Types.Len() < 1 {
 		addErr("", InvalidBlock, -1, "TIR TypeTable 缺失或未初始化")
 		return errs
 	}

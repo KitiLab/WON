@@ -177,9 +177,13 @@ func (c *Checker) checkPatternAgainstType(pat ast.Pattern, targetType types.Type
 		}
 
 		// 否则视为全覆盖变量绑定模式
+		bindType := targetType
+		if p.IsRef {
+			bindType = c.types.Ref(p.IsMut, baseType)
+		}
 		sym := c.symbols.AllocSymbol(symbols.SymVar, p.Name, p.Span)
 		sym.IsMut = p.IsMut
-		sym.Type = targetType
+		sym.Type = bindType
 		sym.Defined = true
 		scope.Insert(sym)
 		c.symbols.NodeSymbols[p] = sym

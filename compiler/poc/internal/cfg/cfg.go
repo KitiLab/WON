@@ -111,6 +111,9 @@ type Statement struct {
 	DropFlag  uint32
 	DropGlue  string
 	CopyPlace Place // 当赋值来自 Copy 位置时记录源位置（不改变 Dump 快照）
+
+	// Phase 2C.0 无损表达式计算与 TIR 降级桥接元数据（不改变 Dump 快照）
+	Bridge *StatementBridge
 }
 
 // TermKind 定义基本块终结跳转指令类别。
@@ -129,6 +132,7 @@ type Terminator struct {
 	Kind    TermKind
 	Targets []BlockID
 	Span    diagnostic.Span
+	Bridge  *TerminatorBridge
 }
 
 // BasicBlock 表示包含线性所有权事件序列与单出口终结指令的基本块。
@@ -155,17 +159,20 @@ type LocalMeta struct {
 
 // FuncCFG 表示单个函数或固有方法的完整所有权控制流图。
 type FuncCFG struct {
-	Name       string
-	FuncSym    *symbols.Symbol
-	Decl       *ast.FunctionDecl
-	ReturnType types.TypeID
-	Entry      BlockID
-	Exit       BlockID
-	Blocks     []*BasicBlock
-	LocalOrder []symbols.SymbolID
-	Locals     map[symbols.SymbolID]*LocalMeta
-	NextTemp   ValueID
-	NextLoan   LoanID
+	Name          string
+	FuncSym       *symbols.Symbol
+	Decl          *ast.FunctionDecl
+	ReturnType    types.TypeID
+	Entry         BlockID
+	Exit          BlockID
+	Blocks        []*BasicBlock
+	LocalOrder    []symbols.SymbolID
+	Locals        map[symbols.SymbolID]*LocalMeta
+	NextTemp      ValueID
+	NextLoan      LoanID
+	NextBridgeVal BridgeValID
+	BridgeVals    []BridgeValDecl
+	TailRetVal    BridgeValID
 }
 
 // ProgramCFG 汇聚编译单元内所有顶层函数与固有方法的所有权 CFG。

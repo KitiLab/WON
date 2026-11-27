@@ -120,17 +120,20 @@ func CloneFuncCFG(src *cfg.FuncCFG) *cfg.FuncCFG {
 		return nil
 	}
 	cp := &cfg.FuncCFG{
-		Name:       src.Name,
-		FuncSym:    src.FuncSym,
-		Decl:       src.Decl,
-		ReturnType: src.ReturnType,
-		Entry:      src.Entry,
-		Exit:       src.Exit,
-		Blocks:     make([]*cfg.BasicBlock, len(src.Blocks)),
-		LocalOrder: append([]symbols.SymbolID(nil), src.LocalOrder...),
-		Locals:     make(map[symbols.SymbolID]*cfg.LocalMeta, len(src.Locals)),
-		NextTemp:   src.NextTemp,
-		NextLoan:   src.NextLoan,
+		Name:          src.Name,
+		FuncSym:       src.FuncSym,
+		Decl:          src.Decl,
+		ReturnType:    src.ReturnType,
+		Entry:         src.Entry,
+		Exit:          src.Exit,
+		Blocks:        make([]*cfg.BasicBlock, len(src.Blocks)),
+		LocalOrder:    append([]symbols.SymbolID(nil), src.LocalOrder...),
+		Locals:        make(map[symbols.SymbolID]*cfg.LocalMeta, len(src.Locals)),
+		NextTemp:      src.NextTemp,
+		NextLoan:      src.NextLoan,
+		NextBridgeVal: src.NextBridgeVal,
+		BridgeVals:    append([]cfg.BridgeValDecl(nil), src.BridgeVals...),
+		TailRetVal:    src.TailRetVal,
 	}
 	for sid, meta := range src.Locals {
 		if meta != nil {
@@ -152,10 +155,14 @@ func CloneFuncCFG(src *cfg.FuncCFG) *cfg.FuncCFG {
 				Kind:    blk.Terminator.Kind,
 				Targets: append([]cfg.BlockID(nil), blk.Terminator.Targets...),
 				Span:    blk.Terminator.Span,
+				Bridge:  cfg.CloneTerminatorBridge(blk.Terminator.Bridge),
 			},
 		}
 		for j, st := range blk.Statements {
 			cst := st
+			if st.Bridge != nil {
+				cst.Bridge = cfg.CloneStatementBridge(st.Bridge)
+			}
 			if len(st.Locals) > 0 {
 				cst.Locals = append([]symbols.SymbolID(nil), st.Locals...)
 			}

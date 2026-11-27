@@ -33,14 +33,15 @@ type loopFrame struct {
 }
 
 type funcBuilder struct {
-	view       SemanticView
-	report     *diagnostic.Report
-	fn         *FuncCFG
-	curBB      BlockID
-	nextScope  int
-	tempSymSeq int
-	scopes     []scopeFrame
-	loops      []loopFrame
+	view            SemanticView
+	report          *diagnostic.Report
+	fn              *FuncCFG
+	curBB           BlockID
+	nextScope       int
+	tempSymSeq      int
+	scopes          []scopeFrame
+	loops           []loopFrame
+	pendingComputes []ComputeOp
 }
 
 // BuildProgram 基于已完成语义检查的 AST 与 SemanticView 构建全程序所有权 CFG。
@@ -179,12 +180,19 @@ func buildFunction(name string, fnSym *symbols.Symbol, decl *ast.FunctionDecl, v
 
 	if decl.Body != nil {
 		b.registerFunctionParams(decl)
-		b.lowerBlockStatements(decl.Body)
+		tailBV := b.lowerBlockStatements(decl.Body, true)
+		if tailBV != InvalidBridgeVal {
+			f.TailRetVal = tailBV
+		}
 	}
 
 	if !b.isTerminated(b.curBB) {
 		b.popScope(rootScope, decl.Span)
-		b.terminateGoto(b.curBB, exit, decl.Span)
+		var exitBridge *TerminatorBridge
+		if f.TailRetVal != InvalidBridgeVal {
+			exitBridge = &TerminatorBridge{RetVal: f.TailRetVal}
+		}
+		b.terminateGotoBridge(b.curBB, exit, exitBridge, decl.Span)
 	} else {
 		b.discardTopScope()
 	}
@@ -201,6 +209,55 @@ func (b *funcBuilder) nextTemp() ValueID {
 func (b *funcBuilder) nextLoan() LoanID {
 	b.fn.NextLoan++
 	return b.fn.NextLoan
+}
+
+func (b *funcBuilder) allocBridgeVal(typ types.TypeID, isJoin bool, span diagnostic.Span) BridgeValID {
+	if typ == types.Invalid && b.view != nil && b.view.GetTypes() != nil {
+		typ = b.view.GetTypes().Unit
+	}
+	b.fn.NextBridgeVal++
+	id := b.fn.NextBridgeVal
+	b.fn.BridgeVals = append(b.fn.BridgeVals, BridgeValDecl{
+		ID:         id,
+		Type:       typ,
+		IsJoinTemp: isJoin,
+		Span:       span,
+	})
+	return id
+}
+
+func (b *funcBuilder) pushCompute(op ComputeOp) BridgeValID {
+	dest := b.allocBridgeVal(op.Type, false, op.Span)
+	op.Dest = dest
+	b.pendingComputes = append(b.pendingComputes, op)
+	return dest
+}
+
+func (b *funcBuilder) flushComputes() []ComputeOp {
+	if len(b.pendingComputes) == 0 {
+		return nil
+	}
+	ops := b.pendingComputes
+	b.pendingComputes = nil
+	return ops
+}
+
+func (b *funcBuilder) lookupActiveLocalByName(name string) *symbols.Symbol {
+	symTab := b.view.GetSymbols()
+	for i := len(b.scopes) - 1; i >= 0; i-- {
+		for j := len(b.scopes[i].locals) - 1; j >= 0; j-- {
+			sid := b.scopes[i].locals[j]
+			if sym := symTab.ByID[sid]; sym != nil && sym.Name == name {
+				return sym
+			}
+		}
+	}
+	for _, sid := range b.fn.LocalOrder {
+		if m := b.fn.Locals[sid]; m != nil && m.Sym != nil && m.Sym.Name == name {
+			return m.Sym
+		}
+	}
+	return nil
 }
 
 // isRefCarryingType 判断类型自身是否属于引用，或递归结构体/元组/数组/枚举中包含借用引用载体。
@@ -373,7 +430,14 @@ func (b *funcBuilder) newBlock(label string) BlockID {
 
 func (b *funcBuilder) emit(stmt Statement) {
 	if b.curBB == InvalidBlock || b.isTerminated(b.curBB) {
+		b.pendingComputes = nil
 		return
+	}
+	if comps := b.flushComputes(); len(comps) > 0 {
+		if stmt.Bridge == nil {
+			stmt.Bridge = &StatementBridge{}
+		}
+		stmt.Bridge.PreComputes = append(comps, stmt.Bridge.PreComputes...)
 	}
 	b.fn.Blocks[b.curBB].Statements = append(b.fn.Blocks[b.curBB].Statements, stmt)
 }
@@ -385,19 +449,42 @@ func (b *funcBuilder) isTerminated(bb BlockID) bool {
 	return b.fn.Blocks[bb].Terminator.Kind != TermNone
 }
 
+func (b *funcBuilder) attachTermBridge(tb *TerminatorBridge) *TerminatorBridge {
+	comps := b.flushComputes()
+	if len(comps) == 0 {
+		return tb
+	}
+	if tb == nil {
+		tb = &TerminatorBridge{}
+	}
+	tb.PreComputes = append(comps, tb.PreComputes...)
+	return tb
+}
+
 func (b *funcBuilder) terminateGoto(from, to BlockID, span diagnostic.Span) {
+	b.terminateGotoBridge(from, to, nil, span)
+}
+
+func (b *funcBuilder) terminateGotoBridge(from, to BlockID, tb *TerminatorBridge, span diagnostic.Span) {
 	if from == InvalidBlock || b.isTerminated(from) {
+		b.pendingComputes = nil
 		return
 	}
 	b.fn.Blocks[from].Terminator = Terminator{
 		Kind:    TermGoto,
 		Targets: []BlockID{to},
 		Span:    span,
+		Bridge:  b.attachTermBridge(tb),
 	}
 }
 
 func (b *funcBuilder) terminateSwitch(from BlockID, targets []BlockID, span diagnostic.Span) {
+	b.terminateSwitchBridge(from, targets, nil, span)
+}
+
+func (b *funcBuilder) terminateSwitchBridge(from BlockID, targets []BlockID, tb *TerminatorBridge, span diagnostic.Span) {
 	if from == InvalidBlock || b.isTerminated(from) {
+		b.pendingComputes = nil
 		return
 	}
 	cp := make([]BlockID, len(targets))
@@ -406,17 +493,24 @@ func (b *funcBuilder) terminateSwitch(from BlockID, targets []BlockID, span diag
 		Kind:    TermSwitchInt,
 		Targets: cp,
 		Span:    span,
+		Bridge:  b.attachTermBridge(tb),
 	}
 }
 
 func (b *funcBuilder) terminateReturn(from BlockID, span diagnostic.Span) {
+	b.terminateReturnBridge(from, nil, span)
+}
+
+func (b *funcBuilder) terminateReturnBridge(from BlockID, tb *TerminatorBridge, span diagnostic.Span) {
 	if from == InvalidBlock || b.isTerminated(from) {
+		b.pendingComputes = nil
 		return
 	}
 	b.fn.Blocks[from].Terminator = Terminator{
 		Kind:    TermReturn,
 		Targets: []BlockID{b.fn.Exit},
 		Span:    span,
+		Bridge:  b.attachTermBridge(tb),
 	}
 }
 
@@ -509,7 +603,7 @@ func (b *funcBuilder) lowerBlock(blk *ast.BlockStmt) {
 		return
 	}
 	sid := b.pushScope(blk.Span)
-	b.lowerBlockStatements(blk)
+	_ = b.lowerBlockStatements(blk, false)
 	if !b.isTerminated(b.curBB) {
 		b.popScope(sid, blk.Span)
 	} else {
@@ -517,18 +611,27 @@ func (b *funcBuilder) lowerBlock(blk *ast.BlockStmt) {
 	}
 }
 
-func (b *funcBuilder) lowerBlockStatements(blk *ast.BlockStmt) {
+func (b *funcBuilder) lowerBlockStatements(blk *ast.BlockStmt, trackTail bool) BridgeValID {
 	if blk == nil {
-		return
+		return InvalidBridgeVal
 	}
-	for _, stmt := range blk.Statements {
+	var tailBV BridgeValID
+	for i, stmt := range blk.Statements {
 		if b.isTerminated(b.curBB) {
 			// 后续语句位于不可达死块，保留基本块节点但不连接任何可达前驱
+			b.pendingComputes = nil
 			deadBB := b.newBlock("unreachable")
 			b.curBB = deadBB
 		}
+		if trackTail && i == len(blk.Statements)-1 {
+			if es, isExpr := stmt.(*ast.ExprStmt); isExpr {
+				_, tailBV = b.lowerExpr(es.Expr)
+				continue
+			}
+		}
 		b.lowerStmt(stmt)
 	}
+	return tailBV
 }
 
 func (b *funcBuilder) lowerStmt(stmt ast.Stmt) {
@@ -558,19 +661,30 @@ func (b *funcBuilder) lowerStmt(stmt ast.Stmt) {
 		b.lowerMatchExpr(s)
 
 	case *ast.ReturnStmt:
+		var retBV BridgeValID
 		if s.Value != nil {
-			retTemp := b.lowerExprVal(s.Value)
+			var retTemp ValueID
+			retTemp, retBV = b.lowerExpr(s.Value)
 			retPlace, _ := b.extractPlace(s.Value)
+			var stBridge *StatementBridge
+			if retBV != InvalidBridgeVal {
+				stBridge = &StatementBridge{SrcVal: retBV}
+			}
 			b.emit(Statement{
 				Kind:    OpReturn,
 				Place:   retPlace,
 				SrcTemp: retTemp,
 				Type:    b.view.ExprType(s.Value),
 				Span:    s.Span,
+				Bridge:  stBridge,
 			})
 		}
 		b.emitScopeExitsDownTo(0, s.Span)
-		b.terminateReturn(b.curBB, s.Span)
+		var tb *TerminatorBridge
+		if retBV != InvalidBridgeVal {
+			tb = &TerminatorBridge{RetVal: retBV}
+		}
+		b.terminateReturnBridge(b.curBB, tb, s.Span)
 
 	case *ast.BreakStmt:
 		if s.Value != nil {
@@ -633,7 +747,7 @@ func (b *funcBuilder) lowerLetStmt(s *ast.LetStmt) {
 		return
 	}
 
-	initTemp := b.lowerExprVal(s.Init)
+	initTemp, initBV := b.lowerExpr(s.Init)
 	copySrc, _ := b.extractCopySourcePlace(s.Init)
 
 	if s.Pattern != nil {
@@ -652,10 +766,11 @@ func (b *funcBuilder) lowerLetStmt(s *ast.LetStmt) {
 				CopyPlace: copySrc,
 				Type:      sym.Type,
 				Span:      ip.Span,
+				Bridge:    &StatementBridge{SrcVal: initBV},
 			})
 			return
 		}
-		b.registerPatternLocals(s.Pattern, true, curScopeID, initTemp, s.Span)
+		b.registerPatternLocals(s.Pattern, true, curScopeID, initTemp, initBV, s.Span)
 	} else if s.Name != "" && s.Name != "_" {
 		sym := b.lookupDeclSym(s)
 		if sym == nil {
@@ -671,6 +786,7 @@ func (b *funcBuilder) lowerLetStmt(s *ast.LetStmt) {
 			CopyPlace: copySrc,
 			Type:      sym.Type,
 			Span:      s.Span,
+			Bridge:    &StatementBridge{SrcVal: initBV},
 		})
 	}
 }
@@ -688,7 +804,7 @@ func (b *funcBuilder) lookupDeclSym(s *ast.LetStmt) *symbols.Symbol {
 	return nil
 }
 
-func (b *funcBuilder) registerPatternLocalsWithSubProj(pat ast.Pattern, initNow bool, curScopeID int, srcTemp ValueID, proj Projection, span diagnostic.Span) {
+func (b *funcBuilder) registerPatternLocalsWithSubProj(pat ast.Pattern, initNow bool, curScopeID int, srcTemp ValueID, srcBV BridgeValID, proj Projection, span diagnostic.Span) {
 	if ip, ok := pat.(*ast.IdentPattern); ok && b.view.VariantRef(ip) == nil {
 		symTab := b.view.GetSymbols()
 		sym := symTab.NodeSymbols[ip]
@@ -706,6 +822,15 @@ func (b *funcBuilder) registerPatternLocalsWithSubProj(pat ast.Pattern, initNow 
 		if srcTemp != InvalidValue {
 			pPlace = Place{Projections: []Projection{proj}}
 		}
+		var pb *BridgePatternBind
+		if srcBV != InvalidBridgeVal {
+			pb = &BridgePatternBind{
+				SourceVal:  srcBV,
+				FieldName:  proj.FieldName,
+				TupleIndex: proj.FieldIndex,
+				HasSubProj: true,
+			}
+		}
 		b.emit(Statement{
 			Kind:        op,
 			Place:       b.placeForSym(sym, ip.Span),
@@ -713,13 +838,14 @@ func (b *funcBuilder) registerPatternLocalsWithSubProj(pat ast.Pattern, initNow 
 			ParentPlace: pPlace,
 			Type:        sym.Type,
 			Span:        ip.Span,
+			Bridge:      &StatementBridge{SrcVal: srcBV, PatternBind: pb},
 		})
 		return
 	}
-	b.registerPatternLocals(pat, initNow, curScopeID, srcTemp, span)
+	b.registerPatternLocals(pat, initNow, curScopeID, srcTemp, srcBV, span)
 }
 
-func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curScopeID int, srcTemp ValueID, span diagnostic.Span) {
+func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curScopeID int, srcTemp ValueID, srcBV BridgeValID, span diagnostic.Span) {
 	if pat == nil {
 		return
 	}
@@ -749,18 +875,19 @@ func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curSc
 			SrcTemp: srcTemp,
 			Type:    sym.Type,
 			Span:    p.Span,
+			Bridge:  &StatementBridge{SrcVal: srcBV},
 		})
 
 	case *ast.TuplePattern:
 		for idx, sub := range p.Elems {
-			b.registerPatternLocalsWithSubProj(sub, initNow, curScopeID, srcTemp, Projection{Kind: ProjTupleField, FieldIndex: idx}, span)
+			b.registerPatternLocalsWithSubProj(sub, initNow, curScopeID, srcTemp, srcBV, Projection{Kind: ProjTupleField, FieldIndex: idx}, span)
 		}
 
 	case *ast.StructPattern:
 		for _, fp := range p.Fields {
 			subProj := Projection{Kind: ProjField, FieldName: fp.Name}
 			if fp.Pattern != nil {
-				b.registerPatternLocalsWithSubProj(fp.Pattern, initNow, curScopeID, srcTemp, subProj, fp.Span)
+				b.registerPatternLocalsWithSubProj(fp.Pattern, initNow, curScopeID, srcTemp, srcBV, subProj, fp.Span)
 			} else {
 				sym := symTab.NodeSymbols[fp]
 				if sym == nil {
@@ -777,6 +904,10 @@ func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curSc
 				if srcTemp != InvalidValue {
 					pPlace = Place{Projections: []Projection{subProj}}
 				}
+				var pb *BridgePatternBind
+				if srcBV != InvalidBridgeVal {
+					pb = &BridgePatternBind{SourceVal: srcBV, FieldName: fp.Name, HasSubProj: true}
+				}
 				b.emit(Statement{
 					Kind:        op,
 					Place:       b.placeForSym(sym, fp.Span),
@@ -784,18 +915,19 @@ func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curSc
 					ParentPlace: pPlace,
 					Type:        sym.Type,
 					Span:        fp.Span,
+					Bridge:      &StatementBridge{SrcVal: srcBV, PatternBind: pb},
 				})
 			}
 		}
 
 	case *ast.EnumPattern:
 		for _, arg := range p.Args {
-			b.registerPatternLocals(arg, initNow, curScopeID, srcTemp, span)
+			b.registerPatternLocals(arg, initNow, curScopeID, srcTemp, srcBV, span)
 		}
 
 	case *ast.SlicePattern:
 		for _, elem := range p.Elems {
-			b.registerPatternLocals(elem, initNow, curScopeID, srcTemp, span)
+			b.registerPatternLocals(elem, initNow, curScopeID, srcTemp, srcBV, span)
 		}
 
 	default:
@@ -816,7 +948,7 @@ func (b *funcBuilder) lowerAssignStmt(s *ast.AssignStmt) {
 	}
 	isCompound := s.Op != "" && s.Op != "="
 
-	b.lowerAssignTargetSubExprs(lhsExpr, isCompound, lhsPlace, s.Span)
+	lhsIdxVals := b.lowerAssignTargetSubExprs(lhsExpr, isCompound, lhsPlace, s.Span)
 
 	if isCompound {
 		b.emit(Statement{
@@ -824,10 +956,13 @@ func (b *funcBuilder) lowerAssignStmt(s *ast.AssignStmt) {
 			Place: lhsPlace,
 			Type:  lhsPlace.ElemType,
 			Span:  lhsExpr.GetSpan(),
+			Bridge: &StatementBridge{
+				IndexVals: lhsIdxVals,
+			},
 		})
 	}
 
-	valTemp := b.lowerExprVal(s.Value)
+	valTemp, valBV := b.lowerExpr(s.Value)
 
 	var copySrc Place
 	if !isCompound {
@@ -840,6 +975,11 @@ func (b *funcBuilder) lowerAssignStmt(s *ast.AssignStmt) {
 		CopyPlace: copySrc,
 		Type:      lhsPlace.ElemType,
 		Span:      s.Span,
+		Bridge: &StatementBridge{
+			SrcVal:    valBV,
+			IndexVals: lhsIdxVals,
+			AssignOp:  s.Op,
+		},
 	})
 }
 
@@ -873,10 +1013,11 @@ func (b *funcBuilder) extractCopySourcePlace(expr ast.Expr) (Place, bool) {
 	return Place{}, false
 }
 
-func (b *funcBuilder) lowerAssignTargetSubExprs(lhs ast.Expr, isCompound bool, lhsPlace Place, span diagnostic.Span) {
+func (b *funcBuilder) lowerAssignTargetSubExprs(lhs ast.Expr, isCompound bool, lhsPlace Place, span diagnostic.Span) []BridgeValID {
 	switch e := lhs.(type) {
 	case *ast.Identifier:
 		// 根变量本身将由右侧求值后的 OpAssign 写入
+		return nil
 
 	case *ast.IndexExpr:
 		if objPlace, ok := b.extractPlace(e.Object); ok {
@@ -889,15 +1030,19 @@ func (b *funcBuilder) lowerAssignTargetSubExprs(lhs ast.Expr, isCompound bool, l
 		} else {
 			b.lowerExprValue(e.Object)
 		}
-		b.lowerExprValue(e.Index)
+		_, idxBV := b.lowerExpr(e.Index)
+		if idxBV != InvalidBridgeVal {
+			return []BridgeValID{idxBV}
+		}
+		return nil
 
 	case *ast.FieldAccessExpr:
-		b.lowerAssignTargetSubExprs(e.Object, isCompound, lhsPlace, span)
+		return b.lowerAssignTargetSubExprs(e.Object, isCompound, lhsPlace, span)
 
 	case *ast.UnaryExpr:
 		if e.Op != "*" {
 			b.emitInternalError(e.Span, fmt.Sprintf("赋值左值遇到非解引用一元操作符 %q", e.Op))
-			return
+			return nil
 		}
 		if ptrPlace, ok := b.extractPlace(e.Expr); ok {
 			b.emit(Statement{
@@ -909,90 +1054,137 @@ func (b *funcBuilder) lowerAssignTargetSubExprs(lhs ast.Expr, isCompound bool, l
 		} else {
 			b.lowerExprValue(e.Expr)
 		}
+		return nil
 
 	default:
 		b.emitInternalError(lhs.GetSpan(), fmt.Sprintf("赋值左值包含未处理节点 %T", lhs))
+		return nil
 	}
 }
 
 func (b *funcBuilder) lowerIfStmt(s *ast.IfStmt) {
-	b.lowerIfExpr(s, InvalidValue, types.Invalid)
+	b.lowerIfExpr(s, InvalidValue, InvalidBridgeVal, types.Invalid)
 }
 
-func (b *funcBuilder) lowerIfExpr(s *ast.IfStmt, destTemp ValueID, destType types.TypeID) {
-	b.lowerExprValue(s.Cond)
+func (b *funcBuilder) lowerIfExpr(s *ast.IfStmt, destTemp ValueID, destBV BridgeValID, destType types.TypeID) {
+	_, condBV := b.lowerExpr(s.Cond)
 	condBB := b.curBB
 	thenBB := b.newBlock("if.then")
 	elseBB := b.newBlock("if.else")
 	mergeBB := b.newBlock("if.merge")
 
-	b.terminateSwitch(condBB, []BlockID{thenBB, elseBB}, s.Span)
+	b.terminateSwitchBridge(condBB, []BlockID{thenBB, elseBB}, &TerminatorBridge{
+		SwitchKind: BridgeSwitchIf,
+		CondVal:    condBV,
+	}, s.Span)
 
 	b.curBB = thenBB
-	if destTemp != InvalidValue {
-		b.lowerBlockWithResult(s.Then, destTemp, destType)
+	if destTemp != InvalidValue || destBV != InvalidBridgeVal {
+		yieldBV := b.lowerBlockWithResult(s.Then, destTemp, destBV, destType)
+		thenEnd := b.curBB
+		if !b.isTerminated(thenEnd) {
+			var tb *TerminatorBridge
+			if destBV != InvalidBridgeVal && yieldBV != InvalidBridgeVal {
+				tb = &TerminatorBridge{YieldDest: destBV, YieldVal: yieldBV}
+			}
+			b.terminateGotoBridge(thenEnd, mergeBB, tb, s.Span)
+		}
 	} else {
 		b.lowerBlock(s.Then)
-	}
-	thenEnd := b.curBB
-	thenClosed := b.isTerminated(thenEnd)
-	if !thenClosed {
-		b.terminateGoto(thenEnd, mergeBB, s.Span)
-	}
-
-	b.curBB = elseBB
-	if s.Else != nil {
-		if blk, isBlk := s.Else.(*ast.BlockStmt); isBlk && destTemp != InvalidValue {
-			b.lowerBlockWithResult(blk, destTemp, destType)
-		} else if innerIf, isIf := s.Else.(*ast.IfStmt); isIf && destTemp != InvalidValue {
-			b.lowerIfExpr(innerIf, destTemp, destType)
-		} else {
-			b.lowerStmt(s.Else)
+		thenEnd := b.curBB
+		if !b.isTerminated(thenEnd) {
+			b.terminateGoto(thenEnd, mergeBB, s.Span)
 		}
 	}
-	elseEnd := b.curBB
-	elseClosed := b.isTerminated(elseEnd)
-	if !elseClosed {
+	thenClosed := b.isTerminated(b.curBB) && len(b.fn.Blocks[b.curBB].Terminator.Targets) == 0 ||
+		(b.fn.Blocks[b.curBB].Terminator.Kind == TermReturn)
+
+	b.curBB = elseBB
+	var elseEnd BlockID
+	if s.Else != nil {
+		if blk, isBlk := s.Else.(*ast.BlockStmt); isBlk && (destTemp != InvalidValue || destBV != InvalidBridgeVal) {
+			yieldBV := b.lowerBlockWithResult(blk, destTemp, destBV, destType)
+			elseEnd = b.curBB
+			if !b.isTerminated(elseEnd) {
+				var tb *TerminatorBridge
+				if destBV != InvalidBridgeVal && yieldBV != InvalidBridgeVal {
+					tb = &TerminatorBridge{YieldDest: destBV, YieldVal: yieldBV}
+				}
+				b.terminateGotoBridge(elseEnd, mergeBB, tb, s.Span)
+			}
+		} else if innerIf, isIf := s.Else.(*ast.IfStmt); isIf && (destTemp != InvalidValue || destBV != InvalidBridgeVal) {
+			b.lowerIfExpr(innerIf, destTemp, destBV, destType)
+			elseEnd = b.curBB
+			if !b.isTerminated(elseEnd) {
+				b.terminateGoto(elseEnd, mergeBB, s.Span)
+			}
+		} else {
+			b.lowerStmt(s.Else)
+			elseEnd = b.curBB
+			if !b.isTerminated(elseEnd) {
+				b.terminateGoto(elseEnd, mergeBB, s.Span)
+			}
+		}
+	} else {
+		elseEnd = b.curBB
 		b.terminateGoto(elseEnd, mergeBB, s.Span)
 	}
-
-	if thenClosed && elseClosed {
+	elseClosed := s.Else != nil && b.fn.Blocks[elseEnd].Terminator.Kind == TermReturn ||
+		b.fn.Blocks[elseEnd].Terminator.Kind == TermUnreachable
+	// 同时按原逻辑检查 then/else 在追加 Goto mergeBB 前是否已闭合
+	_ = thenClosed
+	_ = elseClosed
+	// Re-check whether mergeBB has zero incoming goto edges:
+	hasIncomingToMerge := false
+	for _, blk := range b.fn.Blocks {
+		if blk.Terminator.Kind == TermGoto && len(blk.Terminator.Targets) == 1 && blk.Terminator.Targets[0] == mergeBB {
+			hasIncomingToMerge = true
+			break
+		}
+	}
+	if !hasIncomingToMerge {
 		b.fn.Blocks[mergeBB].Terminator = Terminator{Kind: TermUnreachable, Span: s.Span}
 	}
 	b.curBB = mergeBB
 }
 
-func (b *funcBuilder) lowerBlockWithResult(blk *ast.BlockStmt, destTemp ValueID, destType types.TypeID) {
+func (b *funcBuilder) lowerBlockWithResult(blk *ast.BlockStmt, destTemp ValueID, destBV BridgeValID, destType types.TypeID) BridgeValID {
 	if blk == nil {
-		return
+		return InvalidBridgeVal
 	}
 	sid := b.pushScope(blk.Span)
-	b.lowerBlockStmtsWithResult(blk, destTemp, destType)
+	resBV := b.lowerBlockStmtsWithResult(blk, destTemp, destBV, destType)
 	if !b.isTerminated(b.curBB) {
 		b.popScope(sid, blk.Span)
 	} else {
 		b.discardTopScope()
 	}
+	return resBV
 }
 
-func (b *funcBuilder) lowerBlockStmtsWithResult(blk *ast.BlockStmt, destTemp ValueID, destType types.TypeID) {
+func (b *funcBuilder) lowerBlockStmtsWithResult(blk *ast.BlockStmt, destTemp ValueID, destBV BridgeValID, destType types.TypeID) BridgeValID {
 	if blk == nil {
-		return
+		return InvalidBridgeVal
 	}
+	var yieldBV BridgeValID
 	for i, stmt := range blk.Statements {
 		if b.isTerminated(b.curBB) {
+			b.pendingComputes = nil
 			deadBB := b.newBlock("unreachable")
 			b.curBB = deadBB
 		}
-		if destTemp != InvalidValue && i == len(blk.Statements)-1 {
+		if (destTemp != InvalidValue || destBV != InvalidBridgeVal) && i == len(blk.Statements)-1 {
 			if es, isExpr := stmt.(*ast.ExprStmt); isExpr {
-				if val := b.lowerExprVal(es.Expr); val != InvalidValue {
+				val, valBV := b.lowerExpr(es.Expr)
+				yieldBV = valBV
+				if val != InvalidValue && destTemp != InvalidValue {
 					b.emit(Statement{
 						Kind:    OpTempAssign,
 						ValTemp: destTemp,
 						SrcTemp: val,
 						Type:    destType,
 						Span:    es.Span,
+						Bridge:  &StatementBridge{ResultVal: destBV, SrcVal: valBV},
 					})
 				}
 				continue
@@ -1000,6 +1192,7 @@ func (b *funcBuilder) lowerBlockStmtsWithResult(blk *ast.BlockStmt, destTemp Val
 		}
 		b.lowerStmt(stmt)
 	}
+	return yieldBV
 }
 
 func (b *funcBuilder) lowerWhileStmt(s *ast.WhileStmt) {
@@ -1010,8 +1203,11 @@ func (b *funcBuilder) lowerWhileStmt(s *ast.WhileStmt) {
 	b.terminateGoto(b.curBB, headerBB, s.Span)
 
 	b.curBB = headerBB
-	b.lowerExprValue(s.Cond)
-	b.terminateSwitch(headerBB, []BlockID{bodyBB, exitBB}, s.Cond.GetSpan())
+	_, condBV := b.lowerExpr(s.Cond)
+	b.terminateSwitchBridge(headerBB, []BlockID{bodyBB, exitBB}, &TerminatorBridge{
+		SwitchKind: BridgeSwitchWhile,
+		CondVal:    condBV,
+	}, s.Cond.GetSpan())
 
 	b.loops = append(b.loops, loopFrame{
 		breakBB:    exitBB,
@@ -1030,13 +1226,16 @@ func (b *funcBuilder) lowerWhileStmt(s *ast.WhileStmt) {
 }
 
 func (b *funcBuilder) lowerForStmt(s *ast.ForStmt) {
-	b.lowerExprValue(s.Iter)
+	_, iterBV := b.lowerExpr(s.Iter)
 	headerBB := b.newBlock("for.header")
 	bodyBB := b.newBlock("for.body")
 	exitBB := b.newBlock("for.exit")
 
 	b.terminateGoto(b.curBB, headerBB, s.Span)
-	b.terminateSwitch(headerBB, []BlockID{bodyBB, exitBB}, s.Span)
+	b.terminateSwitchBridge(headerBB, []BlockID{bodyBB, exitBB}, &TerminatorBridge{
+		SwitchKind: BridgeSwitchFor,
+		CondVal:    iterBV,
+	}, s.Span)
 
 	b.loops = append(b.loops, loopFrame{
 		breakBB:    exitBB,
@@ -1047,9 +1246,9 @@ func (b *funcBuilder) lowerForStmt(s *ast.ForStmt) {
 	b.curBB = bodyBB
 	sid := b.pushScope(s.Span)
 	if s.Pattern != nil {
-		b.registerPatternLocals(s.Pattern, true, sid, InvalidValue, s.Span)
+		b.registerPatternLocals(s.Pattern, true, sid, InvalidValue, iterBV, s.Span)
 	}
-	b.lowerBlockStatements(s.Body)
+	_ = b.lowerBlockStatements(s.Body, false)
 	if !b.isTerminated(b.curBB) {
 		b.popScope(sid, s.Span)
 		b.terminateGoto(b.curBB, headerBB, s.Span)
@@ -1063,22 +1262,29 @@ func (b *funcBuilder) lowerForStmt(s *ast.ForStmt) {
 
 // lowerMatchExpr 为 match 表达式的每个分支单独降低所有权语义，精确区分引用模式分支与按值移动分支，并忠实表达守卫落空流转。
 func (b *funcBuilder) lowerMatchExpr(m *ast.MatchExpr) {
-	b.lowerMatchExprVal(m, InvalidValue, types.Invalid)
+	b.lowerMatchExprVal(m, InvalidValue, InvalidBridgeVal, types.Invalid)
 }
 
-func (b *funcBuilder) lowerMatchExprVal(m *ast.MatchExpr, destTemp ValueID, destType types.TypeID) {
+func (b *funcBuilder) lowerMatchExprVal(m *ast.MatchExpr, destTemp ValueID, destBV BridgeValID, destType types.TypeID) {
 	subjPlace, hasSubjPlace := b.extractPlace(m.Subject)
+	var subjBV BridgeValID
 	if hasSubjPlace {
 		// 在分发点仅检查标签判别式可读性，绝不在进入具体分支前提前吞并整个主体
-		b.lowerPlacePrereqs(m.Subject, subjPlace)
+		idxVals := b.lowerPlacePrereqsVals(m.Subject, subjPlace)
+		subjType := b.view.ExprType(m.Subject)
+		if subjType == types.Invalid {
+			subjType = subjPlace.ElemType
+		}
+		subjBV = b.allocBridgeVal(subjType, false, m.Subject.GetSpan())
 		b.emit(Statement{
-			Kind:  OpRead,
-			Place: subjPlace,
-			Type:  b.view.ExprType(m.Subject),
-			Span:  m.Subject.GetSpan(),
+			Kind:   OpRead,
+			Place:  subjPlace,
+			Type:   b.view.ExprType(m.Subject),
+			Span:   m.Subject.GetSpan(),
+			Bridge: &StatementBridge{ResultVal: subjBV, IndexVals: idxVals},
 		})
 	} else {
-		b.lowerExprValue(m.Subject)
+		_, subjBV = b.lowerExpr(m.Subject)
 	}
 
 	switchBB := b.curBB
@@ -1091,10 +1297,27 @@ func (b *funcBuilder) lowerMatchExprVal(m *ast.MatchExpr, destTemp ValueID, dest
 	}
 
 	armTests := make([]BlockID, len(m.Arms))
-	for i := range m.Arms {
+	matchCases := make([]BridgeMatchCase, len(m.Arms))
+	for i, arm := range m.Arms {
 		armTests[i] = b.newBlock(fmt.Sprintf("match.arm%d.pat", i))
+		mc := BridgeMatchCase{
+			Label:   describePatternLabel(arm.Pattern, b.view),
+			Guarded: arm.Guard != nil,
+			Target:  armTests[i],
+		}
+		if lp, ok := arm.Pattern.(*ast.LiteralPattern); ok {
+			if il, isInt := lp.Literal.(*ast.IntegerLiteral); isInt && il.Valid && il.Value != nil && il.Value.IsInt64() {
+				mc.IsIntLiteral = true
+				mc.IntValue = il.Value.Int64()
+			}
+		}
+		matchCases[i] = mc
 	}
-	b.terminateSwitch(switchBB, armTests, m.Span)
+	b.terminateSwitchBridge(switchBB, armTests, &TerminatorBridge{
+		SwitchKind: BridgeSwitchMatch,
+		CondVal:    subjBV,
+		MatchCases: matchCases,
+	}, m.Span)
 
 	subjType := b.view.ExprType(m.Subject)
 	if subjType == types.Invalid && hasSubjPlace {
@@ -1120,15 +1343,18 @@ func (b *funcBuilder) lowerMatchExprVal(m *ast.MatchExpr, destTemp ValueID, dest
 		}
 
 		if arm.Pattern != nil {
-			b.applyArmPatternOwnership(arm.Pattern, subjPlace, hasSubjPlace, subjType, sid)
+			b.applyArmPatternOwnership(arm.Pattern, subjPlace, hasSubjPlace, subjType, subjBV, sid)
 		}
 
 		if arm.Guard != nil {
-			b.lowerExprValue(arm.Guard)
+			_, guardBV := b.lowerExpr(arm.Guard)
 			guardBB := b.curBB
 			armBodyBB := b.newBlock(fmt.Sprintf("match.arm%d.body", i))
 			guardFailBB := b.newBlock(fmt.Sprintf("match.arm%d.gfail", i))
-			b.terminateSwitch(guardBB, []BlockID{armBodyBB, guardFailBB}, arm.Guard.GetSpan())
+			b.terminateSwitchBridge(guardBB, []BlockID{armBodyBB, guardFailBB}, &TerminatorBridge{
+				SwitchKind: BridgeSwitchMatchGuard,
+				CondVal:    guardBV,
+			}, arm.Guard.GetSpan())
 
 			// 守卫失败路径先退出当前分支绑定作用域，再汇入后续候选分支或退出合并点
 			b.curBB = guardFailBB
@@ -1143,11 +1369,15 @@ func (b *funcBuilder) lowerMatchExprVal(m *ast.MatchExpr, destTemp ValueID, dest
 			b.curBB = armBodyBB
 		}
 
-		b.lowerBlockStmtsWithResult(arm.Body, destTemp, destType)
+		yieldBV := b.lowerBlockStmtsWithResult(arm.Body, destTemp, destBV, destType)
 		if !b.isTerminated(b.curBB) {
 			allDiverged = false
 			b.popScope(sid, arm.Span)
-			b.terminateGoto(b.curBB, mergeBB, arm.Span)
+			var tb *TerminatorBridge
+			if destBV != InvalidBridgeVal && yieldBV != InvalidBridgeVal {
+				tb = &TerminatorBridge{YieldDest: destBV, YieldVal: yieldBV}
+			}
+			b.terminateGotoBridge(b.curBB, mergeBB, tb, arm.Span)
 		} else {
 			b.discardTopScope()
 		}
@@ -1157,6 +1387,45 @@ func (b *funcBuilder) lowerMatchExprVal(m *ast.MatchExpr, destTemp ValueID, dest
 		b.fn.Blocks[mergeBB].Terminator = Terminator{Kind: TermUnreachable, Span: m.Span}
 	}
 	b.curBB = mergeBB
+}
+
+func describePatternLabel(pat ast.Pattern, view SemanticView) string {
+	switch p := pat.(type) {
+	case nil:
+		return "_"
+	case *ast.WildcardPattern:
+		return "_"
+	case *ast.IdentPattern:
+		return p.Name
+	case *ast.LiteralPattern:
+		switch l := p.Literal.(type) {
+		case *ast.IntegerLiteral:
+			return l.Raw
+		case *ast.BoolLiteral:
+			return fmt.Sprintf("%v", l.Value)
+		default:
+			return "lit"
+		}
+	case *ast.EnumPattern:
+		if len(p.Path) > 0 {
+			return p.Path[len(p.Path)-1]
+		}
+		if vi := view.VariantRef(p); vi != nil {
+			return vi.Name
+		}
+		return "enum"
+	case *ast.StructPattern:
+		if len(p.Path) > 0 {
+			return p.Path[len(p.Path)-1]
+		}
+		return "struct"
+	case *ast.TuplePattern:
+		return "tuple"
+	case *ast.SlicePattern:
+		return "slice"
+	default:
+		return "pat"
+	}
 }
 
 func (b *funcBuilder) popScopeKeepFrame(span diagnostic.Span) {
@@ -1185,7 +1454,7 @@ func (b *funcBuilder) popScopeKeepFrame(span diagnostic.Span) {
 }
 
 // applyArmPatternOwnership 按单个 match 分支的实际模式种类生成独立的所有权/移动/借用事件与绑定初始化。
-func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, hasPlace bool, patType types.TypeID, scopeID int) {
+func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, hasPlace bool, patType types.TypeID, subjBV BridgeValID, scopeID int) {
 	if pat == nil {
 		return
 	}
@@ -1213,6 +1482,7 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 			return
 		}
 		var initSrcTemp ValueID
+		initSrcBV := subjBV
 		if hasPlace {
 			if p.IsRef {
 				op := OpBorrowShared
@@ -1238,17 +1508,28 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 					}
 				}
 				initSrcTemp = b.nextTemp()
+				borrowType := sym.Type
+				if tctx != nil && tctx.Info(borrowType).Kind != types.KindRef {
+					elemT := borrowPlace.ElemType
+					if elemT == types.Invalid {
+						elemT = borrowType
+					}
+					borrowType = tctx.Ref(p.IsMut, elemT)
+				}
+				bBV := b.allocBridgeVal(borrowType, false, p.Span)
+				initSrcBV = bBV
 				b.emit(Statement{Kind: OpRead, Place: place, Type: place.ElemType, Span: p.Span})
 				b.emit(Statement{
 					Kind:        op,
 					Place:       borrowPlace,
-					Type:        sym.Type,
+					Type:        borrowType,
 					LoanID:      b.nextLoan(),
 					BorrowKind:  bk,
 					IsReborrow:  reborrow,
 					ParentPlace: parentPlace,
 					ValTemp:     initSrcTemp,
 					Span:        p.Span,
+					Bridge:      &StatementBridge{ResultVal: bBV},
 				})
 			} else if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
 				if isThroughRef || place.HasDeref() || place.HasIndex() {
@@ -1260,19 +1541,25 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 					if b.isRefCarryingType(sym.Type) {
 						initSrcTemp = b.nextTemp()
 					}
-					b.emit(Statement{Kind: OpMove, Place: pEmit, Type: sym.Type, ValTemp: initSrcTemp, Span: p.Span})
+					mvBV := b.allocBridgeVal(sym.Type, false, p.Span)
+					initSrcBV = mvBV
+					b.emit(Statement{Kind: OpMove, Place: pEmit, Type: sym.Type, ValTemp: initSrcTemp, Span: p.Span, Bridge: &StatementBridge{ResultVal: mvBV}})
 				} else {
 					if b.isRefCarryingType(sym.Type) {
 						initSrcTemp = b.nextTemp()
 					}
-					b.emit(Statement{Kind: OpMove, Place: place, Type: sym.Type, ValTemp: initSrcTemp, Span: p.Span})
+					mvBV := b.allocBridgeVal(sym.Type, false, p.Span)
+					initSrcBV = mvBV
+					b.emit(Statement{Kind: OpMove, Place: place, Type: sym.Type, ValTemp: initSrcTemp, Span: p.Span, Bridge: &StatementBridge{ResultVal: mvBV}})
 				}
 			} else {
 				// Copy 类型按值绑定同样记录显式 OpCopy 源读取，确保每个局部变量均有对应的源所有权操作且不产生伪 Move
 				if b.isRefCarryingType(sym.Type) {
 					initSrcTemp = b.nextTemp()
 				}
-				b.emit(Statement{Kind: OpCopy, Place: place, Type: sym.Type, ValTemp: initSrcTemp, Span: p.Span})
+				cpBV := b.allocBridgeVal(sym.Type, false, p.Span)
+				initSrcBV = cpBV
+				b.emit(Statement{Kind: OpCopy, Place: place, Type: sym.Type, ValTemp: initSrcTemp, Span: p.Span, Bridge: &StatementBridge{ResultVal: cpBV}})
 			}
 		}
 		b.registerLocal(sym, false, -1, true, scopeID)
@@ -1283,12 +1570,13 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 			SrcTemp: initSrcTemp,
 			Type:    sym.Type,
 			Span:    p.Span,
+			Bridge:  &StatementBridge{SrcVal: initSrcBV},
 		})
 
 	case *ast.StructPattern:
 		// 区分 1) 枚举结构体变体 vs 2) 直接结构体字段部分匹配
 		if b.view.VariantRef(p) != nil {
-			b.lowerOpaqueAggregatePattern(p, place, hasPlace, isThroughRef, scopeID)
+			b.lowerOpaqueAggregatePattern(p, place, hasPlace, isThroughRef, subjBV, scopeID)
 			return
 		}
 
@@ -1310,15 +1598,25 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 					continue
 				}
 				var fieldValTemp ValueID
+				var fieldBV BridgeValID
 				if hasPlace {
 					if b.isRefCarryingType(sym.Type) {
 						fieldValTemp = b.nextTemp()
 					}
+					fieldBV = b.allocBridgeVal(sym.Type, false, fp.Span)
 					if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
-						b.emit(Statement{Kind: OpMove, Place: fieldPlace, Type: sym.Type, ValTemp: fieldValTemp, Span: fp.Span})
+						b.emit(Statement{Kind: OpMove, Place: fieldPlace, Type: sym.Type, ValTemp: fieldValTemp, Span: fp.Span, Bridge: &StatementBridge{ResultVal: fieldBV}})
 					} else {
-						b.emit(Statement{Kind: OpCopy, Place: fieldPlace, Type: sym.Type, ValTemp: fieldValTemp, Span: fp.Span})
+						b.emit(Statement{Kind: OpCopy, Place: fieldPlace, Type: sym.Type, ValTemp: fieldValTemp, Span: fp.Span, Bridge: &StatementBridge{ResultVal: fieldBV}})
 					}
+				} else if subjBV != InvalidBridgeVal {
+					fieldBV = b.pushCompute(ComputeOp{
+						Kind:      CompExtractField,
+						Src:       subjBV,
+						FieldName: fp.Name,
+						Type:      sym.Type,
+						Span:      fp.Span,
+					})
 				}
 				b.registerLocal(sym, false, -1, true, scopeID)
 				b.addLocalToTopScope(sym.ID)
@@ -1328,16 +1626,17 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 					SrcTemp: fieldValTemp,
 					Type:    sym.Type,
 					Span:    fp.Span,
+					Bridge:  &StatementBridge{SrcVal: fieldBV, PatternBind: &BridgePatternBind{SourceVal: subjBV, FieldName: fp.Name, HasSubProj: true}},
 				})
 				continue
 			}
 
-			b.applyArmPatternOwnership(fp.Pattern, fieldPlace, hasPlace, fType, scopeID)
+			b.applyArmPatternOwnership(fp.Pattern, fieldPlace, hasPlace, fType, subjBV, scopeID)
 		}
 
 	case *ast.EnumPattern, *ast.TuplePattern, *ast.SlicePattern:
 		// 尚未实现 ProjDowncast / ProjTupleField 的聚合解构模式：保持借用与移动事件完整，或对不支持混合体执行保守拒绝
-		b.lowerOpaqueAggregatePattern(p, place, hasPlace, isThroughRef, scopeID)
+		b.lowerOpaqueAggregatePattern(p, place, hasPlace, isThroughRef, subjBV, scopeID)
 
 	default:
 		b.emitInternalError(pat.GetSpan(), fmt.Sprintf("match 模式匹配遇到未处理的模式节点 %T", pat))
@@ -1396,13 +1695,16 @@ func (b *funcBuilder) patternConsumesNonCopy(pat ast.Pattern) bool {
 	}
 }
 
-func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, hasPlace bool, isThroughRef bool, scopeID int) {
+func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, hasPlace bool, isThroughRef bool, subjBV BridgeValID, scopeID int) {
 	tctx := b.view.GetTypes()
 	symTab := b.view.GetSymbols()
 
 	type patBind struct {
-		sym     *symbols.Symbol
-		srcTemp ValueID
+		sym       *symbols.Symbol
+		srcTemp   ValueID
+		srcBV     BridgeValID
+		fieldName string
+		tupleIdx  int
 	}
 	var bindings []patBind
 	var borrowOps []Statement
@@ -1429,6 +1731,17 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 			aggReadTemp = b.nextTemp()
 		}
 		return aggReadTemp
+	}
+	var aggReadBV BridgeValID
+	ensureAggBV := func() BridgeValID {
+		if aggReadBV == InvalidBridgeVal {
+			if hasPlace {
+				aggReadBV = b.allocBridgeVal(place.ElemType, false, pat.GetSpan())
+			} else {
+				aggReadBV = subjBV
+			}
+		}
+		return aggReadBV
 	}
 
 	var walk func(node ast.Pattern, elemPlace Place)
@@ -1465,35 +1778,46 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 					}
 				}
 				var bt ValueID
+				var bBV BridgeValID
 				if hasPlace {
 					bt = b.nextTemp()
+					borrowType := sym.Type
+					if tctx != nil && tctx.Info(borrowType).Kind != types.KindRef {
+						elemT := elemPlace.ElemType
+						if elemT == types.Invalid {
+							elemT = borrowType
+						}
+						borrowType = tctx.Ref(p.IsMut, elemT)
+					}
+					bBV = b.allocBridgeVal(borrowType, false, p.Span)
 					borrowOps = append(borrowOps, Statement{
 						Kind:        op,
 						Place:       elemPlace,
-						Type:        sym.Type,
+						Type:        borrowType,
 						LoanID:      b.nextLoan(),
 						BorrowKind:  bk,
 						IsReborrow:  isReborrow,
 						ParentPlace: parentPlace,
 						ValTemp:     bt,
 						Span:        p.Span,
+						Bridge:      &StatementBridge{ResultVal: bBV},
 					})
 				}
-				bindings = append(bindings, patBind{sym: sym, srcTemp: bt})
+				bindings = append(bindings, patBind{sym: sym, srcTemp: bt, srcBV: bBV})
 			} else if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
 				hasNonCopyMove = true
 				var st ValueID
 				if hasPlace && b.isRefCarryingType(sym.Type) {
 					st = ensureAggTemp()
 				}
-				bindings = append(bindings, patBind{sym: sym, srcTemp: st})
+				bindings = append(bindings, patBind{sym: sym, srcTemp: st, srcBV: ensureAggBV()})
 			} else {
 				hasCopyBind = true
 				var st ValueID
 				if hasPlace && b.isRefCarryingType(sym.Type) {
 					st = ensureAggTemp()
 				}
-				bindings = append(bindings, patBind{sym: sym, srcTemp: st})
+				bindings = append(bindings, patBind{sym: sym, srcTemp: st, srcBV: ensureAggBV()})
 			}
 		case *ast.TuplePattern:
 			for idx, el := range p.Elems {
@@ -1521,7 +1845,7 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 					if hasPlace && b.isRefCarryingType(sym.Type) {
 						st = ensureAggTemp()
 					}
-					bindings = append(bindings, patBind{sym: sym, srcTemp: st})
+					bindings = append(bindings, patBind{sym: sym, srcTemp: st, srcBV: ensureAggBV(), fieldName: fp.Name})
 				} else {
 					b.emitInternalError(fp.Span, fmt.Sprintf("嵌套结构体简写字段 '%s' 缺少 SymbolID", fp.Name))
 				}
@@ -1554,7 +1878,7 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 			if isThroughRef && !place.HasDeref() {
 				movePlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: place.ElemType}, place.ElemType, pat.GetSpan())
 			}
-			b.emit(Statement{Kind: OpMove, Place: movePlace, Type: place.ElemType, ValTemp: aggReadTemp, Span: pat.GetSpan()})
+			b.emit(Statement{Kind: OpMove, Place: movePlace, Type: place.ElemType, ValTemp: aggReadTemp, Span: pat.GetSpan(), Bridge: &StatementBridge{ResultVal: aggReadBV}})
 		} else {
 			if hasRef {
 				b.emit(Statement{Kind: OpRead, Place: place, Type: place.ElemType, Span: pat.GetSpan()})
@@ -1563,7 +1887,7 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 				}
 			}
 			if hasCopyBind {
-				b.emit(Statement{Kind: OpCopy, Place: place, Type: place.ElemType, ValTemp: aggReadTemp, Span: pat.GetSpan()})
+				b.emit(Statement{Kind: OpCopy, Place: place, Type: place.ElemType, ValTemp: aggReadTemp, Span: pat.GetSpan(), Bridge: &StatementBridge{ResultVal: aggReadBV}})
 			}
 		}
 	}
@@ -1571,12 +1895,23 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 	for _, bd := range bindings {
 		b.registerLocal(bd.sym, false, -1, true, scopeID)
 		b.addLocalToTopScope(bd.sym.ID)
+		var stBridge *StatementBridge
+		if bd.srcBV != InvalidBridgeVal || subjBV != InvalidBridgeVal {
+			stBridge = &StatementBridge{
+				SrcVal: bd.srcBV,
+				PatternBind: &BridgePatternBind{
+					SourceVal: subjBV,
+					FieldName: bd.fieldName,
+				},
+			}
+		}
 		b.emit(Statement{
 			Kind:    OpInitAssign,
 			Place:   b.placeForSym(bd.sym, bd.sym.Span),
 			SrcTemp: bd.srcTemp,
 			Type:    bd.sym.Type,
 			Span:    bd.sym.Span,
+			Bridge:  stBridge,
 		})
 	}
 }
@@ -1609,12 +1944,17 @@ func findStructFieldType(structType types.TypeID, fieldName string, symTab *symb
 
 // lowerExprValue 按所有权与求值顺序降低任意右值表达式，并在末尾对任何未知 AST 表达式触发 WON-INT-001。
 func (b *funcBuilder) lowerExprValue(expr ast.Expr) {
-	_ = b.lowerExprVal(expr)
+	_, _ = b.lowerExpr(expr)
 }
 
 func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
+	vt, _ := b.lowerExpr(expr)
+	return vt
+}
+
+func (b *funcBuilder) lowerExpr(expr ast.Expr) (ValueID, BridgeValID) {
 	if expr == nil {
-		return InvalidValue
+		return InvalidValue, InvalidBridgeVal
 	}
 
 	if place, ok := b.extractPlace(expr); ok {
@@ -1622,82 +1962,291 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 	}
 
 	exprType := b.view.ExprType(expr)
+	tctx := b.view.GetTypes()
 	switch e := expr.(type) {
-	case *ast.IntegerLiteral, *ast.FloatLiteral, *ast.BoolLiteral, *ast.CharLiteral, *ast.ByteLiteral, *ast.PathExpr:
-		return InvalidValue
+	case *ast.IntegerLiteral:
+		intStr := e.Raw
+		if e.Value != nil {
+			intStr = e.Value.String()
+		}
+		bv := b.pushCompute(ComputeOp{
+			Kind:      CompConst,
+			ConstKind: "int",
+			IntText:   intStr,
+			Type:      exprType,
+			Span:      e.Span,
+		})
+		return InvalidValue, bv
+
+	case *ast.FloatLiteral:
+		bv := b.pushCompute(ComputeOp{
+			Kind:      CompConst,
+			ConstKind: "float",
+			FloatVal:  e.Value,
+			FloatRaw:  e.Raw,
+			Type:      exprType,
+			Span:      e.Span,
+		})
+		return InvalidValue, bv
+
+	case *ast.BoolLiteral:
+		bv := b.pushCompute(ComputeOp{
+			Kind:      CompConst,
+			ConstKind: "bool",
+			BoolVal:   e.Value,
+			Type:      exprType,
+			Span:      e.Span,
+		})
+		return InvalidValue, bv
+
+	case *ast.CharLiteral:
+		bv := b.pushCompute(ComputeOp{
+			Kind:      CompConst,
+			ConstKind: "char",
+			RuneVal:   e.Value,
+			Type:      exprType,
+			Span:      e.Span,
+		})
+		return InvalidValue, bv
+
+	case *ast.ByteLiteral:
+		bv := b.pushCompute(ComputeOp{
+			Kind:      CompConst,
+			ConstKind: "byte",
+			ByteVal:   e.Value,
+			Type:      exprType,
+			Span:      e.Span,
+		})
+		return InvalidValue, bv
+
+	case *ast.PathExpr:
+		vi := b.view.VariantRef(e)
+		vIdx := -1
+		vName := ""
+		if len(e.Segments) == 2 {
+			vName = e.Segments[1]
+			if vi != nil {
+				vName = vi.Name
+			}
+			if e.Segments[0] == "Option" && e.Segments[1] == "None" {
+				vIdx = 1
+			}
+		}
+		if vi != nil && exprType != types.Invalid && tctx != nil {
+			if enumSym := b.view.GetSymbols().ByID[symbols.SymbolID(tctx.Info(exprType).SymbolID)]; enumSym != nil {
+				for idx, cand := range enumSym.Variants {
+					if cand.Name == vi.Name {
+						vIdx = idx
+						break
+					}
+				}
+			}
+		}
+		bv := b.pushCompute(ComputeOp{
+			Kind:        CompEnumUnit,
+			VariantInfo: vi,
+			VariantIdx:  vIdx,
+			VariantName: vName,
+			Type:        exprType,
+			Span:        e.Span,
+		})
+		return InvalidValue, bv
 
 	case *ast.StringLiteral:
 		if b.isRefCarryingType(exprType) {
 			v := b.nextTemp()
+			bv := b.allocBridgeVal(exprType, false, e.Span)
 			b.emit(Statement{
 				Kind:    OpStaticRef,
 				ValTemp: v,
 				Type:    exprType,
 				Span:    e.Span,
+				Bridge: &StatementBridge{
+					ResultVal: bv,
+					PreComputes: []ComputeOp{{
+						Kind:      CompConst,
+						Dest:      bv,
+						ConstKind: "string",
+						StrVal:    e.Value,
+						Type:      exprType,
+						Span:      e.Span,
+					}},
+				},
 			})
-			return v
+			return v, bv
 		}
-		return InvalidValue
+		bv := b.pushCompute(ComputeOp{
+			Kind:      CompConst,
+			ConstKind: "string",
+			StrVal:    e.Value,
+			Type:      exprType,
+			Span:      e.Span,
+		})
+		return InvalidValue, bv
 
 	case *ast.InterpolatedStringExpr:
+		parts := make([]BridgeInterpPart, 0, len(e.Parts))
 		for _, part := range e.Parts {
 			if part.IsExpr && part.Expr != nil {
-				b.lowerExprValue(part.Expr)
+				_, pv := b.lowerExpr(part.Expr)
+				parts = append(parts, BridgeInterpPart{IsExpr: true, Value: pv})
+			} else {
+				parts = append(parts, BridgeInterpPart{IsExpr: false, Literal: part.Literal})
 			}
 		}
-		return InvalidValue
+		bv := b.pushCompute(ComputeOp{
+			Kind:        CompInterpString,
+			InterpParts: parts,
+			Type:        exprType,
+			Span:        e.Span,
+		})
+		return InvalidValue, bv
 
 	case *ast.ArrayLiteral:
-		if v, ok := b.lowerAggregateExprsWithCleanup(e.Elems, func(i int, tv ValueID) AggTemp {
+		if v, bv, ok := b.lowerAggregateExprsWithCleanup(e.Elems, func(i int, tv ValueID) AggTemp {
 			return AggTemp{Index: i, Temp: tv}
-		}, exprType, e.Span); ok {
-			return v
+		}, "array", nil, nil, exprType, e.Span); ok {
+			return v, bv
 		}
 		var aggTemps []AggTemp
+		aggItems := make([]BridgeAggItem, 0, len(e.Elems))
 		for idx, el := range e.Elems {
-			if tv := b.lowerExprVal(el); tv != InvalidValue {
+			tv, ebv := b.lowerExpr(el)
+			if tv != InvalidValue {
 				aggTemps = append(aggTemps, AggTemp{Index: idx, Temp: tv})
 			}
+			aggItems = append(aggItems, BridgeAggItem{FieldIndex: idx, Value: ebv})
 		}
 		if len(aggTemps) > 0 || b.isRefCarryingType(exprType) {
 			v := b.nextTemp()
-			b.emit(Statement{Kind: OpAggregate, AggTemps: aggTemps, ValTemp: v, Type: exprType, Span: e.Span})
-			return v
+			bv := b.allocBridgeVal(exprType, false, e.Span)
+			b.emit(Statement{
+				Kind:     OpAggregate,
+				AggTemps: aggTemps,
+				ValTemp:  v,
+				Type:     exprType,
+				Span:     e.Span,
+				Bridge: &StatementBridge{
+					ResultVal: bv,
+					PreComputes: []ComputeOp{{
+						Kind:     CompAggregate,
+						Dest:     bv,
+						AggKind:  "array",
+						AggItems: aggItems,
+						Type:     exprType,
+						Span:     e.Span,
+					}},
+				},
+			})
+			return v, bv
 		}
-		return InvalidValue
+		bv := b.pushCompute(ComputeOp{
+			Kind:     CompAggregate,
+			AggKind:  "array",
+			AggItems: aggItems,
+			Type:     exprType,
+			Span:     e.Span,
+		})
+		return InvalidValue, bv
 
 	case *ast.ArrayRepeatLiteral:
 		var aggTemps []AggTemp
-		if tv := b.lowerExprVal(e.Elem); tv != InvalidValue {
+		tv, ebv := b.lowerExpr(e.Elem)
+		if tv != InvalidValue {
 			aggTemps = append(aggTemps, AggTemp{Index: -1, Temp: tv})
 		}
+		aggItems := []BridgeAggItem{{FieldIndex: 0, Value: ebv}}
 		if len(aggTemps) > 0 || b.isRefCarryingType(exprType) {
 			v := b.nextTemp()
-			b.emit(Statement{Kind: OpAggregate, AggTemps: aggTemps, ValTemp: v, Type: exprType, Span: e.Span})
-			return v
+			bv := b.allocBridgeVal(exprType, false, e.Span)
+			b.emit(Statement{
+				Kind:     OpAggregate,
+				AggTemps: aggTemps,
+				ValTemp:  v,
+				Type:     exprType,
+				Span:     e.Span,
+				Bridge: &StatementBridge{
+					ResultVal: bv,
+					PreComputes: []ComputeOp{{
+						Kind:      CompAggregate,
+						Dest:      bv,
+						AggKind:   "array_repeat",
+						AggItems:  aggItems,
+						RepeatLen: e.Count,
+						Type:      exprType,
+						Span:      e.Span,
+					}},
+				},
+			})
+			return v, bv
 		}
-		return InvalidValue
+		bv := b.pushCompute(ComputeOp{
+			Kind:      CompAggregate,
+			AggKind:   "array_repeat",
+			AggItems:  aggItems,
+			RepeatLen: e.Count,
+			Type:      exprType,
+			Span:      e.Span,
+		})
+		return InvalidValue, bv
 
 	case *ast.TupleLiteral:
-		if v, ok := b.lowerAggregateExprsWithCleanup(e.Elems, func(i int, tv ValueID) AggTemp {
+		if len(e.Elems) == 0 {
+			bv := b.pushCompute(ComputeOp{Kind: CompConst, ConstKind: "unit", Type: exprType, Span: e.Span})
+			return InvalidValue, bv
+		}
+		if v, bv, ok := b.lowerAggregateExprsWithCleanup(e.Elems, func(i int, tv ValueID) AggTemp {
 			return AggTemp{Index: i, Temp: tv}
-		}, exprType, e.Span); ok {
-			return v
+		}, "tuple", nil, nil, exprType, e.Span); ok {
+			return v, bv
 		}
 		var aggTemps []AggTemp
+		aggItems := make([]BridgeAggItem, 0, len(e.Elems))
 		for idx, el := range e.Elems {
-			if tv := b.lowerExprVal(el); tv != InvalidValue {
+			tv, ebv := b.lowerExpr(el)
+			if tv != InvalidValue {
 				aggTemps = append(aggTemps, AggTemp{Index: idx, Temp: tv})
 			}
+			aggItems = append(aggItems, BridgeAggItem{FieldIndex: idx, Value: ebv})
 		}
 		if len(aggTemps) > 0 || b.isRefCarryingType(exprType) {
 			v := b.nextTemp()
-			b.emit(Statement{Kind: OpAggregate, AggTemps: aggTemps, ValTemp: v, Type: exprType, Span: e.Span})
-			return v
+			bv := b.allocBridgeVal(exprType, false, e.Span)
+			b.emit(Statement{
+				Kind:     OpAggregate,
+				AggTemps: aggTemps,
+				ValTemp:  v,
+				Type:     exprType,
+				Span:     e.Span,
+				Bridge: &StatementBridge{
+					ResultVal: bv,
+					PreComputes: []ComputeOp{{
+						Kind:     CompAggregate,
+						Dest:     bv,
+						AggKind:  "tuple",
+						AggItems: aggItems,
+						Type:     exprType,
+						Span:     e.Span,
+					}},
+				},
+			})
+			return v, bv
 		}
-		return InvalidValue
+		bv := b.pushCompute(ComputeOp{
+			Kind:     CompAggregate,
+			AggKind:  "tuple",
+			AggItems: aggItems,
+			Type:     exprType,
+			Span:     e.Span,
+		})
+		return InvalidValue, bv
 
 	case *ast.StructLiteral:
+		aggKind := "struct"
+		vi := b.view.VariantRef(e)
+		if vi != nil {
+			aggKind = "enum_variant"
+		}
 		fieldExprs := make([]ast.Expr, 0, len(e.Fields))
 		fieldNames := make([]string, 0, len(e.Fields))
 		for _, f := range e.Fields {
@@ -1706,66 +2255,196 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 				fieldNames = append(fieldNames, f.Name)
 			}
 		}
-		if v, ok := b.lowerAggregateExprsWithCleanup(fieldExprs, func(i int, tv ValueID) AggTemp {
+		if v, bv, ok := b.lowerAggregateExprsWithCleanup(fieldExprs, func(i int, tv ValueID) AggTemp {
 			return AggTemp{FieldName: fieldNames[i], Index: i, Temp: tv}
-		}, exprType, e.Span); ok {
-			return v
+		}, aggKind, fieldNames, vi, exprType, e.Span); ok {
+			return v, bv
 		}
 		var aggTemps []AggTemp
+		aggItems := make([]BridgeAggItem, 0, len(e.Fields))
 		for idx, f := range e.Fields {
+			var fbv BridgeValID
+			var shPlace Place
 			if f.Value != nil {
-				if tv := b.lowerExprVal(f.Value); tv != InvalidValue {
+				var tv ValueID
+				tv, fbv = b.lowerExpr(f.Value)
+				if tv != InvalidValue {
 					aggTemps = append(aggTemps, AggTemp{FieldName: f.Name, Index: idx, Temp: tv})
 				}
+			} else if sym := b.lookupActiveLocalByName(f.Name); sym != nil {
+				shPlace = b.placeForSym(sym, f.Span)
 			}
+			aggItems = append(aggItems, BridgeAggItem{
+				FieldName:  f.Name,
+				FieldIndex: idx,
+				Value:      fbv,
+				Shorthand:  shPlace,
+			})
 		}
 		if len(aggTemps) > 0 || b.isRefCarryingType(exprType) {
 			v := b.nextTemp()
-			b.emit(Statement{Kind: OpAggregate, AggTemps: aggTemps, ValTemp: v, Type: exprType, Span: e.Span})
-			return v
+			bv := b.allocBridgeVal(exprType, false, e.Span)
+			b.emit(Statement{
+				Kind:     OpAggregate,
+				AggTemps: aggTemps,
+				ValTemp:  v,
+				Type:     exprType,
+				Span:     e.Span,
+				Bridge: &StatementBridge{
+					ResultVal: bv,
+					PreComputes: []ComputeOp{{
+						Kind:        CompAggregate,
+						Dest:        bv,
+						AggKind:     aggKind,
+						AggItems:    aggItems,
+						VariantInfo: vi,
+						Type:        exprType,
+						Span:        e.Span,
+					}},
+				},
+			})
+			return v, bv
 		}
-		return InvalidValue
+		bv := b.pushCompute(ComputeOp{
+			Kind:        CompAggregate,
+			AggKind:     aggKind,
+			AggItems:    aggItems,
+			VariantInfo: vi,
+			Type:        exprType,
+			Span:        e.Span,
+		})
+		return InvalidValue, bv
 
 	case *ast.Identifier:
 		// 非局部/参数标识符（如枚举单元构造器 / 函数名），检查符号确实已解析
-		if sym := b.view.GetSymbols().NodeSymbols[e]; sym == nil {
+		sym := b.view.GetSymbols().NodeSymbols[e]
+		if sym == nil {
 			b.emitInternalError(e.Span, fmt.Sprintf("标识符表达式 '%s' 缺少已解析符号记录", e.Name))
+			return InvalidValue, InvalidBridgeVal
 		}
-		return InvalidValue
+		if sym.Kind == symbols.SymEnumVariant {
+			vIdx := -1
+			if sym.Name == "None" {
+				vIdx = 1
+			} else if owner := b.view.GetSymbols().ByID[sym.OwnerSymID]; owner != nil {
+				for idx, cand := range owner.Variants {
+					if cand.Name == sym.Name {
+						vIdx = idx
+						break
+					}
+				}
+			}
+			bv := b.pushCompute(ComputeOp{
+				Kind:        CompEnumUnit,
+				VariantIdx:  vIdx,
+				VariantName: sym.Name,
+				Type:        exprType,
+				Span:        e.Span,
+			})
+			return InvalidValue, bv
+		}
+		bv := b.pushCompute(ComputeOp{
+			Kind:    CompFuncRef,
+			FuncSym: sym,
+			Type:    exprType,
+			Span:    e.Span,
+		})
+		return InvalidValue, bv
 
 	case *ast.FieldAccessExpr:
-		return b.lowerExprVal(e.Object)
+		objTV, objBV := b.lowerExpr(e.Object)
+		fieldIdx := -1
+		if objType := b.view.ExprType(e.Object); objType != types.Invalid && tctx != nil {
+			oi := tctx.Info(objType)
+			if oi.Kind == types.KindStruct {
+				if stSym := b.view.GetSymbols().ByID[symbols.SymbolID(oi.SymbolID)]; stSym != nil {
+					for idx, sf := range stSym.Fields {
+						if sf.Name == e.Field {
+							fieldIdx = idx
+							break
+						}
+					}
+				}
+			}
+		}
+		bv := b.pushCompute(ComputeOp{
+			Kind:      CompExtractField,
+			Src:       objBV,
+			FieldName: e.Field,
+			FieldIdx:  fieldIdx,
+			Type:      exprType,
+			Span:      e.Span,
+		})
+		return objTV, bv
 
 	case *ast.IndexExpr:
-		objVal := b.lowerExprVal(e.Object)
+		objVal, objBV := b.lowerExpr(e.Object)
+		var idxBV, rStartBV, rEndBV BridgeValID
+		var isRange, inclusive bool
 		if rng, isRng := e.Index.(*ast.RangeExpr); isRng {
+			isRange = true
+			inclusive = rng.Inclusive
 			if rng.Start != nil {
-				b.lowerExprValue(rng.Start)
+				_, rStartBV = b.lowerExpr(rng.Start)
 			}
 			if rng.End != nil {
-				b.lowerExprValue(rng.End)
+				_, rEndBV = b.lowerExpr(rng.End)
 			}
 		} else {
-			b.lowerExprValue(e.Index)
+			_, idxBV = b.lowerExpr(e.Index)
 		}
-		return objVal
+		bv := b.pushCompute(ComputeOp{
+			Kind:        CompExtractIndex,
+			Src:         objBV,
+			Left:        idxBV,
+			RangeStart:  rStartBV,
+			RangeEnd:    rEndBV,
+			IsRange:     isRange,
+			IsInclusive: inclusive,
+			Type:        exprType,
+			Span:        e.Span,
+		})
+		return objVal, bv
 
 	case *ast.RangeExpr:
-		b.lowerExprValue(e.Start)
-		b.lowerExprValue(e.End)
-		return InvalidValue
+		_, startBV := b.lowerExpr(e.Start)
+		_, endBV := b.lowerExpr(e.End)
+		bv := b.pushCompute(ComputeOp{
+			Kind:        CompRange,
+			RangeStart:  startBV,
+			RangeEnd:    endBV,
+			IsInclusive: e.Inclusive,
+			Type:        exprType,
+			Span:        e.Span,
+		})
+		return InvalidValue, bv
 
 	case *ast.CastExpr:
-		b.lowerExprValue(e.Expr)
-		return InvalidValue
+		_, subBV := b.lowerExpr(e.Expr)
+		bv := b.pushCompute(ComputeOp{
+			Kind:       CompCast,
+			Src:        subBV,
+			TargetType: exprType,
+			Type:       exprType,
+			Span:       e.Span,
+		})
+		return InvalidValue, bv
 
 	case *ast.UnaryExpr:
-		return b.lowerExprVal(e.Expr)
+		tv, subBV := b.lowerExpr(e.Expr)
+		bv := b.pushCompute(ComputeOp{
+			Kind: CompUnary,
+			Op:   e.Op,
+			Src:  subBV,
+			Type: exprType,
+			Span: e.Span,
+		})
+		return tv, bv
 
 	case *ast.BorrowExpr:
 		targetPlace, ok := b.extractPlace(e.Expr)
 		if ok {
-			b.lowerPlaceAddressSubExprs(e.Expr)
+			idxVals := b.lowerPlaceAddressSubExprsVals(e.Expr)
 			opKind := OpBorrowShared
 			bk := BorrowShared
 			if e.IsMut {
@@ -1785,11 +2464,15 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 				}
 			}
 			v := b.nextTemp()
+			bv := b.allocBridgeVal(exprType, false, e.Span)
 			b.emit(Statement{
 				Kind:  OpRead,
 				Place: targetPlace,
 				Type:  targetPlace.ElemType,
 				Span:  e.Span,
+				Bridge: &StatementBridge{
+					IndexVals: idxVals,
+				},
 			})
 			b.emit(Statement{
 				Kind:        opKind,
@@ -1801,69 +2484,128 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 				ParentPlace: parentPlace,
 				ValTemp:     v,
 				Span:        e.Span,
+				Bridge: &StatementBridge{
+					ResultVal: bv,
+					IndexVals: idxVals,
+				},
 			})
-			return v
+			return v, bv
 		}
-		return b.lowerExprVal(e.Expr)
+		return b.lowerExpr(e.Expr)
 
 	case *ast.BinaryExpr:
 		if e.Op == "and" || e.Op == "or" {
-			b.lowerExprValue(e.Left)
+			_, leftBV := b.lowerExpr(e.Left)
 			condBB := b.curBB
 			rhsBB := b.newBlock("logic.rhs")
 			mergeBB := b.newBlock("logic.merge")
-			b.terminateSwitch(condBB, []BlockID{rhsBB, mergeBB}, e.Span)
+			joinBV := b.allocBridgeVal(exprType, true, e.Span)
+			sk := BridgeSwitchLogicAnd
+			shortVal := false
+			if e.Op == "or" {
+				sk = BridgeSwitchLogicOr
+				shortVal = true
+			}
+			b.terminateSwitchBridge(condBB, []BlockID{rhsBB, mergeBB}, &TerminatorBridge{
+				SwitchKind:         sk,
+				CondVal:            leftBV,
+				YieldDest:          joinBV,
+				ShortCircuitEnable: true,
+				ShortCircuitVal:    shortVal,
+			}, e.Span)
 			b.curBB = rhsBB
-			b.lowerExprValue(e.Right)
+			_, rightBV := b.lowerExpr(e.Right)
 			if !b.isTerminated(b.curBB) {
-				b.terminateGoto(b.curBB, mergeBB, e.Span)
+				b.terminateGotoBridge(b.curBB, mergeBB, &TerminatorBridge{
+					YieldDest: joinBV,
+					YieldVal:  rightBV,
+				}, e.Span)
 			}
 			b.curBB = mergeBB
-			return InvalidValue
+			return InvalidValue, joinBV
 		}
-		b.lowerExprValue(e.Left)
-		b.lowerExprValue(e.Right)
-		return InvalidValue
+		_, lBV := b.lowerExpr(e.Left)
+		_, rBV := b.lowerExpr(e.Right)
+		bv := b.pushCompute(ComputeOp{
+			Kind:  CompBinary,
+			Op:    e.Op,
+			Left:  lBV,
+			Right: rBV,
+			Type:  exprType,
+			Span:  e.Span,
+		})
+		return InvalidValue, bv
 
 	case *ast.TryExpr:
-		inner := b.lowerExprVal(e.Expr)
+		inner, innerBV := b.lowerExpr(e.Expr)
 		tryBB := b.curBB
 		okBB := b.newBlock("try.ok")
 		errBB := b.newBlock("try.err")
-		b.terminateSwitch(tryBB, []BlockID{okBB, errBB}, e.Span)
+		b.terminateSwitchBridge(tryBB, []BlockID{okBB, errBB}, &TerminatorBridge{
+			SwitchKind: BridgeSwitchTry,
+			CondVal:    innerBV,
+			MatchCases: []BridgeMatchCase{
+				{Label: "Ok", VariantIndex: 0, Target: okBB},
+				{Label: "Err", VariantIndex: 1, Target: errBB},
+			},
+		}, e.Span)
 		b.curBB = errBB
 		b.emitScopeExitsDownTo(0, e.Span)
-		b.terminateReturn(errBB, e.Span)
+		b.terminateReturnBridge(errBB, &TerminatorBridge{TryErrSourceVal: innerBV}, e.Span)
 		b.curBB = okBB
-		return inner
+		unwrapBV := b.pushCompute(ComputeOp{
+			Kind: CompTryUnwrap,
+			Src:  innerBV,
+			Type: exprType,
+			Span: e.Span,
+		})
+		return inner, unwrapBV
 
 	case *ast.CallExpr:
 		if e.Callee == "" && e.CalleeExpr != nil {
 			b.lowerExprValue(e.CalleeExpr)
 		}
 		calSym := b.view.CallTarget(e)
-		return b.emitCallExpr(calSym, e.Callee, e.Args, exprType, e.Span, nil)
+		callCat := CallNormal
+		if e.Callee == "println" || e.Callee == "print" || e.Callee == "panic" || e.Callee == "assert" || e.Callee == "bytes_equal" {
+			callCat = CallBuiltin
+		} else if e.Callee == "Some" || e.Callee == "Ok" || e.Callee == "Err" || (calSym != nil && calSym.Kind == symbols.SymEnumVariant) {
+			callCat = CallEnumVariant
+		}
+		return b.emitCallExpr(calSym, e.Callee, e.Args, exprType, e.Span, nil, InvalidBridgeVal, callCat, "")
 
 	case *ast.NamespacedCallExpr:
 		calSym := b.view.CallTarget(e)
 		name := e.Namespace + "::" + e.Function
-		return b.emitCallExpr(calSym, name, e.Args, exprType, e.Span, nil)
+		callCat := CallForeignFFI
+		foreignNS := e.Namespace
+		if vi := b.view.VariantRef(e); vi != nil || e.Namespace == "Option" || e.Namespace == "Result" {
+			callCat = CallEnumVariant
+			foreignNS = ""
+		} else if calSym != nil {
+			callCat = CallNormal
+			foreignNS = ""
+		}
+		return b.emitCallExpr(calSym, name, e.Args, exprType, e.Span, nil, InvalidBridgeVal, callCat, foreignNS)
 
 	case *ast.MethodCallExpr:
 		calSym := b.view.CallTarget(e)
 		var recvPtr *ValueID
+		var recvBV BridgeValID
 		if calSym != nil && calSym.HasSelf && !calSym.SelfIsRef {
-			rv := b.lowerExprVal(e.Receiver)
+			rv, rbv := b.lowerExpr(e.Receiver)
 			if rv != InvalidValue {
 				recvPtr = &rv
 			}
+			recvBV = rbv
 		} else if p, ok := b.extractPlace(e.Receiver); ok {
-			b.lowerPlaceAddressSubExprs(e.Receiver)
+			idxVals := b.lowerPlaceAddressSubExprsVals(e.Receiver)
 			b.emit(Statement{
-				Kind:  OpRead,
-				Place: p,
-				Type:  p.ElemType,
-				Span:  e.Receiver.GetSpan(),
+				Kind:   OpRead,
+				Place:  p,
+				Type:   p.ElemType,
+				Span:   e.Receiver.GetSpan(),
+				Bridge: &StatementBridge{IndexVals: idxVals},
 			})
 			isMut := (calSym != nil && calSym.SelfIsMut) || e.Method == "push_str" || e.Method == "as_mut_ptr"
 			borrowTarget := p
@@ -1899,9 +2641,10 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 			}
 			rv := b.nextTemp()
 			borrowType := borrowTarget.ElemType
-			if tctx := b.view.GetTypes(); tctx != nil && borrowTarget.ElemType != types.Invalid {
+			if tctx != nil && borrowTarget.ElemType != types.Invalid {
 				borrowType = tctx.Ref(isMut, borrowTarget.ElemType)
 			}
+			rbv := b.allocBridgeVal(borrowType, false, e.Span)
 			b.emit(Statement{
 				Kind:        opKind,
 				Place:       borrowTarget,
@@ -1912,50 +2655,81 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 				ParentPlace: parentPlace,
 				ValTemp:     rv,
 				Span:        e.Span,
+				Bridge:      &StatementBridge{ResultVal: rbv, IndexVals: idxVals},
 			})
 			recvPtr = &rv
+			recvBV = rbv
 		} else {
-			rv := b.lowerExprVal(e.Receiver)
+			rv, rbv := b.lowerExpr(e.Receiver)
 			if rv != InvalidValue {
 				recvPtr = &rv
 			}
+			recvBV = rbv
 		}
-		return b.emitCallExpr(calSym, e.Method, e.Args, exprType, e.Span, recvPtr)
+		callCat := CallNormal
+		if calSym == nil {
+			callCat = CallMethodBuiltin
+		}
+		return b.emitCallExpr(calSym, e.Method, e.Args, exprType, e.Span, recvPtr, recvBV, callCat, "")
 
 	case *ast.UnsafeExpr:
+		var joinBV BridgeValID
+		if exprType != types.Invalid && exprType != tctx.Unit && tctx.Info(exprType).Kind != types.KindNever {
+			joinBV = b.allocBridgeVal(exprType, true, e.Span)
+		}
 		if b.isRefCarryingType(exprType) {
 			v := b.nextTemp()
-			b.lowerBlockWithResult(e.Block, v, exprType)
-			return v
+			_ = b.lowerBlockWithResult(e.Block, v, joinBV, exprType)
+			return v, joinBV
+		}
+		if joinBV != InvalidBridgeVal {
+			_ = b.lowerBlockWithResult(e.Block, InvalidValue, joinBV, exprType)
+			return InvalidValue, joinBV
 		}
 		b.lowerBlock(e.Block)
-		return InvalidValue
+		return InvalidValue, InvalidBridgeVal
 
 	case *ast.IfStmt:
+		var joinBV BridgeValID
+		if exprType != types.Invalid && exprType != tctx.Unit && tctx.Info(exprType).Kind != types.KindNever {
+			joinBV = b.allocBridgeVal(exprType, true, e.Span)
+		}
 		if b.isRefCarryingType(exprType) {
 			v := b.nextTemp()
-			b.lowerIfExpr(e, v, exprType)
-			return v
+			b.lowerIfExpr(e, v, joinBV, exprType)
+			return v, joinBV
+		}
+		if joinBV != InvalidBridgeVal {
+			b.lowerIfExpr(e, InvalidValue, joinBV, exprType)
+			return InvalidValue, joinBV
 		}
 		b.lowerIfStmt(e)
-		return InvalidValue
+		return InvalidValue, InvalidBridgeVal
 
 	case *ast.WhileStmt:
 		b.lowerWhileStmt(e)
-		return InvalidValue
+		return InvalidValue, InvalidBridgeVal
 
 	case *ast.ForStmt:
 		b.lowerForStmt(e)
-		return InvalidValue
+		return InvalidValue, InvalidBridgeVal
 
 	case *ast.MatchExpr:
+		var joinBV BridgeValID
+		if exprType != types.Invalid && exprType != tctx.Unit && tctx.Info(exprType).Kind != types.KindNever {
+			joinBV = b.allocBridgeVal(exprType, true, e.Span)
+		}
 		if b.isRefCarryingType(exprType) {
 			v := b.nextTemp()
-			b.lowerMatchExprVal(e, v, exprType)
-			return v
+			b.lowerMatchExprVal(e, v, joinBV, exprType)
+			return v, joinBV
+		}
+		if joinBV != InvalidBridgeVal {
+			b.lowerMatchExprVal(e, InvalidValue, joinBV, exprType)
+			return InvalidValue, joinBV
 		}
 		b.lowerMatchExpr(e)
-		return InvalidValue
+		return InvalidValue, InvalidBridgeVal
 
 	case *ast.ScopeExpr, *ast.SpawnExpr:
 		b.emitUnsupportedError(
@@ -1963,20 +2737,20 @@ func (b *funcBuilder) lowerExprVal(expr ast.Expr) ValueID {
 			"结构化并发原语 (scope/spawn) 尚未在当前所有权阶段启用",
 			"结构化并发所有权校验属于后续独立里程碑。",
 		)
-		return InvalidValue
+		return InvalidValue, InvalidBridgeVal
 
 	default:
 		b.emitInternalError(expr.GetSpan(), fmt.Sprintf("Encountered unhandled expression node %T in ownership CFG", expr))
-		return InvalidValue
+		return InvalidValue, InvalidBridgeVal
 	}
 }
 
 // lowerAggregateExprsWithCleanup 处理包含前置资源成员且后续存在 '?' 早退的聚合字面量。
 // 将早先完成求值的非 Copy 成员暂存至受作用域托管的合成局部槽位：一旦后续字段触发 '?' 早退，
 // OpScopeExit 仅清理已完成初始化的前置成员；若全部成员顺利就绪，则统一 OpMove 移入完整聚合。
-func (b *funcBuilder) lowerAggregateExprsWithCleanup(exprs []ast.Expr, buildItem func(int, ValueID) AggTemp, exprType types.TypeID, span diagnostic.Span) (ValueID, bool) {
+func (b *funcBuilder) lowerAggregateExprsWithCleanup(exprs []ast.Expr, buildItem func(int, ValueID) AggTemp, aggKind string, fieldNames []string, vi *symbols.VariantInfo, exprType types.TypeID, span diagnostic.Span) (ValueID, BridgeValID, bool) {
 	if len(exprs) < 2 || b.view == nil || b.view.GetTypes() == nil || b.view.GetSymbols() == nil {
-		return InvalidValue, false
+		return InvalidValue, InvalidBridgeVal, false
 	}
 	tctx := b.view.GetTypes()
 	symTab := b.view.GetSymbols()
@@ -1988,7 +2762,7 @@ func (b *funcBuilder) lowerAggregateExprsWithCleanup(exprs []ast.Expr, buildItem
 		}
 	}
 	if lastTryIdx <= 0 {
-		return InvalidValue, false
+		return InvalidValue, InvalidBridgeVal, false
 	}
 
 	hasPriorOwned := false
@@ -2000,7 +2774,7 @@ func (b *funcBuilder) lowerAggregateExprsWithCleanup(exprs []ast.Expr, buildItem
 		}
 	}
 	if !hasPriorOwned {
-		return InvalidValue, false
+		return InvalidValue, InvalidBridgeVal, false
 	}
 
 	tmpScope := b.pushScope(span)
@@ -2011,12 +2785,18 @@ func (b *funcBuilder) lowerAggregateExprsWithCleanup(exprs []ast.Expr, buildItem
 	}
 	var held []heldTemp
 	var aggTemps []AggTemp
+	aggItems := make([]BridgeAggItem, 0, len(exprs))
 
 	for i, ex := range exprs {
-		tv := b.lowerExprVal(ex)
+		tv, ebv := b.lowerExpr(ex)
 		if tv != InvalidValue {
 			aggTemps = append(aggTemps, buildItem(i, tv))
 		}
+		fn := ""
+		if i < len(fieldNames) {
+			fn = fieldNames[i]
+		}
+		aggItems = append(aggItems, BridgeAggItem{FieldName: fn, FieldIndex: i, Value: ebv})
 		if b.isTerminated(b.curBB) {
 			break
 		}
@@ -2035,6 +2815,7 @@ func (b *funcBuilder) lowerAggregateExprsWithCleanup(exprs []ast.Expr, buildItem
 				SrcTemp: tv,
 				Type:    et,
 				Span:    ex.GetSpan(),
+				Bridge:  &StatementBridge{SrcVal: ebv},
 			})
 			held = append(held, heldTemp{place: tmpPlace, typ: et, span: ex.GetSpan()})
 		}
@@ -2057,9 +2838,37 @@ func (b *funcBuilder) lowerAggregateExprsWithCleanup(exprs []ast.Expr, buildItem
 	var out ValueID
 	if len(aggTemps) > 0 || b.isRefCarryingType(exprType) {
 		out = b.nextTemp()
-		b.emit(Statement{Kind: OpAggregate, AggTemps: aggTemps, ValTemp: out, Type: exprType, Span: span})
+		bv := b.allocBridgeVal(exprType, false, span)
+		b.emit(Statement{
+			Kind:     OpAggregate,
+			AggTemps: aggTemps,
+			ValTemp:  out,
+			Type:     exprType,
+			Span:     span,
+			Bridge: &StatementBridge{
+				ResultVal: bv,
+				PreComputes: []ComputeOp{{
+					Kind:        CompAggregate,
+					Dest:        bv,
+					AggKind:     aggKind,
+					AggItems:    aggItems,
+					VariantInfo: vi,
+					Type:        exprType,
+					Span:        span,
+				}},
+			},
+		})
+		return out, bv, true
 	}
-	return out, true
+	bv := b.pushCompute(ComputeOp{
+		Kind:        CompAggregate,
+		AggKind:     aggKind,
+		AggItems:    aggItems,
+		VariantInfo: vi,
+		Type:        exprType,
+		Span:        span,
+	})
+	return InvalidValue, bv, true
 }
 
 func containsTryExpr(expr ast.Expr) bool {
@@ -2131,15 +2940,23 @@ func containsTryExpr(expr ast.Expr) bool {
 	return false
 }
 
-func (b *funcBuilder) emitCallExpr(calSym *symbols.Symbol, fallbackName string, args []ast.Expr, exprType types.TypeID, span diagnostic.Span, selfTemp *ValueID) ValueID {
+func (b *funcBuilder) emitCallExpr(calSym *symbols.Symbol, fallbackName string, args []ast.Expr, exprType types.TypeID, span diagnostic.Span, selfTemp *ValueID, selfBV BridgeValID, callCat CallCategory, foreignNS string) (ValueID, BridgeValID) {
 	argTemps := make([]ValueID, 0, len(args)+1)
 	argPlaces := make([]Place, 0, len(args)+1)
-	if selfTemp != nil {
-		argTemps = append(argTemps, *selfTemp)
+	argVals := make([]BridgeValID, 0, len(args)+1)
+	if selfTemp != nil || selfBV != InvalidBridgeVal {
+		var st ValueID
+		if selfTemp != nil {
+			st = *selfTemp
+		}
+		argTemps = append(argTemps, st)
 		argPlaces = append(argPlaces, Place{})
+		argVals = append(argVals, selfBV)
 	}
 	for _, arg := range args {
-		argTemps = append(argTemps, b.lowerExprVal(arg))
+		at, abv := b.lowerExpr(arg)
+		argTemps = append(argTemps, at)
+		argVals = append(argVals, abv)
 		if p, ok := b.extractPlace(arg); ok {
 			argPlaces = append(argPlaces, p)
 		} else {
@@ -2154,6 +2971,10 @@ func (b *funcBuilder) emitCallExpr(calSym *symbols.Symbol, fallbackName string, 
 	if b.isRefCarryingType(exprType) {
 		retTemp = b.nextTemp()
 	}
+	var retBV BridgeValID
+	if exprType != types.Invalid {
+		retBV = b.allocBridgeVal(exprType, false, span)
+	}
 	b.emit(Statement{
 		Kind:       OpCall,
 		Callee:     calSym,
@@ -2163,8 +2984,14 @@ func (b *funcBuilder) emitCallExpr(calSym *symbols.Symbol, fallbackName string, 
 		ValTemp:    retTemp,
 		Type:       exprType,
 		Span:       span,
+		Bridge: &StatementBridge{
+			ResultVal: retBV,
+			ArgVals:   argVals,
+			CallCat:   callCat,
+			ForeignNS: foreignNS,
+		},
 	})
-	return retTemp
+	return retTemp, retBV
 }
 
 // extractReborrowParent 判断基于 Place 的取址或方法调用是否穿过安全引用 (&T / &mut T) 形成重借用关系。
@@ -2184,26 +3011,29 @@ func (b *funcBuilder) extractReborrowParent(place Place) (Place, bool) {
 	return Place{}, false
 }
 
-func (b *funcBuilder) lowerPlaceAddressSubExprs(expr ast.Expr) {
+func (b *funcBuilder) lowerPlaceAddressSubExprsVals(expr ast.Expr) []BridgeValID {
 	switch e := expr.(type) {
 	case *ast.Identifier:
-		return
+		return nil
 	case *ast.FieldAccessExpr:
-		b.lowerPlaceAddressSubExprs(e.Object)
+		return b.lowerPlaceAddressSubExprsVals(e.Object)
 	case *ast.IndexExpr:
-		b.lowerPlaceAddressSubExprs(e.Object)
-		b.lowerExprValue(e.Index)
+		vals := b.lowerPlaceAddressSubExprsVals(e.Object)
+		_, idxBV := b.lowerExpr(e.Index)
+		return append(vals, idxBV)
 	case *ast.UnaryExpr:
 		if e.Op == "*" {
-			b.lowerPlaceAddressSubExprs(e.Expr)
+			return b.lowerPlaceAddressSubExprsVals(e.Expr)
 		}
+		return nil
 	default:
 		b.emitInternalError(expr.GetSpan(), fmt.Sprintf("取址路径包含未处理节点 %T", expr))
+		return nil
 	}
 }
 
-func (b *funcBuilder) lowerPlaceValueAccess(expr ast.Expr, place Place) ValueID {
-	b.lowerPlacePrereqs(expr, place)
+func (b *funcBuilder) lowerPlaceValueAccess(expr ast.Expr, place Place) (ValueID, BridgeValID) {
+	idxVals := b.lowerPlacePrereqsVals(expr, place)
 
 	exprType := b.view.ExprType(expr)
 	if exprType == types.Invalid {
@@ -2214,6 +3044,13 @@ func (b *funcBuilder) lowerPlaceValueAccess(expr ast.Expr, place Place) ValueID 
 	if b.isRefCarryingType(exprType) {
 		valTemp = b.nextTemp()
 	}
+	valBV := b.allocBridgeVal(exprType, false, expr.GetSpan())
+	var idxBridge *StatementBridge
+	if len(idxVals) > 0 {
+		idxBridge = &StatementBridge{ResultVal: valBV, IndexVals: idxVals}
+	} else {
+		idxBridge = &StatementBridge{ResultVal: valBV}
+	}
 
 	if exprType != types.Invalid && b.view.GetTypes().IsCopy(exprType) {
 		b.emit(Statement{
@@ -2222,8 +3059,9 @@ func (b *funcBuilder) lowerPlaceValueAccess(expr ast.Expr, place Place) ValueID 
 			Type:    exprType,
 			ValTemp: valTemp,
 			Span:    expr.GetSpan(),
+			Bridge:  idxBridge,
 		})
-		return valTemp
+		return valTemp, valBV
 	}
 
 	b.emit(Statement{
@@ -2232,17 +3070,19 @@ func (b *funcBuilder) lowerPlaceValueAccess(expr ast.Expr, place Place) ValueID 
 		Type:    exprType,
 		ValTemp: valTemp,
 		Span:    expr.GetSpan(),
+		Bridge:  idxBridge,
 	})
-	return valTemp
+	return valTemp, valBV
 }
 
-func (b *funcBuilder) lowerPlacePrereqs(expr ast.Expr, place Place) {
+func (b *funcBuilder) lowerPlacePrereqsVals(expr ast.Expr, place Place) []BridgeValID {
 	switch e := expr.(type) {
 	case *ast.IndexExpr:
-		b.lowerPlacePrereqs(e.Object, place)
-		b.lowerExprValue(e.Index)
+		vals := b.lowerPlacePrereqsVals(e.Object, place)
+		_, idxBV := b.lowerExpr(e.Index)
+		return append(vals, idxBV)
 	case *ast.FieldAccessExpr:
-		b.lowerPlacePrereqs(e.Object, place)
+		return b.lowerPlacePrereqsVals(e.Object, place)
 	case *ast.UnaryExpr:
 		if e.Op == "*" {
 			if ptrPlace, ok := b.extractPlace(e.Expr); ok {
@@ -2257,6 +3097,7 @@ func (b *funcBuilder) lowerPlacePrereqs(expr ast.Expr, place Place) {
 			}
 		}
 	}
+	return nil
 }
 
 // extractPlace 将左值/位置表达式递归解析为静态 Place。

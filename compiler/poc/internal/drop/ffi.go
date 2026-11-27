@@ -460,8 +460,12 @@ func lowerFFIContractsInFunc(
 							}
 						}
 
+						var transferredPreComputes []cfg.ComputeOp
 						if matchedStmt[i] >= 0 {
 							removeStmt[matchedStmt[i]] = true
+							if prevB := outStmts[matchedStmt[i]].Bridge; prevB != nil && len(prevB.PreComputes) > 0 {
+								transferredPreComputes = append([]cfg.ComputeOp(nil), prevB.PreComputes...)
+							}
 						}
 						opKind := cfg.OpBorrowShared
 						bk := cfg.BorrowShared
@@ -477,12 +481,17 @@ func lowerFFIContractsInFunc(
 						nextTemp++
 						lID := nextLoan
 						nextLoan++
+						var readBridge *cfg.StatementBridge
+						if len(transferredPreComputes) > 0 {
+							readBridge = &cfg.StatementBridge{PreComputes: transferredPreComputes}
+						}
 						outStmts = append(outStmts,
 							cfg.Statement{
-								Kind:  cfg.OpRead,
-								Place: argPlace,
-								Type:  argPlace.ElemType,
-								Span:  st.Span,
+								Kind:   cfg.OpRead,
+								Place:  argPlace,
+								Type:   argPlace.ElemType,
+								Span:   st.Span,
+								Bridge: readBridge,
 							},
 							cfg.Statement{
 								Kind:       opKind,
@@ -495,6 +504,9 @@ func lowerFFIContractsInFunc(
 							},
 						)
 						newArgTemps[i] = vTemp
+						if st.Bridge != nil && i < len(st.Bridge.ArgVals) {
+							st.Bridge.ArgVals[i] = cfg.InvalidBridgeVal
+						}
 
 					case bindgen.FFIUnknown:
 						emitFFIErr(report, &ok, "WON-SEC-001", st.Span,
