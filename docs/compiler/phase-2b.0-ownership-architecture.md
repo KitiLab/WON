@@ -37,7 +37,7 @@
 ### 1.2 Deferred Subsystems (`SPECIFIED` / `PLANNED` / In Progress)
 - Ownership CFG (`internal/cfg`) and definite-initialization / move / partial-move / reinitialization validation (`internal/borrow`, `WON-MEM-001/008/010/011`, `WON-INT-001`) are **`IMPLEMENTED`** (Phases `2B.1–2B.1.2`).
 - XOR aliasing / borrow checker (`WON-MEM-004`/`005`/`006`), NLL region solver, reborrow mutability enforcement, canonical `self` indexing, and `Prov(e)` per-field / candidate provenance (`WON-MEM-002`/`003`) are **`IMPLEMENTED`** (Phases **2B.2–2B.2.1**).
-- RAII destructor runtime, drop elaboration, drop flags, and `WON-MEM-007` enforcement remain **`PLANNED`** (Phase **2B.3** / **2C**).
+- Drop elaboration, conditional drop flags, `WON-MEM-007` CFG enforcement, and typed FFI ownership contracts are **`IMPLEMENTED`** (Phase **2B.3 / 2B.3.1**); Phase 2C TIR lowering and C11 RAII destructor emission remain **`PLANNED`**.
 - General `trait` coherence, conditional generic `@derive(Copy)`, `impl Drop`, and `Send`/`Sync` auto-traits remain **`PLANNED`** in separate post-2B milestones.
 
 ### 1.3 Status Classification Map
