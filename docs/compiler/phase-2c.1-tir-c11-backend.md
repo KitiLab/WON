@@ -12,8 +12,8 @@
 Phase 2C.1 retires the direct AST-to-C11 path (`internal/codegen`) from `wonc build` and replaces it with `compiler/poc/internal/codegen/c11`:
 
 - **Zero Frontend Coupling**: `internal/codegen/c11` imports strictly Go standard-library packages and `internal/tir`. By Go package boundaries, `Emitter.Emit(*tir.Program)` cannot access AST nodes, symbol tables, parser structures, frontend `types.Context`, `cfg.FuncCFG`, `drop`, or legacy `codegen.Generator`.
-- **Mandatory Structural Verification**: `ValidateProgram` runs `tir.Verify(prog)` before evaluating capabilities, failing closed with `WON-INT-001` on any malformed or uncertified IR.
-- **No Silent Fallback**: `wonc build` and `wonc build --emit-c` always lower `TypedProgram` via `lower.LowerProgram` and emit C11 strictly through `c11.NewEmitter(c11.DefaultLinuxX86_64()).Emit(tirProg)`. Legacy `internal/codegen` is marked deprecated/reference-only for differential tests.
+- **Mandatory Structural Verification**: `ValidateProgram` runs `tir.Verify(prog)` before evaluating capabilities, failing closed with `WON-INT-001` on any malformed or uncertified IR, including any `TermReturn` in a non-`unit` function missing a typed `ReturnVal` operand (across both reachable and unreachable blocks). Unit returns preserve existing bare (`return;`) and pre-evaluated tail expression semantics.
+- **No Zero-Return Synthesis & No Silent Fallback**: `Emitter` never synthesizes default `return 0;` / zero-initialized substitutes when a non-`unit` `TermReturn` lacks `ReturnVal` (defense-in-depth `WON-INT-001` failure before emitting partial C). `wonc build` and `wonc build --emit-c` always lower `TypedProgram` via `lower.LowerProgram` and emit C11 strictly through `c11.NewEmitter(c11.DefaultLinuxX86_64()).Emit(tirProg)`. Legacy `internal/codegen` is marked deprecated/reference-only for differential tests.
 
 ---
 

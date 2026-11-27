@@ -617,6 +617,18 @@ func (l *lowerer) lowerFunction(fn *cfg.FuncCFG, df *drop.DropElaboratedFunc) (*
 	}
 
 	rebuildBlockEdges(outFn)
+	// 当非 unit 函数的所有路径均已显式返回且没有任何前驱跳转到空 exit 块时，exit 块实质不可达，标记为 TermUnreachable。
+	if outFn.ExitBlock >= 0 && int(outFn.ExitBlock) < len(outFn.Blocks) {
+		if exitBlk := outFn.Blocks[outFn.ExitBlock]; exitBlk != nil &&
+			outFn.ExitBlock != outFn.EntryBlock &&
+			len(exitBlk.Predecessors) == 0 &&
+			len(exitBlk.Instructions) == 0 &&
+			exitBlk.Terminator.Kind == tir.TermReturn &&
+			exitBlk.Terminator.ReturnVal == nil &&
+			l.tconv.tt.Info(outFn.ReturnType).Kind != tir.TypeUnit {
+			exitBlk.Terminator.Kind = tir.TermUnreachable
+		}
+	}
 	return outFn, nil
 }
 

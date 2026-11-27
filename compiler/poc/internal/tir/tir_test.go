@@ -267,3 +267,98 @@ func TestPhase2C0_TIRVerifierMutationsRejectMalformedIR(t *testing.T) {
 		})
 	}
 }
+
+func TestPhase2C1_1_ReturnCompletenessInvariants(t *testing.T) {
+	// 1. 非 unit 函数提供类型匹配 ReturnVal -> 通过校验
+	t.Run("valid_non_unit_return_operand", func(t *testing.T) {
+		p := buildBaselineValidProgram(t)
+		if errs := tir.Verify(p); len(errs) != 0 {
+			t.Fatalf("合法非 unit 返回程序不应报错: %v", errs)
+		}
+	})
+
+	// 2. 非 unit 函数 TermReturn 缺失 ReturnVal -> 必须报 WON-INT-001
+	t.Run("missing_non_unit_return_operand_rejected", func(t *testing.T) {
+		p := buildBaselineValidProgram(t)
+		fn := p.Functions[0]
+		fn.Blocks[3].Terminator.ReturnVal = nil
+		errs := tir.Verify(p)
+		if len(errs) == 0 {
+			t.Fatalf("非 unit 函数缺失 ReturnVal 必须被 tir.Verify 拒绝，却返回通过")
+		}
+		summary := tir.VerifyErrorSummary(errs).Error()
+		if !strings.Contains(summary, "WON-INT-001") || !strings.Contains(summary, fn.Name) || !strings.Contains(summary, "bb3") {
+			t.Fatalf("缺失 ReturnVal 期望报 WON-INT-001 且定位函数与基本块，实际:\n%s", summary)
+		}
+	})
+
+	// 3. 非 unit 函数返回类型不匹配 -> 拒绝
+	t.Run("mismatched_non_unit_return_type_rejected", func(t *testing.T) {
+		p := buildBaselineValidProgram(t)
+		tBool := p.Types.Bool()
+		p.Functions[0].Blocks[3].Terminator.ReturnVal = &tir.Operand{
+			Kind:  tir.OperandConst,
+			Type:  tBool,
+			Const: tir.Constant{Kind: tir.ConstBool, BoolVal: true},
+		}
+		errs := tir.Verify(p)
+		if len(errs) == 0 || !strings.Contains(tir.VerifyErrorSummary(errs).Error(), "Return 值类型") {
+			t.Fatalf("返回类型不匹配必须被拒绝，实际: %v", errs)
+		}
+	})
+
+	// 4. 非 unit 函数不可达基本块存在缺失 ReturnVal 的 TermReturn -> 仍必须拒绝
+	t.Run("unreachable_block_missing_non_unit_return_rejected", func(t *testing.T) {
+		p := buildBaselineValidProgram(t)
+		fn := p.Functions[0]
+		deadID := tir.BlockID(len(fn.Blocks))
+		fn.Blocks = append(fn.Blocks, &tir.BasicBlock{
+			ID:         deadID,
+			Label:      "unreachable_bad_exit",
+			Terminator: tir.Terminator{Kind: tir.TermReturn, ReturnVal: nil},
+		})
+		errs := tir.Verify(p)
+		if len(errs) == 0 {
+			t.Fatalf("不可达块缺失非 unit ReturnVal 必须被 tir.Verify 一致拒绝，却通过校验")
+		}
+		summary := tir.VerifyErrorSummary(errs).Error()
+		if !strings.Contains(summary, "WON-INT-001") || !strings.Contains(summary, "bb4") {
+			t.Fatalf("不可达块缺失 ReturnVal 期望定位到 bb4 并含 WON-INT-001，实际:\n%s", summary)
+		}
+	})
+
+	// 5 & 6 & 7. 合法 unit 裸 return、unit 尾调用操作数 return、unit 返回 main -> 均接受
+	t.Run("valid_unit_bare_tail_and_main_returns", func(t *testing.T) {
+		tt := tir.NewTypeTable()
+		tUnit := tt.Unit()
+		p := &tir.Program{
+			Types:       tt,
+			OwnershipOK: true,
+			DropOK:      true,
+			Functions: []*tir.Function{
+				{
+					ID: 1, Name: "bare_unit", CallingConv: "WON", ReturnType: tUnit, EntryBlock: 0, ExitBlock: 0,
+					Blocks: []*tir.BasicBlock{{ID: 0, Label: "entry", Terminator: tir.Terminator{Kind: tir.TermReturn}}},
+				},
+				{
+					ID: 2, Name: "tail_unit", CallingConv: "WON", ReturnType: tUnit, EntryBlock: 0, ExitBlock: 0,
+					Values: []tir.ValueDecl{{ID: 1, Type: tUnit}},
+					Blocks: []*tir.BasicBlock{{
+						ID: 0, Label: "entry",
+						Instructions: []tir.Instruction{{Kind: tir.OpCall, Type: tUnit, Dest: 1, CalleeFunc: 1, CalleeName: "bare_unit", CallingConv: "WON"}},
+						Terminator:   tir.Terminator{Kind: tir.TermReturn, ReturnVal: ptrOperand(tir.ValueOperand(tUnit, 1))},
+					}},
+				},
+				{
+					ID: 3, Name: "main", CallingConv: "WON", ReturnType: tUnit, EntryBlock: 0, ExitBlock: 0,
+					Blocks: []*tir.BasicBlock{{ID: 0, Label: "entry", Terminator: tir.Terminator{Kind: tir.TermReturn}}},
+				},
+			},
+		}
+		if errs := tir.Verify(p); len(errs) != 0 {
+			t.Fatalf("合法 unit bare/tail/main 返回不应报错: %v", errs)
+		}
+	})
+}
+
+func ptrOperand(op tir.Operand) *tir.Operand { return &op }

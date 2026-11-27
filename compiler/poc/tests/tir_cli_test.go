@@ -115,4 +115,23 @@ fn main() -> i32:
 	if err != nil || !strings.Contains(string(runZlibOut), "Zlib round-trip verification: PASS") {
 		t.Fatalf("TIR 构建的 zlib 可执行文件运行失败: err=%v\n%s", err, string(runZlibOut))
 	}
+
+	// 4. Phase 2C.1.1: 缺失返回值的非 unit 函数触发 TIR 验证失败 (WON-INT-001)，且 wonc build 不得在磁盘残留 .won.c 文件
+	badRetWon := filepath.Join(tmpDir, "missing_non_unit_ret.won")
+	badRetSrc := `fn main() -> i32:
+    if true:
+        return 0
+`
+	if err := os.WriteFile(badRetWon, []byte(badRetSrc), 0644); err != nil {
+		t.Fatalf("写入缺失返回源码失败: %v", err)
+	}
+	badRetCmd := exec.Command(woncBin, "build", "--emit-c", badRetWon)
+	badRetCmd.Dir = tmpDir
+	badRetOut, err := badRetCmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(badRetOut), "WON-INT-001") {
+		t.Fatalf("缺失非 unit 返回路径的程序必须触发 WON-INT-001 失败，实际 err=%v:\n%s", err, string(badRetOut))
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "missing_non_unit_ret.won.c")); statErr == nil {
+		t.Fatalf("WON-INT-001 拒绝后不得在磁盘生成 missing_non_unit_ret.won.c")
+	}
 }

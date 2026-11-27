@@ -1201,19 +1201,19 @@ func (fs *fnEmitState) emitTerminator(term tir.Terminator) error {
 			c.writeLine("return;")
 			return nil
 		}
-		if term.ReturnVal != nil {
-			retStr, err := fs.operandCExpr(*term.ReturnVal)
-			if err != nil {
-				return err
-			}
-			c.writeLine(fmt.Sprintf("return %s;", retStr))
-			return nil
+		if term.ReturnVal == nil {
+			return newCapErr(
+				"WON-INT-001",
+				fmt.Sprintf("内部不变量违例：非 unit 函数 '%s' 终结器缺少 ReturnVal 操作数，拒绝合成默认返回值", fs.fn.Name),
+				term.Span,
+				"C11 后端严格遵循 Fail-Closed 原则，绝不为缺失返回操作数的非 unit 函数伪造默认返回值。",
+			)
 		}
-		zeroInit, err := c.zeroInitExpr(fs.fn.ReturnType)
+		retStr, err := fs.operandCExpr(*term.ReturnVal)
 		if err != nil {
 			return err
 		}
-		c.writeLine(fmt.Sprintf("return %s;", zeroInit))
+		c.writeLine(fmt.Sprintf("return %s;", retStr))
 		return nil
 
 	case tir.TermUnreachable:

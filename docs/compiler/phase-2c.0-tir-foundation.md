@@ -127,7 +127,7 @@ During auditing of the existing Phase 2B compiler, we found that `cfg.FuncCFG` o
 `tir.Verify(prog *tir.Program) []VerifyError` enforces fail-closed invariants across both reachable and unreachable blocks:
 - **Pipeline Gates**: requires `OwnershipOK == true`, `DropOK == true`, and initialized `TypeTable`.
 - **Identity Integrity**: unique non-zero `FunctionID`, `LocalID`, `ValueID`, `DropFlagID`, `DropGlueID`, `ContractID`; unique non-negative `BlockID`; valid `EntryBlock`; non-dangling `Goto`/`BranchIf`/`Switch` targets; single valid `Terminator` on every block; no duplicate static writes to non-`JoinTemp` `ValueID`s.
-- **Type Integrity**: valid `TypeID`s everywhere; `Bool` condition on `TermBranchIf`; compatible `TermReturn` / `OpCall` argument and return types; exact struct field names/types and tuple element arities in `OpAggregateConstruct`; valid dereference/projection chains on `Place`.
+- **Type Integrity**: valid `TypeID`s everywhere; `Bool` condition on `TermBranchIf`; compatible `TermReturn` / `OpCall` argument and return types; mandatory `ReturnVal` on every `TermReturn` of any non-`unit` function across both reachable and unreachable blocks (`WON-INT-001`), while preserving bare and evaluated `unit` return paths; exact struct field names/types and tuple element arities in `OpAggregateConstruct`; valid dereference/projection chains on `Place`.
 - **Ownership & Lifecycle Integrity**: valid `ParentPlace` on reborrows; `OpDrop` / `OpCondDrop` matching declared `DropGlueDesc.Type`; declared `DropFlagID` on `OpCondDrop` / `OpDropFlag*`; valid `ContractID` and arity alignment on `OpOwnershipTransfer` and contracted `OpForeignCall`.
 
 ---

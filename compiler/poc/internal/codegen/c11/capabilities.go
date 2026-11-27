@@ -536,10 +536,10 @@ func validateTerminatorCaps(tt *tir.TypeTable, fn *tir.Function, term tir.Termin
 	case tir.TermGoto, tir.TermBranchIf, tir.TermUnreachable:
 		return nil
 	case tir.TermReturn:
-		if term.ReturnVal != nil && term.ReturnVal.Kind == tir.OperandValue {
-			// 显式 unit 字面量已由 OpConst(ConstUnit) 规则拦截；此处的 Value/ConstUnit 允许 void 函数尾调用及 unsafe void 块返回
-		}
-		if tt.Info(fn.ReturnType).Kind != tir.TypeUnit && term.ReturnVal != nil {
+		if tt.Info(fn.ReturnType).Kind != tir.TypeUnit {
+			if term.ReturnVal == nil {
+				return newCapErr("WON-INT-001", fmt.Sprintf("非 unit 函数 '%s' 缺少 ReturnVal 操作数", fn.Name), term.Span, "TIR 验证边界禁止为缺失返回值的非 unit 函数合成默认返回值。")
+			}
 			if _, err := MapType(tt, fn.ReturnType, PosReturn); err != nil {
 				return newCapErr("WON-GEN-002", err.Error(), term.Span, "")
 			}

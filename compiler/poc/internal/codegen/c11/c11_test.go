@@ -284,3 +284,117 @@ func TestC11RealZlibRoundTripFromTIR(t *testing.T) {
 		t.Fatalf("zlib 缺少通过输出:\n%s", gNew)
 	}
 }
+
+func TestC11Phase2C1_1_ReturnCompletenessAndDefenseInDepth(t *testing.T) {
+	// 8. 合法非 unit 返回生成正确的 C return 表达式
+	t.Run("valid_non_unit_return_emits_exact_expr", func(t *testing.T) {
+		tt := tir.NewTypeTable()
+		tI32 := tt.Int(true, 32, false, "i32")
+		p := &tir.Program{
+			Types:       tt,
+			OwnershipOK: true,
+			DropOK:      true,
+			Functions: []*tir.Function{{
+				ID: 1, Name: "main", CallingConv: "WON", ReturnType: tI32, EntryBlock: 0, ExitBlock: 0,
+				Blocks: []*tir.BasicBlock{{
+					ID:         0,
+					Label:      "entry",
+					Terminator: tir.Terminator{Kind: tir.TermReturn, ReturnVal: &tir.Operand{Kind: tir.OperandConst, Type: tI32, Const: tir.Constant{Kind: tir.ConstInt, IntText: "42"}}},
+				}},
+			}},
+		}
+		cCode, err := c11.NewEmitter(c11.DefaultLinuxX86_64()).Emit(p)
+		if err != nil {
+			t.Fatalf("合法非 unit TIR 发射失败: %v", err)
+		}
+		if !strings.Contains(cCode, "return INT32_C(42);") {
+			t.Fatalf("期望发射精确返回表达式 INT32_C(42)，实际:\n%s", cCode)
+		}
+	})
+
+	// 9 & 10. 畸形非 unit 缺失 ReturnVal 在发射前被拒绝，绝不伪造 return 0;
+	t.Run("malformed_non_unit_missing_return_rejected_no_zero_synth", func(t *testing.T) {
+		tt := tir.NewTypeTable()
+		tI32 := tt.Int(true, 32, false, "i32")
+		p := &tir.Program{
+			Types:       tt,
+			OwnershipOK: true,
+			DropOK:      true,
+			Functions: []*tir.Function{{
+				ID: 1, Name: "main", CallingConv: "WON", ReturnType: tI32, EntryBlock: 0, ExitBlock: 0,
+				Blocks: []*tir.BasicBlock{{
+					ID:         0,
+					Label:      "entry",
+					Terminator: tir.Terminator{Kind: tir.TermReturn, ReturnVal: nil},
+				}},
+			}},
+		}
+		cCode, err := c11.NewEmitter(c11.DefaultLinuxX86_64()).Emit(p)
+		if err == nil {
+			t.Fatalf("缺失 ReturnVal 的非 unit TIR 必须被 Emit 拒绝，却伪造生成 C 代码:\n%s", cCode)
+		}
+		var capErr *c11.CapabilityError
+		if !errors.As(err, &capErr) || capErr.Code != "WON-INT-001" {
+			t.Fatalf("期望 CapabilityError{WON-INT-001}，实际: %T %v", err, err)
+		}
+		if strings.Contains(cCode, "return 0;") {
+			t.Fatalf("失败时不得返回含合成 return 0; 的部分 C 代码:\n%s", cCode)
+		}
+	})
+
+	// 11 & 12. 合法 unit 裸 return 与 unit 尾表达式严格只求值一次且保持有效 C return;
+	t.Run("unit_bare_return_and_single_eval_tail_preserved", func(t *testing.T) {
+		hdrDir := t.TempDir()
+		hdr := `
+static int g_eval_ticks = 0;
+static inline void tick_once(void) { g_eval_ticks++; }
+static inline int get_ticks(void) { return g_eval_ticks; }
+`
+		if err := os.WriteFile(filepath.Join(hdrDir, "tick_unit.h"), []byte(hdr), 0644); err != nil {
+			t.Fatalf("写入测试头文件失败: %v", err)
+		}
+		bindings := map[string]*bindgen.BindingMeta{
+			"tick_unit": {
+				HeaderPath: "tick_unit.h",
+				Functions: map[string]bindgen.FunctionSig{
+					"tick_once": {Name: "tick_once", ReturnType: "void"},
+					"get_ticks": {Name: "get_ticks", ReturnType: "int"},
+				},
+			},
+		}
+		src := `
+#import "tick_unit.h"
+
+fn bare():
+    return
+
+fn tail_expr() -> unit:
+    unsafe:
+        tick_unit::tick_once()
+
+fn delegated() -> unit:
+    return unsafe:
+        tick_unit::tick_once()
+
+fn main() -> unit:
+    bare()
+    tail_expr()
+    delegated()
+    let total = unsafe:
+        tick_unit::get_ticks()
+    println("TICKS=", total)
+`
+		tirProg, _ := lowerSourceToTIR(t, src, bindings)
+		cCode, err := c11.NewEmitter(c11.DefaultLinuxX86_64()).Emit(tirProg)
+		if err != nil {
+			t.Fatalf("合法 unit 程序 C11 发射失败: %v", err)
+		}
+		if strings.Contains(cCode, "return tick_once()") {
+			t.Fatalf("void 函数不得带值 return:\n%s", cCode)
+		}
+		gOut, clOut := compileStrictGCCAndClang(t, cCode, []string{"-I", hdrDir}, nil)
+		if gOut != clOut || !strings.Contains(gOut, "TICKS=2") {
+			t.Fatalf("期望 TICKS=2（每个 unit 调用求值恰好一次），实际 gcc=%q clang=%q", gOut, clOut)
+		}
+	})
+}

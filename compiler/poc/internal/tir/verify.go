@@ -626,7 +626,10 @@ func verifyFunction(
 				addErr(fn.Name, b.ID, -1, "Switch 终结器缺少任何分支或默认目标")
 			}
 		case TermReturn:
-			if term.ReturnVal != nil {
+			retInfo := t.Info(fn.ReturnType)
+			if t.Valid(fn.ReturnType) && retInfo.Kind != TypeUnit && term.ReturnVal == nil {
+				addErr(fn.Name, b.ID, -1, "WON-INT-001: 非 unit 函数返回类型 %s 缺少必需的 ReturnVal 操作数", t.Format(fn.ReturnType))
+			} else if term.ReturnVal != nil {
 				verifyOperand(b.ID, len(b.Instructions), *term.ReturnVal, "Return.Value")
 				if !t.isCompatibleArgOrReturn(term.ReturnVal.Type, fn.ReturnType) {
 					addErr(fn.Name, b.ID, -1, "Return 值类型 %s 与函数签名返回类型 %s 不匹配", t.Format(term.ReturnVal.Type), t.Format(fn.ReturnType))
