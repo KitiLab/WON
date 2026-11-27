@@ -105,10 +105,11 @@ contract:
 5. `@retained`: Alerts the ownership checker that C retains a pointer beyond the call, preventing local stack deallocation.
 6. `@callback_lifetime("call" | "persistent")`: Binds callback function pointer lifetimes to the containing call or to an explicit deregistration handle.
 
-### 4.3 Division of Responsibilities
+### 4.3 Division of Responsibilities & Contract Envelope Validation
 - `@repr(C)`: Governs **data layout and alignment** matching the host C compiler.
 - `extern "C"`: Governs **calling conventions and symbol mangling**.
 - `unsafe:`: Mandatory boundary for all raw FFI invocations that lack certified safe contracts. Certified wrappers generated via `.wonbind` contracts expose safe WON functions.
+- **Sidecar Contract Envelope (`FFIContractCatalog`, `IMPLEMENTED` in Phase 2B.3.2)**: Programmatic and JSON contract catalogs must declare `"schema_version": "1.0"` and a lexically valid, non-empty `"header_path"` matching the bound `BindingMeta.HeaderPath` after pure lexical normalization (no filesystem or symlink resolution), failing closed (`WON-INT-001`) before contract indexing or ownership/drop elaboration on any mismatch or unsupported schema version.
 
 ---
 
