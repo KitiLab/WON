@@ -16,6 +16,7 @@ import (
 	"github.com/KitiLab/WON/compiler/poc/internal/diagnostic"
 	"github.com/KitiLab/WON/compiler/poc/internal/lexer"
 	"github.com/KitiLab/WON/compiler/poc/internal/parser"
+	"github.com/KitiLab/WON/compiler/poc/internal/tir/lower"
 	"github.com/KitiLab/WON/compiler/poc/internal/toolchain"
 )
 
@@ -164,6 +165,7 @@ func findBindingCache(filename string) string {
 func runCheck(args []string) {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
 	format := fs.String("format", "text", "输出格式: text | json")
+	dumpTIR := fs.Bool("dump-tir", false, "输出经验证的后端无关 TIR 表示")
 	_ = fs.Parse(args)
 
 	files := fs.Args()
@@ -198,6 +200,21 @@ func runCheck(args []string) {
 		chk := checker.New(report, bindings)
 		typedProg := chk.CheckProgram(prog)
 		enforceOwnershipCheckedGate(report, typedProg, srcFile, prog.GetSpan(), "拒绝通过语义检查")
+		if !report.HasErrors() && typedProg != nil {
+			tirProg, tirErr := lower.LowerProgram(typedProg, bindings)
+			if tirErr != nil {
+				report.AddDiagnostic(diagnostic.Diagnostic{
+					Code:        "WON-INT-001",
+					Severity:    "error",
+					Message:     fmt.Sprintf("TIR 降级或结构验证失败: %v", tirErr),
+					File:        srcFile,
+					Span:        prog.GetSpan(),
+					Explanation: "编译器遵循 Fail-Closed 原则，TIR 降级与独立验证未通过时拒绝认定程序有效。",
+				})
+			} else if *dumpTIR && *format != "json" {
+				fmt.Print(tirProg.Dump())
+			}
+		}
 	}
 
 	if *format == "json" {
@@ -293,6 +310,19 @@ func runBuild(args []string) {
 	}
 
 	enforceOwnershipCheckedGate(report, typedProg, srcFile, prog.GetSpan(), "拒绝生成 C11 代码")
+
+	if !report.HasErrors() && typedProg != nil {
+		if _, tirErr := lower.LowerProgram(typedProg, bindings); tirErr != nil {
+			report.AddDiagnostic(diagnostic.Diagnostic{
+				Code:        "WON-INT-001",
+				Severity:    "error",
+				Message:     fmt.Sprintf("TIR 降级或结构验证失败: %v", tirErr),
+				File:        srcFile,
+				Span:        prog.GetSpan(),
+				Explanation: "Phase 2C.0 保持参考 AST->C11 生成路径的同时，强制要求通过后端无关 TIR 构建与结构验证。",
+			})
+		}
+	}
 
 	if !report.HasErrors() && typedProg != nil && !typedProg.CodegenSupported {
 		report.AddDiagnostic(diagnostic.Diagnostic{

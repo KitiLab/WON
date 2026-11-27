@@ -1,7 +1,7 @@
 # WON Language Specification: Compiler Architecture and Intermediate Representation
 
 > **Specification Version**: Draft 0.1  
-> **Status**: `SPECIFIED` (Under Architectural Review)  
+> **Status**: `SPECIFIED` (Under Architectural Review; Phase 2C.0 Initial Backend-Neutral TIR Model, Lowering & Verifier `IMPLEMENTED` in [phase-2c.0-tir-foundation.md](../compiler/phase-2c.0-tir-foundation.md) while `C11Emitter` Consumption of TIR Remains `PLANNED` for Phase 2C.1)  
 > **Module**: Compiler Passes & Typed Intermediate Representation (TIR)  
 > **Date**: November 2026
 
@@ -145,4 +145,5 @@ trait BackendEmitter:
 ```
 
 - **Phase 0 & Phase 1**: The primary emitter is `C11Emitter`, which maps TIR basic blocks to standard C labels, gotos, and control structures.
+- **Current PoC Reconciliation (Phase 2C.0)**: `compiler/poc/internal/tir` and `internal/tir/lower` implement the backend-neutral TIR data model, verified `TypedProgram`/`DropElaboratedProgram` lowering, `DropFlag`/`CondDrop` lifecycle preservation, FFI contracts, multi-way `TermSwitch`/`TermBranchIf`, deterministic `Dump()`, and structural `tir.Verify()`. The reference C11 emitter in `internal/codegen` continues lowering the validated C11 AST subset under `WON-GEN-002` until Phase 2C.1 switches native codegen to TIR.
 - **Future Phase 5**: An `LlvmEmitter` will lower TIR instructions directly into LLVM IR modules, unlocking native cross-compilation and advanced target-specific optimizations without external toolchain friction.

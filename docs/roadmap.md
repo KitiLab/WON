@@ -1,8 +1,8 @@
 # WON Development Roadmap
 
-> **Document Status**: `SPECIFIED` (Phase 0B–2B.3 `IMPLEMENTED`; Phase 2C+ Planned)  
+> **Document Status**: `SPECIFIED` (Phase 0B–2C.0 `IMPLEMENTED`; Phase 2C.1+ Planned)  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 2B.3 (Deterministic Drop Elaboration, Resource Lifecycle & FFI Ownership Contracts)
+> **Last Updated**: Phase 2C.0 (Backend-Neutral TIR Foundation, Verified CFG Lowering & Structural Verifier)
 
 ---
 
@@ -116,9 +116,14 @@ The implementation roadmap adheres to strict technical dependency ordering acros
     - *Objective*: Structural `NeedsDrop` / `DropGlue` classification, immutable CFG cloning with `OpDrop` / `OpCondDrop` / `OpFFITransfer`, reverse-declaration LIFO cleanup, minimal stack `DropFlag` synthesis, early-return / loop / `?` & partial aggregate cleanup, reassignment replacement, partial-move struct cleanup + `WON-MEM-007` custom-Drop guard, fail-closed post-elaboration verification (`WON-INT-001`), `DropElaborated` CLI/codegen gate, and unified CFG-wide FFI ownership transfer / `@borrow` / `@borrow(mut)` / `BorrowsParam` / `Copy` raw-pointer alias, schema-version (`"1.0"`), & header-identity validation (`FFIContractCatalog`).
     - *Deliverables*: `internal/drop/{classify,ir,elaborate,verify,ffi}.go`, `internal/borrow/ffi.go`, `internal/bindgen/contracts.go`, [phase-2b.3-drop-elaboration.md](compiler/phase-2b.3-drop-elaboration.md), unit, snapshot, invariant, FFI closure, and fuzz suites (`FuzzDropElaboration`, `FuzzFFIContractJSON`, `FuzzFFIOwnership`).
     - *Status*: `IMPLEMENTED` (Stage A `8b589ef` / `45854658422`, Stage B `9c3a011` / `45856890050`, Stage C `56bf279` / `45858004339`, hardened in Phase 2B.3.1 & Phase 2B.3.2; Phase 2C C11/TIR lowering and user `impl Drop` remain `SPECIFIED`/`PLANNED`).
-- **Sub-phase 2C (Typed Intermediate Representation & Expanded C11 Backend — Planned)**:
-  - *Objective*: Lower verified Ownership CFG to explicit basic-block TIR (ADR-009), emit `Drop` lifecycle calls, monomorphize generics, and generate ISO C11 code for algebraic data types and pattern matching.
-  - *Status*: `SPECIFIED` / `PLANNED`.
+- **Sub-phase 2C (Typed Intermediate Representation & Expanded C11 Backend)**:
+  - **2C.0 (Backend-Neutral TIR Foundation, Verified CFG Lowering & Structural Verifier)**:
+    - *Objective*: Establish `internal/tir` (backend-neutral `TypeTable`, `Place`/`Projection`, explicit compute/ownership/call/Drop instructions, `TermBranchIf`/`TermSwitch`/`TermReturn`/`TermUnreachable` terminators, deterministic `Dump()`, independent `Verify()`), deterministic `TypedProgram + DropElaboratedProgram -> TIR` lowering (`internal/tir/lower`) via non-destructive CFG bridge metadata, and `wonc check` / `--dump-tir` integration while preserving `WON-GEN-002`.
+    - *Deliverables*: `internal/tir/{ir,types,place,dump,verify}.go`, `internal/tir/lower/{lower,types}.go`, `internal/cfg/bridge.go`, [phase-2c.0-tir-foundation.md](compiler/phase-2c.0-tir-foundation.md), CLI, mutation, and fuzz suites (`FuzzTIRVerifyAndDump`, `FuzzFrontendToTIR`).
+    - *Status*: `IMPLEMENTED` (Verified locally and via CLI checks; C11 TIR backend emission deferred to 2C.1).
+  - **2C.1 (TIR-Driven C11 Codegen, ADT Layout & Native Drop Execution)**:
+    - *Objective*: Switch `internal/codegen` to consume verified TIR (`C11Emitter`), emit ISO C11 code for structs/enums/`match`/reassignment/Drop glue execution, and retire direct AST-to-C translation.
+    - *Status*: `SPECIFIED` / `PLANNED`.
 - **Separate Future Milestone — General Trait Solver & Structured Concurrency Safety (`scope` / `Send` / `Sync`)**:
   - *Objective*: User `trait` coherence, generic `Copy` conditional bounds, user `impl Drop`, `?` `From`/`Into` conversion (`WON-ERR-002`), auto-traits `Send`/`Sync`, and structured-concurrency task capture enforcement (`WON-CON-001`, Phase 3).
   - *Status*: `PLANNED` (Explicitly separated from Phase 2B core borrow checker).
