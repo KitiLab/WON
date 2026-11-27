@@ -1,8 +1,8 @@
 # WON Development Roadmap
 
-> **Document Status**: `SPECIFIED` (Phase 0B–2C.0 `IMPLEMENTED`; Phase 2C.1+ Planned)  
+> **Document Status**: `SPECIFIED` (Phase 0B–2C.1 `IMPLEMENTED`; Phase 2C.2.0 Layout Spec `SPECIFIED` / [ADR-012](decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) `PROPOSED`; Phase 2C.2.1+ Implementation Pending Owner Approval)  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 2C.0 (Backend-Neutral TIR Foundation, Verified CFG Lowering & Structural Verifier)
+> **Last Updated**: Phase 2C.2.0 (Native `String` & Aggregate Memory-Representation Specification)
 
 ---
 
@@ -121,10 +121,14 @@ The implementation roadmap adheres to strict technical dependency ordering acros
     - *Objective*: Establish `internal/tir` (backend-neutral `TypeTable`, `Place`/`Projection`, explicit compute/ownership/call/Drop instructions, `TermBranchIf`/`TermSwitch`/`TermReturn`/`TermUnreachable` terminators, deterministic `Dump()`, independent `Verify()`), deterministic `TypedProgram + DropElaboratedProgram -> TIR` lowering (`internal/tir/lower`) via non-destructive CFG bridge metadata, and `wonc check` / `--dump-tir` integration while preserving `WON-GEN-002`.
     - *Deliverables*: `internal/tir/{ir,types,place,dump,verify}.go`, `internal/tir/lower/{lower,types}.go`, `internal/cfg/bridge.go`, [phase-2c.0-tir-foundation.md](compiler/phase-2c.0-tir-foundation.md), CLI, mutation, and fuzz suites (`FuzzTIRVerifyAndDump`, `FuzzFrontendToTIR`).
     - *Status*: `IMPLEMENTED` (Verified locally and via CLI checks; C11 TIR backend emission deferred to 2C.1).
-  - **2C.1 (TIR-Driven C11 Codegen & Initial Native Drop Execution)**:
-    - *Objective*: Route `wonc build` / `wonc build --emit-c` strictly through verified TIR (`internal/codegen/c11`), enforce TIR-native `WON-GEN-002` capability gating, execute native `OpDrop`/`OpCondDrop`/`DropFlag` cleanup for contract-validated opaque foreign resources (`GlueForeignResource`), and mark legacy AST `internal/codegen` reference-only for differential testing.
+  - **2C.1 / 2C.1.1 (TIR-Driven C11 Codegen, Initial Native Drop Execution & Return Completeness)**:
+    - *Objective*: Route `wonc build` / `wonc build --emit-c` strictly through verified TIR (`internal/codegen/c11`), enforce TIR-native `WON-GEN-002` capability gating, reject missing non-`unit` `TermReturn` operands across TIR/C11 (`WON-INT-001`), execute native `OpDrop`/`OpCondDrop`/`DropFlag` cleanup for contract-validated opaque foreign resources (`GlueForeignResource`), and mark legacy AST `internal/codegen` reference-only for differential testing.
     - *Deliverables*: `internal/codegen/c11/{target,types,capabilities,emitter}.go`, [phase-2c.1-tir-c11-backend.md](compiler/phase-2c.1-tir-c11-backend.md), differential, GCC/Clang strict C11 resource-counter, CLI, and fuzz (`FuzzC11Emitter`) suites.
-    - *Status*: `IMPLEMENTED` (Verified for C11 subset & opaque foreign resource Drop; `String` allocator contract, user `struct`/`enum`/`match`/`?`/`for` layout lowering, and monomorphization remain `SPECIFIED`/`PLANNED` under `WON-GEN-002`).
+    - *Status*: `IMPLEMENTED` (Verified for C11 subset, return completeness, & opaque foreign resource Drop; `String` allocator contract, user `struct`/`enum`/`match`/`?`/`for` layout lowering, and monomorphization remain `SPECIFIED`/`PLANNED` under `WON-GEN-002`).
+  - **2C.2.0 (Native `String` & Aggregate Representation Specification)**:
+    - *Objective*: Specify language-level vs target-ABI semantics, 24-byte `{ptr, len, cap}` `String`, 16-byte `{ptr, len}` `&str`, allocator shim/OOM policy, struct/tuple/array/tagged-enum/`Option`/`Result` layouts, ISO C11 ZST rules, active-variant & `?` partial cleanup, and generic TIR vs `TargetLayout` boundaries prior to codegen implementation.
+    - *Deliverables*: [phase-2c.2-native-layout-and-resource-representation.md](compiler/phase-2c.2-native-layout-and-resource-representation.md), [ADR-012](decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) (`PROPOSED`).
+    - *Status*: `SPECIFIED` (Design specification complete; native `String`/`ADT` implementation Phases `2C.2.1+` await Project Owner ratification of Decisions D1–D7 and retain strict `WON-GEN-002` guards).
 - **Separate Future Milestone — General Trait Solver & Structured Concurrency Safety (`scope` / `Send` / `Sync`)**:
   - *Objective*: User `trait` coherence, generic `Copy` conditional bounds, user `impl Drop`, `?` `From`/`Into` conversion (`WON-ERR-002`), auto-traits `Send`/`Sync`, and structured-concurrency task capture enforcement (`WON-CON-001`, Phase 3).
   - *Status*: `PLANNED` (Explicitly separated from Phase 2B core borrow checker).
