@@ -2679,11 +2679,38 @@ func (b *funcBuilder) lowerExpr(expr ast.Expr) (ValueID, BridgeValID) {
 		}
 		if b.isRefCarryingType(exprType) {
 			v := b.nextTemp()
-			_ = b.lowerBlockWithResult(e.Block, v, joinBV, exprType)
+			resBV := b.lowerBlockWithResult(e.Block, v, joinBV, exprType)
+			if joinBV != InvalidBridgeVal && resBV != InvalidBridgeVal && !b.isTerminated(b.curBB) {
+				alreadyAssigned := false
+				stmts := b.fn.Blocks[b.curBB].Statements
+				if len(stmts) > 0 {
+					last := stmts[len(stmts)-1]
+					if last.Kind == OpTempAssign && last.Bridge != nil && last.Bridge.ResultVal == joinBV {
+						alreadyAssigned = true
+					}
+				}
+				if !alreadyAssigned {
+					b.emit(Statement{
+						Kind:    OpTempAssign,
+						ValTemp: v,
+						Type:    exprType,
+						Span:    e.Span,
+						Bridge:  &StatementBridge{ResultVal: joinBV, SrcVal: resBV},
+					})
+				}
+			}
 			return v, joinBV
 		}
 		if joinBV != InvalidBridgeVal {
-			_ = b.lowerBlockWithResult(e.Block, InvalidValue, joinBV, exprType)
+			resBV := b.lowerBlockWithResult(e.Block, InvalidValue, joinBV, exprType)
+			if resBV != InvalidBridgeVal && !b.isTerminated(b.curBB) {
+				b.emit(Statement{
+					Kind:   OpTempAssign,
+					Type:   exprType,
+					Span:   e.Span,
+					Bridge: &StatementBridge{ResultVal: joinBV, SrcVal: resBV},
+				})
+			}
 			return InvalidValue, joinBV
 		}
 		b.lowerBlock(e.Block)
@@ -3150,6 +3177,13 @@ func (b *funcBuilder) extractPlace(expr ast.Expr) (Place, bool) {
 			return Place{}, false
 		}
 		elemType := b.view.ExprType(e)
+		if elemType == types.Invalid && tctx != nil {
+			ptrType := b.view.ExprType(e.Expr)
+			if ptrType == types.Invalid {
+				ptrType = ptrPlace.ElemType
+			}
+			elemType = tctx.Info(ptrType).Elem
+		}
 		return ptrPlace.AppendProj(Projection{
 			Kind:     ProjDeref,
 			ElemType: elemType,

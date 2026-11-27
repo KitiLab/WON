@@ -502,6 +502,11 @@ func (o FFIOwnership) String() string {
 	}
 }
 
+// ForeignHeaderDesc 记录经前端解析并验证的外部头文件引入元数据（后端无关导入标识）。
+type ForeignHeaderDesc struct {
+	HeaderPath string
+}
+
 // FFICatalogDesc 记录经过 Phase 2B.3.2 校验的外部 FFI 目录信封身份。
 type FFICatalogDesc struct {
 	Namespace     string
@@ -855,14 +860,15 @@ func (f *Function) BlockByID(id BlockID) (*BasicBlock, bool) {
 
 // Program 表示编译单元级的后端无关 TIR 模块容器。
 type Program struct {
-	Types        *TypeTable
-	Functions    []*Function
-	DropGlues    []DropGlueDesc
-	FFICatalogs  []FFICatalogDesc
-	FFIContracts []FFIContractDesc
-	SourceFiles  []string
-	OwnershipOK  bool
-	DropOK       bool
+	Types          *TypeTable
+	Functions      []*Function
+	DropGlues      []DropGlueDesc
+	ForeignHeaders []ForeignHeaderDesc
+	FFICatalogs    []FFICatalogDesc
+	FFIContracts   []FFIContractDesc
+	SourceFiles    []string
+	OwnershipOK    bool
+	DropOK         bool
 }
 
 // FunctionByID 按 FunctionID 查找函数定义。

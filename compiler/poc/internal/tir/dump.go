@@ -61,6 +61,10 @@ func (p *Program) Dump() string {
 		sb.WriteByte('\n')
 	}
 
+	for _, fh := range p.ForeignHeaders {
+		fmt.Fprintf(&sb, "  foreign_header %s\n", fh.HeaderPath)
+	}
+
 	for _, cat := range p.FFICatalogs {
 		fmt.Fprintf(&sb, "  ffi_catalog ns=%s schema=%s header=%q\n", cat.Namespace, cat.SchemaVersion, cat.HeaderPath)
 	}

@@ -142,6 +142,18 @@ func validateInputs(tp *checker.TypedProgram, bindings map[string]*bindgen.Bindi
 }
 
 func (l *lowerer) lowerFFIMetadata() error {
+	if l.tp != nil && l.tp.AST != nil && len(l.tp.AST.Imports) > 0 {
+		seenHdr := make(map[string]bool, len(l.tp.AST.Imports))
+		for _, imp := range l.tp.AST.Imports {
+			if imp == nil || imp.HeaderPath == "" || seenHdr[imp.HeaderPath] {
+				continue
+			}
+			seenHdr[imp.HeaderPath] = true
+			l.prog.ForeignHeaders = append(l.prog.ForeignHeaders, tir.ForeignHeaderDesc{
+				HeaderPath: imp.HeaderPath,
+			})
+		}
+	}
 	if len(l.bindings) == 0 {
 		return nil
 	}
@@ -931,9 +943,11 @@ func (fc *fnLowerCtx) lowerStatement(tb *tir.BasicBlock, blkID cfg.BlockID, stId
 		if entry, ok := fc.l.ffiByKey[st.CalleeName]; ok {
 			cid = entry.id
 		}
+		dest := fc.resolveStmtDest(st, false)
 		tb.Instructions = append(tb.Instructions, tir.Instruction{
 			Kind:       tir.OpOwnershipTransfer,
 			Type:       stmtTypeOrPlace(stmtType, tp.ElemType),
+			Dest:       dest,
 			Place:      tp,
 			CalleeName: st.CalleeName,
 			ContractID: cid,
