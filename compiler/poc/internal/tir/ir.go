@@ -374,6 +374,7 @@ const (
 	BuiltinAsMutPtr
 	BuiltinAsBytes
 	BuiltinLen
+	BuiltinCapacity
 	BuiltinIsEmpty
 	BuiltinPushStr
 	BuiltinTryUnwrap

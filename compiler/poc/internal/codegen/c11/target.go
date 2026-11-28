@@ -46,6 +46,19 @@ func (t Target) Validate() error {
 	return nil
 }
 
+// PtrSizeBytes 返回目标平台指针字节宽度（LP64 下恒为 8）。
+func (t Target) PtrSizeBytes() uint64 {
+	if t.PointerBits <= 0 {
+		return 8
+	}
+	return uint64(t.PointerBits / 8)
+}
+
+// MaxObjectSizeBytes 返回目标 ISO C11 ABI 允许的最大单个对象尺寸 (PTRDIFF_MAX)。
+func (t Target) MaxObjectSizeBytes() uint64 {
+	return ^uint64(0) >> 1
+}
+
 // CapabilityError 表示纯 TIR C11 后端能力网关或验证阶段检出的结构化 Fail-Closed 错误。
 type CapabilityError struct {
 	Code    string

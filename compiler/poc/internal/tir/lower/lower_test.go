@@ -570,3 +570,80 @@ func TestPhase2C0_LowerFailClosedRejectsInvalidInputsAndBadSource(t *testing.T) 
 		})
 	}
 }
+
+func TestLowerEnumSwitchProjDowncastAndNestedPatterns(t *testing.T) {
+	src := `
+struct Pair:
+    a: i32
+    b: i32
+
+enum Shape:
+    Empty
+    TupleBox((i32, i32))
+    StructBox:
+        p: Pair
+
+fn main() -> i32:
+    let ((x, y), z): ((i32, i32), i32) = ((1, 2), 3)
+    let e1 = Shape::TupleBox((x, y))
+    let r1: i32 = match e1:
+        Shape::Empty => 0
+        Shape::TupleBox((u, v)) => u + v + z
+        Shape::StructBox { p } => p.a + p.b
+    let e2 = Shape::StructBox { p: Pair { a: 10, b: 20 } }
+    let r2: i32 = match &e2:
+        Shape::Empty => 0
+        Shape::TupleBox(_) => 0
+        Shape::StructBox { p: ref pr } => pr.a + pr.b
+    return r1 + r2
+`
+	_, tirProg, rep := compileAndLower(t, src, nil)
+	if rep.HasErrors() {
+		t.Fatalf("语义检查失败: %s", rep.String())
+	}
+	dump := tirProg.Dump()
+	if errs := tir.Verify(tirProg); len(errs) > 0 {
+		t.Fatalf("TIR 验证失败: %v\n%s", errs, dump)
+	}
+	if !strings.Contains(dump, "@TupleBox#1") || !strings.Contains(dump, "@StructBox#2") {
+		t.Fatalf("TIR 必须显式包含枚举变体 ProjDowncast 投影:\n%s", dump)
+	}
+	var mainFn *tir.Function
+	for _, fn := range tirProg.Functions {
+		if fn != nil && fn.Name == "main" {
+			mainFn = fn
+			break
+		}
+	}
+	if mainFn == nil {
+		t.Fatalf("找不到 main TIR 函数")
+	}
+	foundEnumSwitch := false
+	foundDowncastExtract := false
+	foundDowncastBorrow := false
+	for _, blk := range mainFn.Blocks {
+		if blk.Terminator.Kind == tir.TermSwitch {
+			for _, c := range blk.Terminator.Cases {
+				if c.Kind == tir.CaseEnumVariant && c.VariantIndex > 0 {
+					foundEnumSwitch = true
+				}
+			}
+		}
+		for _, inst := range blk.Instructions {
+			if inst.Kind == tir.OpExtract && inst.ExtractProj.Kind == tir.ProjDowncast {
+				foundDowncastExtract = true
+			}
+			if inst.Kind == tir.OpBorrow {
+				for _, pr := range inst.Place.Projections {
+					if pr.Kind == tir.ProjDowncast {
+						foundDowncastBorrow = true
+					}
+				}
+			}
+		}
+	}
+	if !foundEnumSwitch || !foundDowncastExtract || !foundDowncastBorrow {
+		t.Fatalf("Stage B TIR 降级不完整: enumSwitch=%v downcastExtract=%v downcastBorrow=%v\n%s",
+			foundEnumSwitch, foundDowncastExtract, foundDowncastBorrow, dump)
+	}
+}

@@ -88,6 +88,8 @@ type ComputeOp struct {
 	RepeatLen   int64
 	FieldName   string
 	FieldIdx    int
+	HasConstIdx bool
+	ConstIdx    int64
 	RangeStart  BridgeValID
 	RangeEnd    BridgeValID
 	IsRange     bool
@@ -106,6 +108,26 @@ const (
 	CallForeignFFI
 )
 
+// BridgeProjKind 定义 Bridge 图层面用于精确还原嵌套模式投影与枚举下行转换的步骤类别。
+type BridgeProjKind uint8
+
+const (
+	BridgeProjDeref BridgeProjKind = iota
+	BridgeProjField
+	BridgeProjTupleField
+	BridgeProjDowncast
+)
+
+// BridgeProjStep 描述单级模式解构或引用借用的类型化投影路径（不影响 FuncCFG.Dump）。
+type BridgeProjStep struct {
+	Kind        BridgeProjKind
+	VariantName string
+	VariantIdx  int
+	FieldName   string
+	FieldIndex  int
+	ElemType    types.TypeID
+}
+
 // BridgePatternBind 记录 match/let/for 模式绑定到源表达式或负载投影的精确拆解关系。
 type BridgePatternBind struct {
 	SourceVal   BridgeValID
@@ -114,6 +136,9 @@ type BridgePatternBind struct {
 	FieldName   string
 	TupleIndex  int
 	HasSubProj  bool
+	TakeRef     bool
+	TakeRefMut  bool
+	ProjPath    []BridgeProjStep
 }
 
 // StatementBridge 为 cfg.Statement 提供无损 TIR 语义桥接信息（不影响 Dump 快照）。
@@ -129,6 +154,8 @@ type StatementBridge struct {
 	VariantIdx         int
 	AssignOp           string
 	PatternBind        *BridgePatternBind
+	BorrowProj         []BridgeProjStep
+	HasBorrowProj      bool
 	ImplicitTailRetVal BridgeValID
 }
 
@@ -149,12 +176,16 @@ const (
 
 // BridgeMatchCase 描述 Switch 终结器每个分支目标的明确标签与模式元数据。
 type BridgeMatchCase struct {
-	Label        string
-	VariantIndex int
-	IntValue     int64
-	IsIntLiteral bool
-	Guarded      bool
-	Target       BlockID
+	Label         string
+	HasVariant    bool
+	VariantName   string
+	VariantIndex  int
+	IntValue      int64
+	IsIntLiteral  bool
+	IsBoolLiteral bool
+	BoolValue     bool
+	Guarded       bool
+	Target        BlockID
 }
 
 // TerminatorBridge 为 cfg.Terminator 提供显式条件操作数、分支合流赋值与返回源值。
@@ -199,7 +230,13 @@ func CloneStatementBridge(b *StatementBridge) *StatementBridge {
 	}
 	if b.PatternBind != nil {
 		pb := *b.PatternBind
+		if len(b.PatternBind.ProjPath) > 0 {
+			pb.ProjPath = append([]BridgeProjStep(nil), b.PatternBind.ProjPath...)
+		}
 		cp.PatternBind = &pb
+	}
+	if len(b.BorrowProj) > 0 {
+		cp.BorrowProj = append([]BridgeProjStep(nil), b.BorrowProj...)
 	}
 	return &cp
 }

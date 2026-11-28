@@ -758,21 +758,102 @@ func (fc *fnLowerCtx) lowerStatement(tb *tir.BasicBlock, blkID cfg.BlockID, stId
 		}
 		srcOp := fc.resolveSrcOperand(srcBV, st.SrcTemp, st.Type)
 		elemT := stmtTypeOrPlace(stmtType, tp.ElemType)
-		if pb != nil && pb.HasSubProj && srcOp.Kind != tir.OperandInvalid && srcOp.Type != elemT {
-			extReg := fc.allocVal(elemT, false, st.Span)
-			proj := tir.Projection{Kind: tir.ProjTupleField, FieldIndex: pb.TupleIndex, ElemType: elemT}
-			if pb.FieldName != "" {
-				proj = tir.Projection{Kind: tir.ProjField, FieldName: pb.FieldName, FieldIndex: -1, ElemType: elemT}
+		if pb != nil && srcOp.Kind != tir.OperandInvalid && pb.TakeRef {
+			// 无根位置表达式的 ref 绑定（如 match &expr: StructBox { p: ref pr }）先将源操作数落入匿名的只读/指针槽位，再发射合法 OpBorrow
+			tmpID := tir.LocalID(len(fc.outFn.Locals))
+			for _, cur := range fc.outFn.Locals {
+				if cur.ID > tmpID {
+					tmpID = cur.ID
+				}
 			}
-			tb.Instructions = append(tb.Instructions, tir.Instruction{
-				Kind:        tir.OpExtract,
-				Type:        elemT,
-				Dest:        extReg,
-				Src:         srcOp,
-				ExtractProj: proj,
-				Span:        toTIRSpan(st.Span),
+			tmpID++
+			tmpName := fmt.Sprintf("__pat_ref_base_%d", tmpID)
+			fc.outFn.Locals = append(fc.outFn.Locals, tir.LocalDecl{
+				ID:      tmpID,
+				Name:    tmpName,
+				Type:    srcOp.Type,
+				ScopeID: ld.ScopeID,
+				Span:    toTIRSpan(st.Span),
 			})
-			srcOp = tir.ValueOperand(elemT, extReg)
+			tmpPlace := tir.Place{
+				Local:       tmpID,
+				LocalName:   tmpName,
+				RootType:    srcOp.Type,
+				ElemType:    srcOp.Type,
+				Projections: fc.convertBridgeProjSteps(srcOp.Type, pb.ProjPath),
+			}
+			if len(tmpPlace.Projections) > 0 {
+				tmpPlace.ElemType = tmpPlace.Projections[len(tmpPlace.Projections)-1].ElemType
+			}
+			tmpRootPlace := tir.Place{Local: tmpID, LocalName: tmpName, RootType: srcOp.Type, ElemType: srcOp.Type}
+			bk := tir.BorrowShared
+			if pb.TakeRefMut {
+				bk = tir.BorrowMut
+			}
+			borrowReg := fc.allocVal(elemT, false, st.Span)
+			tb.Instructions = append(tb.Instructions,
+				tir.Instruction{Kind: tir.OpStorageLive, Type: srcOp.Type, Local: tmpID, Span: toTIRSpan(st.Span)},
+				tir.Instruction{Kind: tir.OpInit, Type: srcOp.Type, Place: tmpRootPlace, Src: srcOp, Span: toTIRSpan(st.Span)},
+				tir.Instruction{Kind: tir.OpBorrow, Type: elemT, Dest: borrowReg, Place: tmpPlace, BorrowKind: bk, Span: toTIRSpan(st.Span)},
+			)
+			srcOp = tir.ValueOperand(elemT, borrowReg)
+		} else if pb != nil && srcOp.Kind != tir.OperandInvalid {
+			if len(pb.ProjPath) > 0 {
+				curOp := srcOp
+				for _, step := range pb.ProjPath {
+					stepType := elemT
+					if step.ElemType != types.Invalid {
+						if ct := fc.l.tconv.convert(step.ElemType); ct != tir.InvalidType {
+							stepType = ct
+						}
+					}
+					if step.Kind == cfg.BridgeProjDeref && fc.l.tconv.tt.Info(curOp.Type).Kind != tir.TypeRef && fc.l.tconv.tt.Info(curOp.Type).Kind != tir.TypeRawPtr {
+						continue
+					}
+					var proj tir.Projection
+					switch step.Kind {
+					case cfg.BridgeProjDeref:
+						proj = tir.Projection{Kind: tir.ProjDeref, ElemType: stepType}
+					case cfg.BridgeProjDowncast:
+						proj = tir.Projection{Kind: tir.ProjDowncast, VariantName: step.VariantName, VariantIndex: step.VariantIdx, ElemType: curOp.Type}
+						stepType = curOp.Type
+					case cfg.BridgeProjField:
+						fIdx := step.FieldIndex
+						if fIdx < 0 {
+							fIdx = resolveStructFieldIndex(fc.l.tconv.tt, curOp.Type, step.FieldName)
+						}
+						proj = tir.Projection{Kind: tir.ProjField, FieldName: step.FieldName, FieldIndex: fIdx, ElemType: stepType}
+					case cfg.BridgeProjTupleField:
+						proj = tir.Projection{Kind: tir.ProjTupleField, FieldIndex: step.FieldIndex, ElemType: stepType}
+					}
+					extReg := fc.allocVal(stepType, false, st.Span)
+					tb.Instructions = append(tb.Instructions, tir.Instruction{
+						Kind:        tir.OpExtract,
+						Type:        stepType,
+						Dest:        extReg,
+						Src:         curOp,
+						ExtractProj: proj,
+						Span:        toTIRSpan(st.Span),
+					})
+					curOp = tir.ValueOperand(stepType, extReg)
+				}
+				srcOp = curOp
+			} else if pb.HasSubProj && srcOp.Type != elemT {
+				extReg := fc.allocVal(elemT, false, st.Span)
+				proj := tir.Projection{Kind: tir.ProjTupleField, FieldIndex: pb.TupleIndex, ElemType: elemT}
+				if pb.FieldName != "" {
+					proj = tir.Projection{Kind: tir.ProjField, FieldName: pb.FieldName, FieldIndex: resolveStructFieldIndex(fc.l.tconv.tt, srcOp.Type, pb.FieldName), ElemType: elemT}
+				}
+				tb.Instructions = append(tb.Instructions, tir.Instruction{
+					Kind:        tir.OpExtract,
+					Type:        elemT,
+					Dest:        extReg,
+					Src:         srcOp,
+					ExtractProj: proj,
+					Span:        toTIRSpan(st.Span),
+				})
+				srcOp = tir.ValueOperand(elemT, extReg)
+			}
 		}
 		tb.Instructions = append(tb.Instructions, tir.Instruction{
 			Kind:  tir.OpInit,
@@ -851,6 +932,13 @@ func (fc *fnLowerCtx) lowerStatement(tb *tir.BasicBlock, blkID cfg.BlockID, stId
 		tp, err := fc.convertPlace(st.Place, idxVals)
 		if err != nil {
 			return err
+		}
+		if st.Bridge != nil && st.Bridge.HasBorrowProj {
+			// 使用 Bridge.BorrowProj 精确保留枚举变体下行投影与负载字段索引
+			tp.Projections = fc.convertBridgeProjSteps(tp.RootType, st.Bridge.BorrowProj)
+			if len(tp.Projections) > 0 {
+				tp.ElemType = tp.Projections[len(tp.Projections)-1].ElemType
+			}
 		}
 		dest := fc.resolveStmtDest(st, false)
 		if dest == tir.InvalidValue {
@@ -1332,21 +1420,30 @@ func (fc *fnLowerCtx) emitComputeOps(out *[]tir.Instruction, ops []cfg.ComputeOp
 
 		case cfg.CompExtractField:
 			src := fc.resolveSrcOperand(op.Src, cfg.InvalidValue, types.Invalid)
+			fIdx := op.FieldIdx
+			if fIdx < 0 && op.FieldName != "" {
+				fIdx = resolveStructFieldIndex(fc.l.tconv.tt, src.Type, op.FieldName)
+			}
 			*out = append(*out, tir.Instruction{
 				Kind:        tir.OpExtract,
 				Type:        typ,
 				Dest:        dest,
 				Src:         src,
-				ExtractProj: tir.Projection{Kind: tir.ProjField, FieldName: op.FieldName, FieldIndex: op.FieldIdx, ElemType: typ},
+				ExtractProj: tir.Projection{Kind: tir.ProjField, FieldName: op.FieldName, FieldIndex: fIdx, ElemType: typ},
 				Span:        toTIRSpan(op.Span),
 			})
 
 		case cfg.CompExtractIndex:
 			src := fc.resolveSrcOperand(op.Src, cfg.InvalidValue, types.Invalid)
-			proj := tir.Projection{Kind: tir.ProjDynIndex, ElemType: typ}
-			if op.Left != cfg.InvalidBridgeVal {
-				if iv, ok := fc.bridgeToVal[op.Left]; ok {
-					proj.IndexValue = iv
+			var proj tir.Projection
+			if !op.IsRange && op.HasConstIdx {
+				proj = tir.Projection{Kind: tir.ProjConstIndex, ConstIndex: op.ConstIdx, ElemType: typ}
+			} else {
+				proj = tir.Projection{Kind: tir.ProjDynIndex, ElemType: typ}
+				if op.Left != cfg.InvalidBridgeVal {
+					if iv, ok := fc.bridgeToVal[op.Left]; ok {
+						proj.IndexValue = iv
+					}
 				}
 			}
 			*out = append(*out, tir.Instruction{
@@ -1597,15 +1694,29 @@ func (fc *fnLowerCtx) lowerTerminator(tb *tir.BasicBlock, blk *cfg.BasicBlock) (
 				if switchKind == cfg.BridgeSwitchTry {
 					if i == 0 {
 						sc.Kind = tir.CaseTryOk
+						sc.VariantIndex = 0
 					} else {
 						sc.Kind = tir.CaseTryErr
+						sc.VariantIndex = 1
 					}
 				} else if switchKind == cfg.BridgeSwitchMatch {
-					if mc.IsIntLiteral {
+					if mc.HasVariant {
+						sc.Kind = tir.CaseEnumVariant
+						sc.Label = mc.VariantName
+						sc.VariantIndex = mc.VariantIndex
+					} else if mc.IsIntLiteral {
 						sc.Kind = tir.CaseInt
 						sc.IntValue = mc.IntValue
+					} else if mc.IsBoolLiteral {
+						sc.Kind = tir.CaseInt
+						if mc.BoolValue {
+							sc.IntValue = 1
+						} else {
+							sc.IntValue = 0
+						}
 					} else {
 						sc.Kind = tir.CasePatternArm
+						sc.VariantIndex = -1
 					}
 				}
 			}
@@ -1709,6 +1820,8 @@ func (fc *fnLowerCtx) convertPlace(p cfg.Place, idxVals []cfg.BridgeValID) (tir.
 		tp.ElemType = ld.Type
 	}
 	dynIdxCursor := 0
+	curType := tp.RootType
+	activeVariant := -1
 	for _, proj := range p.Projections {
 		elemT := fc.l.tconv.convert(proj.ElemType)
 		if elemT == tir.InvalidType {
@@ -1724,10 +1837,20 @@ func (fc *fnLowerCtx) convertPlace(p cfg.Place, idxVals []cfg.BridgeValID) (tir.
 		switch proj.Kind {
 		case cfg.ProjField:
 			tProj.Kind = tir.ProjField
+			if tProj.FieldIndex < 0 {
+				if activeVariant >= 0 {
+					tProj.FieldIndex = resolveVariantStructFieldIndex(fc.l.tconv.tt, curType, activeVariant, tProj.FieldName)
+				} else {
+					tProj.FieldIndex = resolveStructFieldIndex(fc.l.tconv.tt, curType, tProj.FieldName)
+				}
+			}
+			activeVariant = -1
 		case cfg.ProjTupleField:
 			tProj.Kind = tir.ProjTupleField
+			activeVariant = -1
 		case cfg.ProjConstIdx:
 			tProj.Kind = tir.ProjConstIndex
+			activeVariant = -1
 		case cfg.ProjIndex:
 			tProj.Kind = tir.ProjDynIndex
 			if dynIdxCursor < len(idxVals) {
@@ -1739,14 +1862,78 @@ func (fc *fnLowerCtx) convertPlace(p cfg.Place, idxVals []cfg.BridgeValID) (tir.
 					tProj.IndexLocal = ild.ID
 				}
 			}
+			activeVariant = -1
 		case cfg.ProjDeref:
 			tProj.Kind = tir.ProjDeref
+			activeVariant = -1
 		case cfg.ProjDowncast:
 			tProj.Kind = tir.ProjDowncast
+			activeVariant = proj.VariantIdx
 		}
+		curType = elemT
 		tp.Projections = append(tp.Projections, tProj)
 	}
 	return tp, nil
+}
+
+func (fc *fnLowerCtx) convertBridgeProjSteps(rootType tir.TypeID, steps []cfg.BridgeProjStep) []tir.Projection {
+	out := make([]tir.Projection, 0, len(steps))
+	curType := rootType
+	for _, st := range steps {
+		elemT := curType
+		if st.ElemType != types.Invalid {
+			if ct := fc.l.tconv.convert(st.ElemType); ct != tir.InvalidType {
+				elemT = ct
+			}
+		}
+		switch st.Kind {
+		case cfg.BridgeProjDeref:
+			out = append(out, tir.Projection{Kind: tir.ProjDeref, ElemType: elemT})
+			curType = elemT
+		case cfg.BridgeProjDowncast:
+			out = append(out, tir.Projection{Kind: tir.ProjDowncast, VariantName: st.VariantName, VariantIndex: st.VariantIdx, ElemType: curType})
+		case cfg.BridgeProjField:
+			fIdx := st.FieldIndex
+			if fIdx < 0 {
+				fIdx = resolveStructFieldIndex(fc.l.tconv.tt, curType, st.FieldName)
+			}
+			out = append(out, tir.Projection{Kind: tir.ProjField, FieldName: st.FieldName, FieldIndex: fIdx, ElemType: elemT})
+			curType = elemT
+		case cfg.BridgeProjTupleField:
+			out = append(out, tir.Projection{Kind: tir.ProjTupleField, FieldIndex: st.FieldIndex, ElemType: elemT})
+			curType = elemT
+		}
+	}
+	return out
+}
+
+func resolveStructFieldIndex(tt *tir.TypeTable, structType tir.TypeID, fieldName string) int {
+	if tt == nil || structType == tir.InvalidType || fieldName == "" {
+		return -1
+	}
+	ti := tt.Info(structType)
+	for i, f := range ti.Fields {
+		if f.Name == fieldName {
+			return i
+		}
+	}
+	return -1
+}
+
+func resolveVariantStructFieldIndex(tt *tir.TypeTable, enumType tir.TypeID, variantIdx int, fieldName string) int {
+	if tt == nil || enumType == tir.InvalidType || fieldName == "" {
+		return -1
+	}
+	ti := tt.Info(enumType)
+	if variantIdx < 0 || variantIdx >= len(ti.Variants) {
+		return -1
+	}
+	for i, f := range ti.Variants[variantIdx].StructFields {
+		if f.Name == fieldName {
+			return i
+		}
+	}
+	return -1
 }
 
 func rebuildBlockEdges(fn *tir.Function) {
@@ -1946,6 +2133,8 @@ func classifyBuiltin(name string) tir.BuiltinKind {
 		return tir.BuiltinAsBytes
 	case name == "len":
 		return tir.BuiltinLen
+	case name == "capacity":
+		return tir.BuiltinCapacity
 	case name == "is_empty":
 		return tir.BuiltinIsEmpty
 	case name == "push_str":

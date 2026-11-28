@@ -2,6 +2,7 @@ package tir
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -64,6 +65,41 @@ func Verify(prog *Program) []VerifyError {
 	if prog.Types == nil || prog.Types.Len() < 1 {
 		addErr("", InvalidBlock, -1, "TIR TypeTable 缺失或未初始化")
 		return errs
+	}
+
+	// 0. 校验类型表定长数组长度与枚举判别式合法性 (ADR-012 D6)
+	for tid := TypeID(1); int(tid) < prog.Types.Len(); tid++ {
+		ti := prog.Types.Info(tid)
+		if ti.Kind == TypeArray && ti.ArrayLen < 0 {
+			addErr("", InvalidBlock, -1, "类型 t%d (%s) 包含非法负数数组长度 %d", tid, prog.Types.Format(tid), ti.ArrayLen)
+		}
+		if ti.Kind == TypeEnum {
+			seenDisc := make(map[uint64]string, len(ti.Variants))
+			for vi, v := range ti.Variants {
+				disc := uint64(vi)
+				if v.Index != vi && v.Index >= 0 {
+					disc = uint64(v.Index)
+				}
+				if v.HasDiscriminant {
+					raw := strings.TrimSpace(v.DiscriminantText)
+					if raw == "" || strings.HasPrefix(raw, "-") || strings.HasPrefix(raw, "+") {
+						addErr("", InvalidBlock, -1, "枚举 t%d (%s) 变体 '%s' 判别式 %q 无法无损表示为非负 uint64", tid, ti.Name, v.Name, v.DiscriminantText)
+						continue
+					}
+					parsed, perr := strconv.ParseUint(raw, 0, 64)
+					if perr != nil {
+						addErr("", InvalidBlock, -1, "枚举 t%d (%s) 变体 '%s' 判别式 %q 超出 uint64 范围或格式非法: %v", tid, ti.Name, v.Name, v.DiscriminantText, perr)
+						continue
+					}
+					disc = parsed
+				}
+				if prev, dup := seenDisc[disc]; dup {
+					addErr("", InvalidBlock, -1, "枚举 t%d (%s) 变体 '%s' 与 '%s' 存在重复判别式值 %d", tid, ti.Name, v.Name, prev, disc)
+				} else {
+					seenDisc[disc] = v.Name
+				}
+			}
+		}
 	}
 
 	// 1. 校验 DropGlues 目录唯一性与引用完整性
@@ -470,6 +506,8 @@ func verifyFunction(
 				case AggEnumVariant:
 					if ti.Kind != TypeEnum {
 						addErr(fn.Name, b.ID, idx, "Aggregate[EnumVariant] 结果类型必须为 TypeEnum，实际为 %s", t.Format(inst.Type))
+					} else if len(ti.Variants) > 0 && (inst.VariantIdx < 0 || inst.VariantIdx >= len(ti.Variants)) {
+						addErr(fn.Name, b.ID, idx, "Aggregate[EnumVariant] 变体索引 %d 超出枚举 '%s' 变体范围 [0, %d)", inst.VariantIdx, ti.Name, len(ti.Variants))
 					}
 					for ei, item := range inst.AggItems {
 						verifyOperand(b.ID, idx, item.Value, fmt.Sprintf("Aggregate.VariantArg.%d", ei))

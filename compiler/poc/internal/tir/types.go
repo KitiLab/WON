@@ -98,11 +98,13 @@ type StructFieldType struct {
 
 // EnumVariantType 描述 TIR 枚举类型的单个有序变体定义。
 type EnumVariantType struct {
-	Name         string
-	Index        int
-	Kind         VariantPayloadKind
-	TupleElems   []TypeID
-	StructFields []StructFieldType
+	Name             string
+	Index            int
+	Kind             VariantPayloadKind
+	TupleElems       []TypeID
+	StructFields     []StructFieldType
+	HasDiscriminant  bool
+	DiscriminantText string
 }
 
 // TypeInfo 描述规范化 TIR 类型的完整后端无关元数据。
@@ -377,6 +379,56 @@ func (t *TypeTable) TypeParam(canonicalKey, name string) TypeID {
 func (t *TypeTable) IsNumeric(id TypeID) bool {
 	k := t.Info(id).Kind
 	return k == TypeInt || k == TypeFloat
+}
+
+// IsZST 判断类型在后端无关语义下是否属于零尺寸类型 (Zero-Sized Type)。
+// 注意：具备多变体或判别标签的枚举依赖标签存储以区分状态，不视为容器内部可消除 ZST。
+func (t *TypeTable) IsZST(id TypeID) bool {
+	return t.isZSTVisited(id, make(map[TypeID]bool, 8))
+}
+
+func (t *TypeTable) isZSTVisited(id TypeID, seen map[TypeID]bool) bool {
+	if t == nil || !t.Valid(id) || seen[id] {
+		return false
+	}
+	info := t.Info(id)
+	switch info.Kind {
+	case TypeUnit:
+		return true
+	case TypeTuple:
+		seen[id] = true
+		for _, el := range info.Elems {
+			if !t.isZSTVisited(el, seen) {
+				delete(seen, id)
+				return false
+			}
+		}
+		delete(seen, id)
+		return true
+	case TypeStruct:
+		if info.IsOpaqueForeign {
+			return false
+		}
+		seen[id] = true
+		for _, f := range info.Fields {
+			if !t.isZSTVisited(f.Type, seen) {
+				delete(seen, id)
+				return false
+			}
+		}
+		delete(seen, id)
+		return true
+	case TypeArray:
+		if info.ArrayLen == 0 {
+			return true
+		}
+		seen[id] = true
+		zst := t.isZSTVisited(info.Elem, seen)
+		delete(seen, id)
+		return zst
+	default:
+		return false
+	}
 }
 
 // isCompatibleArgOrReturn 验证后端无关参数传递与返回时的精确类型一致性（保留 &mut->& 与 *mut->*const 协变及泛型实参）。

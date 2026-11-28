@@ -805,8 +805,43 @@ func (b *funcBuilder) lookupDeclSym(s *ast.LetStmt) *symbols.Symbol {
 }
 
 func (b *funcBuilder) registerPatternLocalsWithSubProj(pat ast.Pattern, initNow bool, curScopeID int, srcTemp ValueID, srcBV BridgeValID, proj Projection, span diagnostic.Span) {
+	b.registerPatternLocalsWithPath(pat, initNow, curScopeID, srcTemp, srcBV, []BridgeProjStep{projToBridgeStep(proj)}, types.Invalid, span)
+}
+
+func projToBridgeStep(proj Projection) BridgeProjStep {
+	switch proj.Kind {
+	case ProjDeref:
+		return BridgeProjStep{Kind: BridgeProjDeref, ElemType: proj.ElemType}
+	case ProjField:
+		return BridgeProjStep{Kind: BridgeProjField, FieldName: proj.FieldName, FieldIndex: proj.FieldIndex, ElemType: proj.ElemType}
+	case ProjTupleField:
+		return BridgeProjStep{Kind: BridgeProjTupleField, FieldIndex: proj.FieldIndex, ElemType: proj.ElemType}
+	case ProjDowncast:
+		return BridgeProjStep{Kind: BridgeProjDowncast, VariantIdx: proj.VariantIdx, ElemType: proj.ElemType}
+	default:
+		return BridgeProjStep{Kind: BridgeProjField, FieldName: proj.FieldName, FieldIndex: proj.FieldIndex, ElemType: proj.ElemType}
+	}
+}
+
+func (b *funcBuilder) bridgeValType(id BridgeValID) types.TypeID {
+	if id == InvalidBridgeVal || b.fn == nil {
+		return types.Invalid
+	}
+	idx := int(id) - 1
+	if idx >= 0 && idx < len(b.fn.BridgeVals) && b.fn.BridgeVals[idx].ID == id {
+		return b.fn.BridgeVals[idx].Type
+	}
+	for _, decl := range b.fn.BridgeVals {
+		if decl.ID == id {
+			return decl.Type
+		}
+	}
+	return types.Invalid
+}
+
+func (b *funcBuilder) registerPatternLocalsWithPath(pat ast.Pattern, initNow bool, curScopeID int, srcTemp ValueID, srcBV BridgeValID, path []BridgeProjStep, curType types.TypeID, span diagnostic.Span) {
+	symTab := b.view.GetSymbols()
 	if ip, ok := pat.(*ast.IdentPattern); ok && b.view.VariantRef(ip) == nil {
-		symTab := b.view.GetSymbols()
 		sym := symTab.NodeSymbols[ip]
 		if sym == nil {
 			b.emitInternalError(ip.Span, fmt.Sprintf("模式绑定标识符 '%s' 缺少 SymbolID 映射", ip.Name))
@@ -819,16 +854,24 @@ func (b *funcBuilder) registerPatternLocalsWithSubProj(pat ast.Pattern, initNow 
 			op = OpUninitDecl
 		}
 		var pPlace Place
-		if srcTemp != InvalidValue {
-			pPlace = Place{Projections: []Projection{proj}}
+		if srcTemp != InvalidValue && len(path) > 0 {
+			last := path[len(path)-1]
+			switch last.Kind {
+			case BridgeProjField:
+				pPlace = Place{Projections: []Projection{{Kind: ProjField, FieldName: last.FieldName, FieldIndex: last.FieldIndex, ElemType: last.ElemType}}}
+			case BridgeProjTupleField:
+				pPlace = Place{Projections: []Projection{{Kind: ProjTupleField, FieldIndex: last.FieldIndex, ElemType: last.ElemType}}}
+			}
 		}
 		var pb *BridgePatternBind
-		if srcBV != InvalidBridgeVal {
+		if srcBV != InvalidBridgeVal && len(path) > 0 {
+			last := path[len(path)-1]
 			pb = &BridgePatternBind{
 				SourceVal:  srcBV,
-				FieldName:  proj.FieldName,
-				TupleIndex: proj.FieldIndex,
+				FieldName:  last.FieldName,
+				TupleIndex: last.FieldIndex,
 				HasSubProj: true,
+				ProjPath:   append([]BridgeProjStep(nil), path...),
 			}
 		}
 		b.emit(Statement{
@@ -842,14 +885,20 @@ func (b *funcBuilder) registerPatternLocalsWithSubProj(pat ast.Pattern, initNow 
 		})
 		return
 	}
-	b.registerPatternLocals(pat, initNow, curScopeID, srcTemp, srcBV, span)
+	b.registerPatternLocalsImpl(pat, initNow, curScopeID, srcTemp, srcBV, path, curType, span)
 }
 
 func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curScopeID int, srcTemp ValueID, srcBV BridgeValID, span diagnostic.Span) {
+	initType := b.bridgeValType(srcBV)
+	b.registerPatternLocalsImpl(pat, initNow, curScopeID, srcTemp, srcBV, nil, initType, span)
+}
+
+func (b *funcBuilder) registerPatternLocalsImpl(pat ast.Pattern, initNow bool, curScopeID int, srcTemp ValueID, srcBV BridgeValID, prefix []BridgeProjStep, curType types.TypeID, span diagnostic.Span) {
 	if pat == nil {
 		return
 	}
 	symTab := b.view.GetSymbols()
+	tctx := b.view.GetTypes()
 	switch p := pat.(type) {
 	case *ast.WildcardPattern, *ast.LiteralPattern:
 		return
@@ -869,25 +918,52 @@ func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curSc
 		if !initNow {
 			op = OpUninitDecl
 		}
+		var pb *BridgePatternBind
+		if srcBV != InvalidBridgeVal && len(prefix) > 0 {
+			last := prefix[len(prefix)-1]
+			pb = &BridgePatternBind{
+				SourceVal:  srcBV,
+				FieldName:  last.FieldName,
+				TupleIndex: last.FieldIndex,
+				HasSubProj: true,
+				ProjPath:   append([]BridgeProjStep(nil), prefix...),
+			}
+		}
 		b.emit(Statement{
 			Kind:    op,
 			Place:   b.placeForSym(sym, p.Span),
 			SrcTemp: srcTemp,
 			Type:    sym.Type,
 			Span:    p.Span,
-			Bridge:  &StatementBridge{SrcVal: srcBV},
+			Bridge:  &StatementBridge{SrcVal: srcBV, PatternBind: pb},
 		})
 
 	case *ast.TuplePattern:
+		var elems []types.TypeID
+		if curType != types.Invalid && tctx != nil {
+			elems = tctx.Info(curType).Elems
+		}
 		for idx, sub := range p.Elems {
-			b.registerPatternLocalsWithSubProj(sub, initNow, curScopeID, srcTemp, srcBV, Projection{Kind: ProjTupleField, FieldIndex: idx}, span)
+			elemT := types.Invalid
+			if idx < len(elems) {
+				elemT = elems[idx]
+			}
+			nextPath := append(append([]BridgeProjStep(nil), prefix...), BridgeProjStep{
+				Kind:       BridgeProjTupleField,
+				FieldIndex: idx,
+				ElemType:   elemT,
+			})
+			b.registerPatternLocalsWithPath(sub, initNow, curScopeID, srcTemp, srcBV, nextPath, elemT, span)
 		}
 
 	case *ast.StructPattern:
 		for _, fp := range p.Fields {
-			subProj := Projection{Kind: ProjField, FieldName: fp.Name}
+			fType := findStructFieldType(curType, fp.Name, symTab, tctx)
+			fIdx := findStructFieldIndex(curType, fp.Name, symTab, tctx)
+			step := BridgeProjStep{Kind: BridgeProjField, FieldName: fp.Name, FieldIndex: fIdx, ElemType: fType}
+			nextPath := append(append([]BridgeProjStep(nil), prefix...), step)
 			if fp.Pattern != nil {
-				b.registerPatternLocalsWithSubProj(fp.Pattern, initNow, curScopeID, srcTemp, srcBV, subProj, fp.Span)
+				b.registerPatternLocalsWithPath(fp.Pattern, initNow, curScopeID, srcTemp, srcBV, nextPath, fType, fp.Span)
 			} else {
 				sym := symTab.NodeSymbols[fp]
 				if sym == nil {
@@ -902,11 +978,16 @@ func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curSc
 				}
 				var pPlace Place
 				if srcTemp != InvalidValue {
-					pPlace = Place{Projections: []Projection{subProj}}
+					pPlace = Place{Projections: []Projection{{Kind: ProjField, FieldName: fp.Name, FieldIndex: fIdx, ElemType: fType}}}
 				}
 				var pb *BridgePatternBind
 				if srcBV != InvalidBridgeVal {
-					pb = &BridgePatternBind{SourceVal: srcBV, FieldName: fp.Name, HasSubProj: true}
+					pb = &BridgePatternBind{
+						SourceVal:  srcBV,
+						FieldName:  fp.Name,
+						HasSubProj: true,
+						ProjPath:   nextPath,
+					}
 				}
 				b.emit(Statement{
 					Kind:        op,
@@ -922,12 +1003,12 @@ func (b *funcBuilder) registerPatternLocals(pat ast.Pattern, initNow bool, curSc
 
 	case *ast.EnumPattern:
 		for _, arg := range p.Args {
-			b.registerPatternLocals(arg, initNow, curScopeID, srcTemp, srcBV, span)
+			b.registerPatternLocalsImpl(arg, initNow, curScopeID, srcTemp, srcBV, prefix, types.Invalid, span)
 		}
 
 	case *ast.SlicePattern:
 		for _, elem := range p.Elems {
-			b.registerPatternLocals(elem, initNow, curScopeID, srcTemp, srcBV, span)
+			b.registerPatternLocalsImpl(elem, initNow, curScopeID, srcTemp, srcBV, prefix, types.Invalid, span)
 		}
 
 	default:
@@ -1296,19 +1377,36 @@ func (b *funcBuilder) lowerMatchExprVal(m *ast.MatchExpr, destTemp ValueID, dest
 		return
 	}
 
+	subjType := b.view.ExprType(m.Subject)
+	if subjType == types.Invalid && hasSubjPlace {
+		subjType = subjPlace.ElemType
+	}
+	baseSubjType := subjType
+	if baseSubjType != types.Invalid && b.view.GetTypes() != nil && b.view.GetTypes().Info(baseSubjType).Kind == types.KindRef {
+		baseSubjType = b.view.GetTypes().Info(baseSubjType).Elem
+	}
+
 	armTests := make([]BlockID, len(m.Arms))
 	matchCases := make([]BridgeMatchCase, len(m.Arms))
 	for i, arm := range m.Arms {
 		armTests[i] = b.newBlock(fmt.Sprintf("match.arm%d.pat", i))
 		mc := BridgeMatchCase{
-			Label:   describePatternLabel(arm.Pattern, b.view),
-			Guarded: arm.Guard != nil,
-			Target:  armTests[i],
+			Label:        describePatternLabel(arm.Pattern, b.view),
+			VariantIndex: -1,
+			Guarded:      arm.Guard != nil,
+			Target:       armTests[i],
 		}
-		if lp, ok := arm.Pattern.(*ast.LiteralPattern); ok {
+		if vi, vIdx := b.resolvePatternVariant(arm.Pattern, baseSubjType); vi != nil && vIdx >= 0 {
+			mc.HasVariant = true
+			mc.VariantName = vi.Name
+			mc.VariantIndex = vIdx
+		} else if lp, ok := arm.Pattern.(*ast.LiteralPattern); ok {
 			if il, isInt := lp.Literal.(*ast.IntegerLiteral); isInt && il.Valid && il.Value != nil && il.Value.IsInt64() {
 				mc.IsIntLiteral = true
 				mc.IntValue = il.Value.Int64()
+			} else if bl, isBool := lp.Literal.(*ast.BoolLiteral); isBool {
+				mc.IsBoolLiteral = true
+				mc.BoolValue = bl.Value
 			}
 		}
 		matchCases[i] = mc
@@ -1318,11 +1416,6 @@ func (b *funcBuilder) lowerMatchExprVal(m *ast.MatchExpr, destTemp ValueID, dest
 		CondVal:    subjBV,
 		MatchCases: matchCases,
 	}, m.Span)
-
-	subjType := b.view.ExprType(m.Subject)
-	if subjType == types.Invalid && hasSubjPlace {
-		subjType = subjPlace.ElemType
-	}
 
 	allDiverged := true
 	for i, arm := range m.Arms {
@@ -1576,7 +1669,7 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 	case *ast.StructPattern:
 		// 区分 1) 枚举结构体变体 vs 2) 直接结构体字段部分匹配
 		if b.view.VariantRef(p) != nil {
-			b.lowerOpaqueAggregatePattern(p, place, hasPlace, isThroughRef, subjBV, scopeID)
+			b.lowerOpaqueAggregatePattern(p, place, hasPlace, isThroughRef, patType, subjBV, scopeID)
 			return
 		}
 
@@ -1631,12 +1724,24 @@ func (b *funcBuilder) applyArmPatternOwnership(pat ast.Pattern, place Place, has
 				continue
 			}
 
-			b.applyArmPatternOwnership(fp.Pattern, fieldPlace, hasPlace, fType, subjBV, scopeID)
+			if !hasPlace && subjBV != InvalidBridgeVal {
+				fieldBV := b.pushCompute(ComputeOp{
+					Kind:      CompExtractField,
+					Src:       subjBV,
+					FieldName: fp.Name,
+					FieldIdx:  findStructFieldIndex(baseType, fp.Name, symTab, tctx),
+					Type:      fType,
+					Span:      fp.Span,
+				})
+				b.applyArmPatternOwnership(fp.Pattern, fieldPlace, hasPlace, fType, fieldBV, scopeID)
+			} else {
+				b.applyArmPatternOwnership(fp.Pattern, fieldPlace, hasPlace, fType, subjBV, scopeID)
+			}
 		}
 
 	case *ast.EnumPattern, *ast.TuplePattern, *ast.SlicePattern:
-		// 尚未实现 ProjDowncast / ProjTupleField 的聚合解构模式：保持借用与移动事件完整，或对不支持混合体执行保守拒绝
-		b.lowerOpaqueAggregatePattern(p, place, hasPlace, isThroughRef, subjBV, scopeID)
+		// 聚合解构模式通过 StatementBridge.PatternBind / BorrowProj 精确保留 ProjDowncast / ProjField / ProjTupleField 链
+		b.lowerOpaqueAggregatePattern(p, place, hasPlace, isThroughRef, patType, subjBV, scopeID)
 
 	default:
 		b.emitInternalError(pat.GetSpan(), fmt.Sprintf("match 模式匹配遇到未处理的模式节点 %T", pat))
@@ -1695,9 +1800,18 @@ func (b *funcBuilder) patternConsumesNonCopy(pat ast.Pattern) bool {
 	}
 }
 
-func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, hasPlace bool, isThroughRef bool, subjBV BridgeValID, scopeID int) {
+func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, hasPlace bool, isThroughRef bool, patType types.TypeID, subjBV BridgeValID, scopeID int) {
 	tctx := b.view.GetTypes()
 	symTab := b.view.GetSymbols()
+
+	baseType := patType
+	if baseType == types.Invalid && hasPlace {
+		baseType = place.ElemType
+	}
+	if baseType != types.Invalid && tctx != nil && tctx.Info(baseType).Kind == types.KindRef {
+		isThroughRef = true
+		baseType = tctx.Info(baseType).Elem
+	}
 
 	type patBind struct {
 		sym       *symbols.Symbol
@@ -1705,6 +1819,9 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 		srcBV     BridgeValID
 		fieldName string
 		tupleIdx  int
+		takeRef   bool
+		takeMut   bool
+		projPath  []BridgeProjStep
 	}
 	var bindings []patBind
 	var borrowOps []Statement
@@ -1715,9 +1832,11 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 	borrowPlace := place
 	var parentPlace Place
 	isReborrow := false
+	var borrowInitialPath []BridgeProjStep
 	if hasPlace {
 		if isThroughRef && !place.HasDeref() {
-			borrowPlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: place.ElemType}, place.ElemType, pat.GetSpan())
+			borrowPlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: baseType}, baseType, pat.GetSpan())
+			borrowInitialPath = []BridgeProjStep{{Kind: BridgeProjDeref, ElemType: baseType}}
 		}
 		if pPlace, isRB := b.extractReborrowParent(borrowPlace); isRB {
 			isReborrow = true
@@ -1733,10 +1852,14 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 		return aggReadTemp
 	}
 	var aggReadBV BridgeValID
-	ensureAggBV := func() BridgeValID {
+	ensureAggBV := func(derefForMove bool) BridgeValID {
 		if aggReadBV == InvalidBridgeVal {
 			if hasPlace {
-				aggReadBV = b.allocBridgeVal(place.ElemType, false, pat.GetSpan())
+				bvType := place.ElemType
+				if derefForMove && baseType != types.Invalid {
+					bvType = baseType
+				}
+				aggReadBV = b.allocBridgeVal(bvType, false, pat.GetSpan())
 			} else {
 				aggReadBV = subjBV
 			}
@@ -1744,8 +1867,13 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 		return aggReadBV
 	}
 
-	var walk func(node ast.Pattern, elemPlace Place)
-	walk = func(node ast.Pattern, elemPlace Place) {
+	var valueInitialPath []BridgeProjStep
+	if isThroughRef && !hasPlace {
+		valueInitialPath = []BridgeProjStep{{Kind: BridgeProjDeref, ElemType: baseType}}
+	}
+
+	var walk func(node ast.Pattern, elemPlace Place, curType types.TypeID, valPath []BridgeProjStep, brwPath []BridgeProjStep)
+	walk = func(node ast.Pattern, elemPlace Place, curType types.TypeID, valPath []BridgeProjStep, brwPath []BridgeProjStep) {
 		if node == nil {
 			return
 		}
@@ -1753,7 +1881,7 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 		case *ast.WildcardPattern, *ast.LiteralPattern:
 			return
 		case *ast.IdentPattern:
-			if b.view.VariantRef(p) != nil {
+			if vi, _ := b.resolvePatternVariant(p, curType); vi != nil {
 				return
 			}
 			sym := symTab.NodeSymbols[p]
@@ -1783,13 +1911,20 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 					bt = b.nextTemp()
 					borrowType := sym.Type
 					if tctx != nil && tctx.Info(borrowType).Kind != types.KindRef {
-						elemT := elemPlace.ElemType
+						elemT := curType
+						if elemT == types.Invalid {
+							elemT = elemPlace.ElemType
+						}
 						if elemT == types.Invalid {
 							elemT = borrowType
 						}
 						borrowType = tctx.Ref(p.IsMut, elemT)
 					}
 					bBV = b.allocBridgeVal(borrowType, false, p.Span)
+					var bp []BridgeProjStep
+					if len(brwPath) > 0 {
+						bp = append([]BridgeProjStep(nil), brwPath...)
+					}
 					borrowOps = append(borrowOps, Statement{
 						Kind:        op,
 						Place:       elemPlace,
@@ -1800,66 +1935,163 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 						ParentPlace: parentPlace,
 						ValTemp:     bt,
 						Span:        p.Span,
-						Bridge:      &StatementBridge{ResultVal: bBV},
+						Bridge:      &StatementBridge{ResultVal: bBV, BorrowProj: bp, HasBorrowProj: len(bp) > 0},
 					})
+					bindings = append(bindings, patBind{sym: sym, srcTemp: bt, srcBV: bBV})
+				} else if subjBV != InvalidBridgeVal {
+					bp := append([]BridgeProjStep(nil), brwPath...)
+					if isThroughRef && (len(bp) == 0 || bp[0].Kind != BridgeProjDeref) {
+						bp = append([]BridgeProjStep{{Kind: BridgeProjDeref, ElemType: baseType}}, bp...)
+					}
+					bindings = append(bindings, patBind{
+						sym:      sym,
+						srcBV:    subjBV,
+						takeRef:  true,
+						takeMut:  p.IsMut,
+						projPath: bp,
+					})
+				} else {
+					bindings = append(bindings, patBind{sym: sym})
 				}
-				bindings = append(bindings, patBind{sym: sym, srcTemp: bt, srcBV: bBV})
-			} else if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
-				hasNonCopyMove = true
-				var st ValueID
-				if hasPlace && b.isRefCarryingType(sym.Type) {
-					st = ensureAggTemp()
-				}
-				bindings = append(bindings, patBind{sym: sym, srcTemp: st, srcBV: ensureAggBV()})
 			} else {
-				hasCopyBind = true
+				isNonCopy := sym.Type != types.Invalid && !tctx.IsCopy(sym.Type)
+				if isNonCopy {
+					hasNonCopyMove = true
+				} else {
+					hasCopyBind = true
+				}
 				var st ValueID
 				if hasPlace && b.isRefCarryingType(sym.Type) {
 					st = ensureAggTemp()
 				}
-				bindings = append(bindings, patBind{sym: sym, srcTemp: st, srcBV: ensureAggBV()})
+				vp := append([]BridgeProjStep(nil), valPath...)
+				if hasPlace && isThroughRef && !isNonCopy && (len(vp) == 0 || vp[0].Kind != BridgeProjDeref) {
+					vp = append([]BridgeProjStep{{Kind: BridgeProjDeref, ElemType: baseType}}, vp...)
+				}
+				bindings = append(bindings, patBind{
+					sym:      sym,
+					srcTemp:  st,
+					srcBV:    ensureAggBV(isNonCopy),
+					projPath: vp,
+				})
 			}
 		case *ast.TuplePattern:
+			var elems []types.TypeID
+			if curType != types.Invalid && tctx != nil {
+				elems = tctx.Info(curType).Elems
+			}
 			for idx, el := range p.Elems {
 				nextPlace := elemPlace
 				if hasPlace {
 					nextPlace = elemPlace.AppendProj(Projection{Kind: ProjTupleField, FieldIndex: idx}, types.Invalid, el.GetSpan())
 				}
-				walk(el, nextPlace)
+				elType := types.Invalid
+				if idx < len(elems) {
+					elType = elems[idx]
+				}
+				step := BridgeProjStep{Kind: BridgeProjTupleField, FieldIndex: idx, ElemType: elType}
+				nextValPath := append(append([]BridgeProjStep(nil), valPath...), step)
+				nextBrwPath := append(append([]BridgeProjStep(nil), brwPath...), step)
+				walk(el, nextPlace, elType, nextValPath, nextBrwPath)
 			}
 		case *ast.EnumPattern:
-			for _, arg := range p.Args {
-				walk(arg, elemPlace)
+			vi, vIdx := b.resolvePatternVariant(p, curType)
+			var subst map[uint64]types.TypeID
+			if curType != types.Invalid && tctx != nil && symTab != nil {
+				subst = buildEnumSubstMap(curType, tctx, symTab)
+			}
+			nextValBase := append([]BridgeProjStep(nil), valPath...)
+			nextBrwBase := append([]BridgeProjStep(nil), brwPath...)
+			if vi != nil && vIdx >= 0 {
+				dc := BridgeProjStep{Kind: BridgeProjDowncast, VariantName: vi.Name, VariantIdx: vIdx, ElemType: curType}
+				nextValBase = append(nextValBase, dc)
+				nextBrwBase = append(nextBrwBase, dc)
+			}
+			for argIdx, arg := range p.Args {
+				argType := types.Invalid
+				if vi != nil && argIdx < len(vi.TupleTypes) {
+					argType = vi.TupleTypes[argIdx]
+					if len(subst) > 0 && tctx != nil {
+						argType = tctx.Substitute(argType, subst)
+					}
+				}
+				step := BridgeProjStep{Kind: BridgeProjTupleField, FieldIndex: argIdx, ElemType: argType}
+				nextValPath := append(append([]BridgeProjStep(nil), nextValBase...), step)
+				nextBrwPath := append(append([]BridgeProjStep(nil), nextBrwBase...), step)
+				walk(arg, elemPlace, argType, nextValPath, nextBrwPath)
 			}
 		case *ast.StructPattern:
+			vi, vIdx := b.resolvePatternVariant(p, curType)
+			nextValBase := append([]BridgeProjStep(nil), valPath...)
+			nextBrwBase := append([]BridgeProjStep(nil), brwPath...)
+			var subst map[uint64]types.TypeID
+			if vi != nil && vIdx >= 0 {
+				dc := BridgeProjStep{Kind: BridgeProjDowncast, VariantName: vi.Name, VariantIdx: vIdx, ElemType: curType}
+				nextValBase = append(nextValBase, dc)
+				nextBrwBase = append(nextBrwBase, dc)
+				if curType != types.Invalid && tctx != nil && symTab != nil {
+					subst = buildEnumSubstMap(curType, tctx, symTab)
+				}
+			}
 			for _, fp := range p.Fields {
+				var fType types.TypeID
+				fIdx := -1
+				if vi != nil {
+					for fi, sf := range vi.StructFields {
+						if sf.Name == fp.Name {
+							fIdx = fi
+							fType = sf.Type
+							if len(subst) > 0 && tctx != nil {
+								fType = tctx.Substitute(fType, subst)
+							}
+							break
+						}
+					}
+				} else {
+					fType = findStructFieldType(curType, fp.Name, symTab, tctx)
+					fIdx = findStructFieldIndex(curType, fp.Name, symTab, tctx)
+				}
+				step := BridgeProjStep{Kind: BridgeProjField, FieldName: fp.Name, FieldIndex: fIdx, ElemType: fType}
+				nextValPath := append(append([]BridgeProjStep(nil), nextValBase...), step)
+				nextBrwPath := append(append([]BridgeProjStep(nil), nextBrwBase...), step)
 				if fp.Pattern != nil {
-					walk(fp.Pattern, elemPlace)
+					walk(fp.Pattern, elemPlace, fType, nextValPath, nextBrwPath)
 				} else if sym := symTab.NodeSymbols[fp]; sym != nil {
-					var st ValueID
-					if sym.Type != types.Invalid && !tctx.IsCopy(sym.Type) {
+					isNonCopy := sym.Type != types.Invalid && !tctx.IsCopy(sym.Type)
+					if isNonCopy {
 						hasNonCopyMove = true
 					} else {
 						hasCopyBind = true
 					}
+					var st ValueID
 					if hasPlace && b.isRefCarryingType(sym.Type) {
 						st = ensureAggTemp()
 					}
-					bindings = append(bindings, patBind{sym: sym, srcTemp: st, srcBV: ensureAggBV(), fieldName: fp.Name})
+					vp := nextValPath
+					if hasPlace && isThroughRef && !isNonCopy && (len(vp) == 0 || vp[0].Kind != BridgeProjDeref) {
+						vp = append([]BridgeProjStep{{Kind: BridgeProjDeref, ElemType: baseType}}, vp...)
+					}
+					bindings = append(bindings, patBind{
+						sym:       sym,
+						srcTemp:   st,
+						srcBV:     ensureAggBV(isNonCopy),
+						fieldName: fp.Name,
+						projPath:  vp,
+					})
 				} else {
 					b.emitInternalError(fp.Span, fmt.Sprintf("嵌套结构体简写字段 '%s' 缺少 SymbolID", fp.Name))
 				}
 			}
 		case *ast.SlicePattern:
 			for _, el := range p.Elems {
-				walk(el, elemPlace)
+				walk(el, elemPlace, types.Invalid, valPath, brwPath)
 			}
 		default:
 			b.emitInternalError(node.GetSpan(), fmt.Sprintf("聚合模式内部包含未处理的节点 %T", node))
 		}
 	}
 
-	walk(pat, borrowPlace)
+	walk(pat, borrowPlace, baseType, valueInitialPath, borrowInitialPath)
 
 	// 无子元素投影的非直接聚合模式若同时混合 ref 借用与非 Copy 移动，
 	// 会在同一根位置上既 Borrow 又 Move 导致语义矛盾，故保守发出 WON-SEM-010 拒绝认证，绝不静默丢弃借用事件。
@@ -1876,9 +2108,9 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 		if hasNonCopyMove {
 			movePlace := place
 			if isThroughRef && !place.HasDeref() {
-				movePlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: place.ElemType}, place.ElemType, pat.GetSpan())
+				movePlace = place.AppendProj(Projection{Kind: ProjDeref, ElemType: baseType}, baseType, pat.GetSpan())
 			}
-			b.emit(Statement{Kind: OpMove, Place: movePlace, Type: place.ElemType, ValTemp: aggReadTemp, Span: pat.GetSpan(), Bridge: &StatementBridge{ResultVal: aggReadBV}})
+			b.emit(Statement{Kind: OpMove, Place: movePlace, Type: baseType, ValTemp: aggReadTemp, Span: pat.GetSpan(), Bridge: &StatementBridge{ResultVal: ensureAggBV(true)}})
 		} else {
 			if hasRef {
 				b.emit(Statement{Kind: OpRead, Place: place, Type: place.ElemType, Span: pat.GetSpan()})
@@ -1887,7 +2119,7 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 				}
 			}
 			if hasCopyBind {
-				b.emit(Statement{Kind: OpCopy, Place: place, Type: place.ElemType, ValTemp: aggReadTemp, Span: pat.GetSpan(), Bridge: &StatementBridge{ResultVal: aggReadBV}})
+				b.emit(Statement{Kind: OpCopy, Place: place, Type: place.ElemType, ValTemp: aggReadTemp, Span: pat.GetSpan(), Bridge: &StatementBridge{ResultVal: ensureAggBV(false)}})
 			}
 		}
 	}
@@ -1897,12 +2129,21 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 		b.addLocalToTopScope(bd.sym.ID)
 		var stBridge *StatementBridge
 		if bd.srcBV != InvalidBridgeVal || subjBV != InvalidBridgeVal {
+			var pb *BridgePatternBind
+			if len(bd.projPath) > 0 || bd.fieldName != "" || bd.takeRef {
+				pb = &BridgePatternBind{
+					SourceVal:  bd.srcBV,
+					FieldName:  bd.fieldName,
+					TupleIndex: bd.tupleIdx,
+					HasSubProj: len(bd.projPath) > 0,
+					TakeRef:    bd.takeRef,
+					TakeRefMut: bd.takeMut,
+					ProjPath:   bd.projPath,
+				}
+			}
 			stBridge = &StatementBridge{
-				SrcVal: bd.srcBV,
-				PatternBind: &BridgePatternBind{
-					SourceVal: subjBV,
-					FieldName: bd.fieldName,
-				},
+				SrcVal:      bd.srcBV,
+				PatternBind: pb,
 			}
 		}
 		b.emit(Statement{
@@ -1914,6 +2155,82 @@ func (b *funcBuilder) lowerOpaqueAggregatePattern(pat ast.Pattern, place Place, 
 			Bridge:  stBridge,
 		})
 	}
+}
+
+func (b *funcBuilder) resolvePatternVariant(pat ast.Pattern, subjType types.TypeID) (*symbols.VariantInfo, int) {
+	if pat == nil {
+		return nil, -1
+	}
+	tctx := b.view.GetTypes()
+	symTab := b.view.GetSymbols()
+	vi := b.view.VariantRef(pat)
+	var enumSym *symbols.Symbol
+	if tctx != nil && symTab != nil && subjType != types.Invalid {
+		info := tctx.Info(subjType)
+		if info.Kind == types.KindEnum {
+			enumSym = symTab.ByID[symbols.SymbolID(info.SymbolID)]
+		}
+	}
+	if vi == nil && enumSym != nil && enumSym.VariantMap != nil {
+		switch p := pat.(type) {
+		case *ast.IdentPattern:
+			if !p.IsRef && !p.IsMut {
+				vi = enumSym.VariantMap[p.Name]
+			}
+		case *ast.EnumPattern:
+			if len(p.Path) > 0 {
+				vi = enumSym.VariantMap[p.Path[len(p.Path)-1]]
+			}
+		case *ast.StructPattern:
+			if len(p.Path) > 0 {
+				vi = enumSym.VariantMap[p.Path[len(p.Path)-1]]
+			}
+		}
+	}
+	if vi == nil {
+		return nil, -1
+	}
+	if enumSym != nil {
+		for idx := range enumSym.Variants {
+			if enumSym.Variants[idx].Name == vi.Name {
+				return vi, idx
+			}
+		}
+	}
+	return vi, 0
+}
+
+func buildEnumSubstMap(enumType types.TypeID, tctx *types.Context, symTab *symbols.Table) map[uint64]types.TypeID {
+	info := tctx.Info(enumType)
+	enumSym := symTab.ByID[symbols.SymbolID(info.SymbolID)]
+	if enumSym == nil || len(enumSym.GenericParamIDs) == 0 || len(enumSym.GenericParamIDs) != len(info.GenericArgs) {
+		return nil
+	}
+	subst := make(map[uint64]types.TypeID, len(info.GenericArgs))
+	for i, gid := range enumSym.GenericParamIDs {
+		subst[uint64(gid)] = info.GenericArgs[i]
+	}
+	return subst
+}
+
+func findStructFieldIndex(structType types.TypeID, fieldName string, symTab *symbols.Table, tctx *types.Context) int {
+	if structType == types.Invalid || tctx == nil || symTab == nil {
+		return -1
+	}
+	info := tctx.Info(structType)
+	if info.Kind != types.KindStruct {
+		return -1
+	}
+	sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]
+	if sym == nil {
+		return -1
+	}
+	for i, f := range sym.Fields {
+		if f.Name == fieldName {
+			return i
+		}
+	}
+	return -1
 }
 
 func findStructFieldType(structType types.TypeID, fieldName string, symTab *symbols.Table, tctx *types.Context) types.TypeID {
@@ -2380,7 +2697,8 @@ func (b *funcBuilder) lowerExpr(expr ast.Expr) (ValueID, BridgeValID) {
 	case *ast.IndexExpr:
 		objVal, objBV := b.lowerExpr(e.Object)
 		var idxBV, rStartBV, rEndBV BridgeValID
-		var isRange, inclusive bool
+		var isRange, inclusive, hasConstIdx bool
+		var constIdx int64
 		if rng, isRng := e.Index.(*ast.RangeExpr); isRng {
 			isRange = true
 			inclusive = rng.Inclusive
@@ -2392,11 +2710,17 @@ func (b *funcBuilder) lowerExpr(expr ast.Expr) (ValueID, BridgeValID) {
 			}
 		} else {
 			_, idxBV = b.lowerExpr(e.Index)
+			if lit, isLit := e.Index.(*ast.IntegerLiteral); isLit && lit.Valid && lit.Value != nil && lit.Value.IsInt64() {
+				hasConstIdx = true
+				constIdx = lit.Value.Int64()
+			}
 		}
 		bv := b.pushCompute(ComputeOp{
 			Kind:        CompExtractIndex,
 			Src:         objBV,
 			Left:        idxBV,
+			HasConstIdx: hasConstIdx,
+			ConstIdx:    constIdx,
 			RangeStart:  rStartBV,
 			RangeEnd:    rEndBV,
 			IsRange:     isRange,
@@ -3165,6 +3489,13 @@ func (b *funcBuilder) extractPlace(expr ast.Expr) (Place, bool) {
 			elemType = fi.Type
 		} else {
 			elemType = b.view.ExprType(e)
+		}
+		if elemType == types.Invalid {
+			derefBase := baseType
+			if baseInfo.Kind == types.KindRef || baseInfo.Kind == types.KindRawPtr {
+				derefBase = baseInfo.Elem
+			}
+			elemType = findStructFieldType(derefBase, e.Field, symTab, tctx)
 		}
 		return basePlace.AppendField(e.Field, -1, elemType, e.Span), true
 

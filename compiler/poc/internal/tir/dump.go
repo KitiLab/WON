@@ -36,6 +36,9 @@ func (p *Program) Dump() string {
 						sb.WriteString(" | ")
 					}
 					sb.WriteString(v.Name)
+					if v.HasDiscriminant {
+						fmt.Fprintf(&sb, " = %s", v.DiscriminantText)
+					}
 					if len(v.TupleElems) > 0 {
 						sb.WriteByte('(')
 						for j, te := range v.TupleElems {
@@ -211,7 +214,14 @@ func formatInst(prog *Program, inst Instruction) string {
 		}
 		return fmt.Sprintf("%%%d = Aggregate[%s%s](%s) : %s", inst.Dest, inst.AggKind, extra, strings.Join(items, ", "), typeSuffix)
 	case OpExtract:
-		return fmt.Sprintf("%%%d = Extract %s.%d(%s) : %s", inst.Dest, formatOperand(prog, inst.Src), inst.ExtractProj.FieldIndex, inst.ExtractProj.FieldName, typeSuffix)
+		switch inst.ExtractProj.Kind {
+		case ProjDowncast:
+			return fmt.Sprintf("%%%d = Extract %s.@%s#%d : %s", inst.Dest, formatOperand(prog, inst.Src), inst.ExtractProj.VariantName, inst.ExtractProj.VariantIndex, typeSuffix)
+		case ProjConstIndex:
+			return fmt.Sprintf("%%%d = Extract %s[%d] : %s", inst.Dest, formatOperand(prog, inst.Src), inst.ExtractProj.ConstIndex, typeSuffix)
+		default:
+			return fmt.Sprintf("%%%d = Extract %s.%d(%s) : %s", inst.Dest, formatOperand(prog, inst.Src), inst.ExtractProj.FieldIndex, inst.ExtractProj.FieldName, typeSuffix)
+		}
 	case OpCopy:
 		if inst.Dest != InvalidValue {
 			return fmt.Sprintf("%%%d = Copy %s : %s", inst.Dest, inst.Place.String(), typeSuffix)

@@ -30,7 +30,7 @@ func buildMatchProgram(t *testing.T, src string) (*checker.TypedProgram, *diagno
 func TestPhase2B12MatchPatternCFGInvariants(t *testing.T) {
 	t.Run("OpaqueRefTupleEmitsAllBorrowEventsAndZeroMoves", func(t *testing.T) {
 		src := `
-fn probe(mut_flag: bool) -> u64:
+fn probe(mut_flag: bool) -> usize:
     var p = (String::from("a"), String::from("b"))
     return match p:
         (ref a, ref mut b) => a.len() + b.len()
@@ -63,7 +63,7 @@ struct Mixed:
     count: i32
     label: String
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
 fn check_copy(m: Mixed, flag: bool) -> i32:
@@ -92,10 +92,10 @@ fn check_copy(m: Mixed, flag: bool) -> i32:
 
 	t.Run("MixedOpaqueAggregateFailsWithSem010AndUncertified", func(t *testing.T) {
 		src := `
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn bad() -> u64:
+fn bad() -> usize:
     let p = (String::from("r"), String::from("m"))
     return match p:
         (ref r, m) => r.len() + eat(m)
@@ -119,13 +119,13 @@ enum OptStr:
     Some(String)
     None
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn guarded_move(o: OptStr, flag: bool) -> u64:
+fn guarded_move(o: OptStr, flag: bool) -> usize:
     return match o:
         OptStr::Some(v) if flag => eat(v)
-        _ => 0u64
+        _ => 0usize
 `
 		tp, rep := buildMatchProgram(t, src)
 		assertDiagCode(t, "GuardedConsumingEnum", rep, "WON-SEM-010")
@@ -145,11 +145,11 @@ enum OptStr:
     Some(String)
     None
 
-fn multi_guard(opt: OptStr, c1: bool, c2: bool) -> u64:
+fn multi_guard(opt: OptStr, c1: bool, c2: bool) -> usize:
     return match opt:
         OptStr::Some(ref r1) if c1 => r1.len()
         OptStr::Some(ref r2) if c2 => r2.len()
-        _ => 0u64
+        _ => 0usize
 `
 		tp, rep := buildMatchProgram(t, src)
 		if rep.HasErrors() || !tp.OwnershipChecked {
@@ -190,18 +190,18 @@ enum OptStr:
     Some(String)
     None
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn take(o: OptStr) -> u64:
-    return 1u64
+fn take(o: OptStr) -> usize:
+    return 1usize
 
-fn diverge_arm_clean_join(flag: bool) -> u64:
+fn diverge_arm_clean_join(flag: bool) -> usize:
     let opt = OptStr::Some(String::from("ok"))
     let _x = match flag:
         true =>
             return eat(match_helper())
-        false => 0u64
+        false => 0usize
     return take(opt)
 
 fn match_helper() -> String:

@@ -100,10 +100,10 @@ enum OptStr:
     Some(String)
     None
 
-fn probe(opt: OptStr) -> u64:
+fn probe(opt: OptStr) -> usize:
     return match opt:
         OptStr::Some(ref r) => r.len()
-        OptStr::None => 0u64
+        OptStr::None => 0usize
 `
 	refCFG := buildCFGFromSource(t, refMatchSrc)
 	refDump := refCFG.Functions[0].Dump()
@@ -119,10 +119,10 @@ struct PairStr:
     a: String
     b: String
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn split(pair: PairStr, flag: bool) -> u64:
+fn split(pair: PairStr, flag: bool) -> usize:
     return match pair:
         PairStr { a: ref ra, b: ref rb } if flag => ra.len() + rb.len()
         PairStr { a, b: ref rb } => eat(a) + rb.len()

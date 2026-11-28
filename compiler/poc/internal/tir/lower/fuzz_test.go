@@ -1,6 +1,7 @@
 package lower_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/KitiLab/WON/compiler/poc/internal/checker"
@@ -49,6 +50,10 @@ fn m(e: E) -> i32:
 
 		tir1, err1 := lower.LowerProgram(tp1, nil)
 		if err1 != nil {
+			// 若由于缺失非 unit 返回路径被独立验证器按 Phase 2C.1.1 契约 (WON-INT-001) 拦截，属于预期安全拒止
+			if strings.Contains(err1.Error(), "WON-INT-001") {
+				return
+			}
 			t.Fatalf("已通过 OwnershipChecked/DropElaborated 的程序 TIR 降级失败: %v\n源码:\n%s", err1, src)
 		}
 		if errs := tir.Verify(tir1); len(errs) != 0 {
