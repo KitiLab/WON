@@ -1,7 +1,7 @@
 # WON Language Specification: Compiler Architecture and Intermediate Representation
 
 > **Specification Version**: Draft 0.1  
-> **Status**: `SPECIFIED` (Phase 2C.0 Backend-Neutral TIR & Verifier and Phase 2C.1 TIR-Driven C11 Backend `IMPLEMENTED` in [phase-2c.0-tir-foundation.md](../compiler/phase-2c.0-tir-foundation.md) & [phase-2c.1-tir-c11-backend.md](../compiler/phase-2c.1-tir-c11-backend.md); Phase 2C.2.0 Native `String` & Aggregate Layout Specification `SPECIFIED` in [phase-2c.2-native-layout-and-resource-representation.md](../compiler/phase-2c.2-native-layout-and-resource-representation.md) & [ADR-012](../decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) `ACCEPTED`)  
+> **Status**: `SPECIFIED` (Phase 2C.0 Backend-Neutral TIR & Verifier, Phase 2C.1 TIR-Driven C11 Backend, and Phase 2C.2.0–2C.2.2 Native Aggregate Layout & Owned String Runtime `IMPLEMENTED` in [phase-2c.0-tir-foundation.md](../compiler/phase-2c.0-tir-foundation.md), [phase-2c.1-tir-c11-backend.md](../compiler/phase-2c.1-tir-c11-backend.md), & [phase-2c.2-native-layout-and-resource-representation.md](../compiler/phase-2c.2-native-layout-and-resource-representation.md); [ADR-012](../decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) `ACCEPTED`)  
 > **Module**: Compiler Passes & Typed Intermediate Representation (TIR)  
 > **Date**: November 2026
 

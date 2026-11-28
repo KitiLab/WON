@@ -127,10 +127,10 @@ Governance in the WON project strictly distinguishes between three distinct arch
 | **ADR-009** | Typed Intermediate Representation (TIR) Architecture | Compiler | Basic-block CFG TIR with `ComputeAddress`, multi-backend abstraction | `ACCEPTED` (2026-11-24) | `IMPLEMENTED` (Phase 2C.0–2C.1 C11) |
 | **ADR-010** | Compiler Self-Hosting and Bootstrap Pipeline | Toolchain | 4-stage bootstrap pipeline, Go retirement criteria | `ACCEPTED` (2026-11-24) | `NOT IMPLEMENTED` (Bootstrap active) |
 | **ADR-011** | Ownership and Borrow-Checking Semantics | Ownership & IR | Ownership CFG, NLL borrows, `@derive(Copy)`, candidate provenance, lexical Drops | `ACCEPTED` (2026-11-25) | `IMPLEMENTED` (Phase 2B.1–2B.3) |
-| **ADR-012** | Native String Representation, Aggregate Memory Layout & Allocator Policy | Backend ABI & Runtime | Libc allocator wrappers + OOM abort, `cap==0` empty sentinel, `usize` len/cap, 16B `&str`, L2 structs, 8/16/32/64-bit tagged enums, `@repr` deferred | `ACCEPTED` (2026-11-28) | `SPECIFIED` (Authorized for Phase 2C.2.1+) |
+| **ADR-012** | Native String Representation, Aggregate Memory Layout & Allocator Policy | Backend ABI & Runtime | Libc allocator wrappers + OOM abort, `cap==0` empty sentinel, `usize` len/cap, 16B `&str`, L2 structs, 8/16/32/64-bit tagged enums, `@repr` deferred | `ACCEPTED` (2026-11-28) | `IMPLEMENTED` (Phase 2C.2.1–2C.2.2) |
 
 > [!IMPORTANT]
 > **Ratification Notices**:
 > - **Nov 24, 2026 ([OWNER-APPROVAL-2026-11-24.md](../decisions/OWNER-APPROVAL-2026-11-24.md))**: ADR-007 through ADR-010 ratified (M:N scheduler is implementation strategy; C11 initial codegen; Go bootstrap active until 10 retirement criteria pass).
 > - **Nov 25, 2026 ([OWNER-APPROVAL-ADR-011-2026-11-25.md](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md))**: ADR-011 ratified (authorizing Phase 2B.1–2B.3 ownership/borrow/drop pipeline).
-> - **Nov 28, 2026 ([OWNER-APPROVAL-ADR-012-2026-11-28.md](../decisions/OWNER-APPROVAL-ADR-012-2026-11-28.md))**: ADR-012 ratified (D1–D7, including L2 struct layout and 8/16/32/64-bit enum tags, authorizing Phase 2C.2.1+ staged implementation while keeping `GlueString`/`@repr` gated behind verified milestones).
+> - **Nov 28, 2026 ([OWNER-APPROVAL-ADR-012-2026-11-28.md](../decisions/OWNER-APPROVAL-ADR-012-2026-11-28.md))**: ADR-012 ratified (D1–D7, including L2 struct layout and 8/16/32/64-bit enum tags, authorizing Phase 2C.2.1+ staged implementation; Phase 2C.2.1 native aggregates and Phase 2C.2.2 owned String runtime implemented, keeping `@repr` gated behind future milestone Phase 2C.2.3).

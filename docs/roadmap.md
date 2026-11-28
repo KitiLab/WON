@@ -1,8 +1,8 @@
 # WON Development Roadmap
 
-> **Document Status**: `SPECIFIED` (Phase 0B–2C.1 `IMPLEMENTED`; Phase 2C.2.0 Layout Spec `SPECIFIED` & [ADR-012](decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) `ACCEPTED` Nov 28, 2026; Phase 2C.2.1 Implementation Pending Verification)  
+> **Document Status**: `IMPLEMENTED` (Phase 0B–2C.2.2 `IMPLEMENTED`; Phase 2C.2.3 `@repr(C)` Pending Specification)  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 2C.2.0 (ADR-012 Ratified)
+> **Last Updated**: Phase 2C.2.2 (Owned String Runtime & Drop Verified)
 
 ---
 
@@ -128,7 +128,14 @@ The implementation roadmap adheres to strict technical dependency ordering acros
   - **2C.2.0 (Native `String` & Aggregate Representation Specification)**:
     - *Objective*: Specify language-level vs target-ABI semantics, 24-byte `{ptr, len, cap}` `String`, 16-byte `{ptr, len}` `&str`, allocator shim/OOM policy, struct L2 (`descending alignment + decl tie-break`) / tuple / array / tagged-enum (8/16/32/64-bit tags) / `Option`/`Result` layouts, ISO C11 ZST rules, active-variant & `?` partial cleanup, and generic TIR vs `TargetLayout` boundaries prior to codegen implementation.
     - *Deliverables*: [phase-2c.2-native-layout-and-resource-representation.md](compiler/phase-2c.2-native-layout-and-resource-representation.md), [ADR-012](decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) (`ACCEPTED`), [OWNER-APPROVAL-ADR-012-2026-11-28.md](decisions/OWNER-APPROVAL-ADR-012-2026-11-28.md).
-    - *Status*: `SPECIFIED` (Design specification & ADR-012 ratified Nov 28, 2026, authorizing staged Phases `2C.2.1`+; codegen remains `WON-GEN-002` until verified).
+    - *Status*: `IMPLEMENTED` (Design specification & ADR-012 ratified Nov 28, 2026).
+  - **2C.2.1 (Native Aggregate Layout & Execution Foundation)**:
+    - *Objective*: Backend `TargetLayout` (LP64 offsets/ZST rules), pure value structs, tuples, enums, `Option`, `Result`, `OpAggregateConstruct`, `OpExtract`, `TermSwitch` (`match`/`?`), 16-byte `&str` views, and byte-exact string output.
+    - *Status*: `IMPLEMENTED` (Verified in Phase 2C.2.1 and 2C.2.1.1).
+  - **2C.2.2 (Owned String Runtime, Allocation, Reallocation & Native Drop)**:
+    - *Objective*: Implement 24-byte `_won_string_t` `{ptr, len, cap}` descriptor, non-null static empty sentinel `_won_empty_bytes`, checked libc-backed allocator shims (`_won_alloc`, `_won_realloc(ptr, old_cap, new_cap)`, `_won_free`), 2x geometric growth, String operations (`String::from`, `.len()`, `.capacity()`, `.is_empty()`, `.push_str()`, `.as_ptr()`, `.as_mut_ptr()`, `.as_str()`, interpolation), native `GlueString` Drop, and nested composite recursive cleanup.
+    - *Deliverables*: `internal/codegen/c11/{types,capabilities,emitter}.go`, `internal/tir/ir.go`, `internal/cfg/builder.go`, `string_runtime_test.go`, `string_lifecycle_test.go`, fuzz suite `FuzzStringLifecycleAndReallocation`.
+    - *Status*: `IMPLEMENTED` (Verified under strict ISO C11 GCC & Clang with ASan/UBSan clean execution).
 - **Separate Future Milestone — General Trait Solver & Structured Concurrency Safety (`scope` / `Send` / `Sync`)**:
   - *Objective*: User `trait` coherence, generic `Copy` conditional bounds, user `impl Drop`, `?` `From`/`Into` conversion (`WON-ERR-002`), auto-traits `Send`/`Sync`, and structured-concurrency task capture enforcement (`WON-CON-001`, Phase 3).
   - *Status*: `PLANNED` (Explicitly separated from Phase 2B core borrow checker).
