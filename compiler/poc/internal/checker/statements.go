@@ -343,6 +343,8 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt, scope *symbols.Scope) {
 		fieldInfo := c.resolveField(objType, lhs.Field, lhs.Span)
 		if fieldInfo != nil {
 			targetType = fieldInfo.Type
+			c.typed.FieldRefs[lhs] = fieldInfo
+			c.typed.ExprTypes[lhs] = targetType
 			if !fieldInfo.IsVar {
 				c.report.AddDiagnostic(diagnostic.Diagnostic{
 					Code:        "WON-ADT-004",
@@ -378,6 +380,9 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt, scope *symbols.Scope) {
 			})
 		}
 		targetType = c.unwrapIndexElement(objType, lhs.Span)
+		if targetType != types.Invalid {
+			c.typed.ExprTypes[lhs] = targetType
+		}
 		if !c.isLValueRootMutable(lhs, scope) {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code:     "WON-MUT-001",
@@ -394,6 +399,7 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt, scope *symbols.Scope) {
 			pInfo := c.types.Info(ptrType)
 			if pInfo.Kind == types.KindRef || pInfo.Kind == types.KindRawPtr {
 				targetType = pInfo.Elem
+				c.typed.ExprTypes[lhs] = targetType
 				if pInfo.Kind == types.KindRawPtr && !c.inUnsafe {
 					c.report.AddDiagnostic(diagnostic.Diagnostic{
 						Code:        "WON-SEC-002",

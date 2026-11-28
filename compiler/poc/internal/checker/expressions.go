@@ -1190,7 +1190,7 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr, expected types.TypeID, scope *s
 		ptrT := c.types.RawPtr(false, c.types.U8)
 		a0 := c.checkExpr(e.Args[0], ptrT, scope)
 		a1 := c.checkExpr(e.Args[1], ptrT, scope)
-		a2 := c.checkExpr(e.Args[2], c.types.U64, scope)
+		a2 := c.checkExpr(e.Args[2], c.types.USize, scope)
 		if a0 != types.Invalid && !c.types.CanAssign(a0, ptrT) {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code: "WON-TYP-001", Severity: "error",
@@ -1205,10 +1205,10 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr, expected types.TypeID, scope *s
 				File:    e.Args[1].GetSpan().File, Span: e.Args[1].GetSpan(),
 			})
 		}
-		if a2 != types.Invalid && a2 != c.types.U64 {
+		if a2 != types.Invalid && a2 != c.types.USize && a2 != c.types.U64 {
 			c.report.AddDiagnostic(diagnostic.Diagnostic{
 				Code: "WON-TYP-001", Severity: "error",
-				Message: fmt.Sprintf("bytes_equal 第 3 个长度参数类型不匹配: 期望 'u64'，实际为 '%s'", c.types.Format(a2)),
+				Message: fmt.Sprintf("bytes_equal 第 3 个长度参数类型不匹配: 期望 'usize' 或 'u64'，实际为 '%s'", c.types.Format(a2)),
 				File:    e.Args[2].GetSpan().File, Span: e.Args[2].GetSpan(),
 			})
 		}
@@ -1893,7 +1893,11 @@ func (c *Checker) resolveBuiltinMethodSig(recType, baseID types.TypeID, baseInfo
 		}
 	case "len":
 		if isStringOrView || isBuffer {
-			return builtinMethodSig{retType: c.types.U64}, true
+			return builtinMethodSig{retType: c.types.USize}, true
+		}
+	case "capacity":
+		if baseID == c.types.StringT {
+			return builtinMethodSig{retType: c.types.USize, unsupportedCodegen: true}, true
 		}
 	case "is_empty":
 		if isStringOrView || isBuffer {

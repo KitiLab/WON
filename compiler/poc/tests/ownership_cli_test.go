@@ -81,7 +81,7 @@ struct Point:
     x: i32
     y: i32
 
-fn main() -> u64:
+fn main() -> usize:
     let p = Point { x: 1, y: 2 }
     let p2 = p
     var s = String::from("ok")
@@ -108,14 +108,14 @@ fn main() -> u64:
     Some(String)
     None
 
-fn keep(o: Opt) -> u64:
-    return 1u64
+fn keep(o: Opt) -> usize:
+    return 1usize
 
-fn main(cond: bool) -> u64:
+fn main(cond: bool) -> usize:
     let o = Opt::Some(String::from("ok"))
     let n = match o:
         Opt::Some(ref r) if cond => r.len()
-        _ => 0u64
+        _ => 0usize
     return n + keep(o)
 `
 	if err := os.WriteFile(validGuardMatch, []byte(guardMatchSrc), 0644); err != nil {
@@ -162,12 +162,12 @@ fn main(cond: bool) -> u64:
 		},
 		{
 			name: "guarded_consuming_match",
-			src:  "enum Opt:\n    Some(String)\n    None\n\nfn main(cond: bool) -> u64:\n    let o = Opt::Some(String::from(\"hi\"))\n    return match o:\n        Opt::Some(s) if cond => s.len()\n        _ => 0u64\n",
+			src:  "enum Opt:\n    Some(String)\n    None\n\nfn main(cond: bool) -> usize:\n    let o = Opt::Some(String::from(\"hi\"))\n    return match o:\n        Opt::Some(s) if cond => s.len()\n        _ => 0usize\n",
 			code: "WON-SEM-010",
 		},
 		{
 			name: "mixed_opaque_tuple_match",
-			src:  "fn eat(s: String) -> u64:\n    return s.len()\n\nfn main() -> u64:\n    let p = (String::from(\"a\"), String::from(\"b\"))\n    return match p:\n        (ref a, b) => a.len() + eat(b)\n",
+			src:  "fn eat(s: String) -> usize:\n    return s.len()\n\nfn main() -> usize:\n    let p = (String::from(\"a\"), String::from(\"b\"))\n    return match p:\n        (ref a, b) => a.len() + eat(b)\n",
 			code: "WON-SEM-010",
 		},
 		{

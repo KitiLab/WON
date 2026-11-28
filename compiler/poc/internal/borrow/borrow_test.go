@@ -199,7 +199,7 @@ fn test(cond: bool) -> i32:
 `, "WON-MUT-001")
 
 	assertFailCode(t, "UninitVarReadBeforeInit", `
-fn main() -> u64:
+fn main() -> usize:
     var buf: String
     return buf.len()
 `, "WON-MEM-010")
@@ -208,7 +208,7 @@ fn main() -> u64:
 fn consume(s: String):
     println(s)
 
-fn main() -> u64:
+fn main() -> usize:
     let s1 = String::from("won")
     let s2 = s1
     consume(s2)
@@ -219,7 +219,7 @@ fn main() -> u64:
 fn consume(s: String):
     println(s)
 
-fn main() -> u64:
+fn main() -> usize:
     var s = String::from("first")
     consume(s)
     s = String::from("second")
@@ -240,7 +240,7 @@ fn main():
 fn consume(s: String):
     println(s)
 
-fn test(cond: bool) -> u64:
+fn test(cond: bool) -> usize:
     let s = String::from("res")
     if cond:
         consume(s)
@@ -250,7 +250,7 @@ fn test(cond: bool) -> u64:
 `, "WON-MEM-001")
 
 	assertPass(t, "UninitStringInitializedInAllBranches", `
-fn test(cond: bool) -> u64:
+fn test(cond: bool) -> usize:
     let s: String
     if cond:
         s = String::from("a")
@@ -263,7 +263,7 @@ fn test(cond: bool) -> u64:
 fn consume(s: String):
     println(s)
 
-fn test(cond: bool) -> u64:
+fn test(cond: bool) -> usize:
     let s = String::from("loop")
     while cond:
         consume(s)
@@ -274,7 +274,7 @@ fn test(cond: bool) -> u64:
 fn consume(s: String):
     println(s)
 
-fn test(cond: bool) -> u64:
+fn test(cond: bool) -> usize:
     var s = String::from("start")
     while cond:
         consume(s)
@@ -283,7 +283,7 @@ fn test(cond: bool) -> u64:
 `)
 
 	assertFailCode(t, "LoopMayExecuteZeroTimesLeavesUninit", `
-fn test(cond: bool) -> u64:
+fn test(cond: bool) -> usize:
     var s: String
     while cond:
         s = String::from("maybe")
@@ -294,7 +294,7 @@ fn test(cond: bool) -> u64:
 fn consume(s: String):
     println(s)
 
-fn test(cond: bool) -> u64:
+fn test(cond: bool) -> usize:
     let s = String::from("safe")
     while cond:
         if cond:
@@ -318,7 +318,7 @@ struct PairStr:
     var a: String
     var b: String
 
-fn main() -> u64:
+fn main() -> usize:
     let p = PairStr { a: String::from("x"), b: String::from("y") }
     let moved_a = p.a
     return moved_a.len() + p.b.len()
@@ -329,10 +329,10 @@ struct PairStr:
     var a: String
     var b: String
 
-fn sink(p: PairStr) -> u64:
+fn sink(p: PairStr) -> usize:
     return p.a.len() + p.b.len()
 
-fn main() -> u64:
+fn main() -> usize:
     var p = PairStr { a: String::from("x"), b: String::from("y") }
     let moved_a = p.a
     p.a = String::from("restored")
@@ -358,7 +358,7 @@ struct PairStr:
     a: String
     b: String
 
-fn main() -> u64:
+fn main() -> usize:
     let p = PairStr { a: String::from("x"), b: String::from("y") }
     let _moved = p.a
     return p.a.len()
@@ -421,8 +421,8 @@ func buildDeepStructProgram(depth int, useLeafAfterMove, readWholeAfterMove, rea
 	leafPath.WriteString(".val")
 	sibPath.WriteString(".sib")
 
-	sb.WriteString(fmt.Sprintf("fn consume_root(r: %s) -> u64:\n    return 1u64\n\n", rootType))
-	sb.WriteString("fn main() -> u64:\n")
+	sb.WriteString(fmt.Sprintf("fn consume_root(r: %s) -> usize:\n    return 1usize\n\n", rootType))
+	sb.WriteString("fn main() -> usize:\n")
 	sb.WriteString(fmt.Sprintf("    var root = %s\n", chainInit))
 	sb.WriteString(fmt.Sprintf("    let moved = %s\n", leafPath.String()))
 	if reinitLeaf {
@@ -469,7 +469,7 @@ struct Node:
     head: String
     next: NextNode
 
-fn inspect(n: &Node) -> u64:
+fn inspect(n: &Node) -> usize:
     return n.head.len()
 `)
 }
@@ -481,14 +481,14 @@ enum OptStr:
     Some(String)
     None
 
-fn use_opt(o: OptStr) -> u64:
-    return 1u64
+fn use_opt(o: OptStr) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let opt = OptStr::Some(String::from("hello"))
     let n = match opt:
         OptStr::Some(ref r) => r.len()
-        OptStr::None => 0u64
+        OptStr::None => 0usize
     return n + use_opt(opt)
 `)
 
@@ -497,17 +497,17 @@ enum OptStr:
     Some(String)
     None
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn use_opt(o: OptStr) -> u64:
-    return 1u64
+fn use_opt(o: OptStr) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let opt = OptStr::Some(String::from("bye"))
     let n = match opt:
         OptStr::Some(v) => eat(v)
-        OptStr::None => 0u64
+        OptStr::None => 0usize
     return n + use_opt(opt)
 `, "WON-MEM-001")
 
@@ -516,19 +516,19 @@ enum OptStr:
     Some(String)
     None
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     let opt = OptStr::Some(String::from("mix"))
     let flag = true
     let n = match opt:
         OptStr::Some(ref r) if flag => r.len()
         OptStr::Some(v) => eat(v)
-        OptStr::None => 0u64
+        OptStr::None => 0usize
     let again = match opt:
         OptStr::Some(v) => eat(v)
-        OptStr::None => 0u64
+        OptStr::None => 0usize
     return n + again
 `, "WON-MEM-001")
 
@@ -537,18 +537,18 @@ enum OptStr:
     Some(String)
     None
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     var opt = OptStr::Some(String::from("first"))
     let n = match opt:
         OptStr::Some(v) => eat(v)
-        OptStr::None => 0u64
+        OptStr::None => 0usize
     opt = OptStr::Some(String::from("second"))
     let m = match opt:
         OptStr::Some(ref r) => r.len()
-        OptStr::None => 0u64
+        OptStr::None => 0usize
     return n + m
 `)
 
@@ -557,10 +557,10 @@ struct PairStr:
     a: String
     b: String
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     let pair = PairStr { a: String::from("aa"), b: String::from("bb") }
     let x = match pair:
         PairStr { a, b: ref rb } => eat(a) + rb.len()
@@ -572,13 +572,13 @@ struct PairStr:
     a: String
     b: String
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn sink_pair(p: PairStr) -> u64:
+fn sink_pair(p: PairStr) -> usize:
     return p.b.len()
 
-fn main() -> u64:
+fn main() -> usize:
     let pair = PairStr { a: String::from("aa"), b: String::from("bb") }
     let _x = match pair:
         PairStr { a, b: ref rb } => eat(a) + rb.len()
@@ -590,14 +590,14 @@ enum OptStr:
     Some(String)
     None
 
-fn sink(o: OptStr) -> u64:
-    return 1u64
+fn sink(o: OptStr) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let opt = OptStr::Some(String::from("guard"))
     let len = match opt:
-        OptStr::Some(ref r) if r.len() > 2u64 => r.len()
-        _ => 0u64
+        OptStr::Some(ref r) if r.len() > 2usize => r.len()
+        _ => 0usize
     return len + sink(opt)
 `)
 

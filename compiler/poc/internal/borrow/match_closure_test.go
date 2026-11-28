@@ -10,22 +10,22 @@ enum Dual:
     Pair(String, String)
     Empty
 
-fn keep_dual(d: Dual) -> u64:
-    return 1u64
+fn keep_dual(d: Dual) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let d = Dual::Pair(String::from("left"), String::from("right"))
     let n = match d:
         Dual::Pair(ref a, ref b) => a.len() + b.len()
-        Dual::Empty => 0u64
+        Dual::Empty => 0usize
     return n + keep_dual(d)
 `)
 
 	assertPass(t, "OpaqueTupleRefAndMutRefOnlyPreservesSubject", `
-fn take_pair(p: (String, String)) -> u64:
-    return 1u64
+fn take_pair(p: (String, String)) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     var pair = (String::from("x"), String::from("yy"))
     let total = match pair:
         (ref a, ref mut b) => a.len() + b.len()
@@ -38,28 +38,28 @@ enum Dual:
     Pair(String, String)
     Empty
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn take_dual(d: Dual) -> u64:
-    return 1u64
+fn take_dual(d: Dual) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let d = Dual::Pair(String::from("a"), String::from("b"))
     let n = match d:
         Dual::Pair(a, b) => eat(a) + eat(b)
-        Dual::Empty => 0u64
+        Dual::Empty => 0usize
     return n + take_dual(d)
 `, "WON-MEM-001")
 
 	assertFailCode(t, "OpaqueTupleByValueMovesSubject", `
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn take_pair(p: (String, String)) -> u64:
-    return 1u64
+fn take_pair(p: (String, String)) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let pair = (String::from("a"), String::from("b"))
     let n = match pair:
         (a, b) => eat(a) + eat(b)
@@ -72,21 +72,21 @@ enum Dual:
     Pair(String, String)
     Empty
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     let d = Dual::Pair(String::from("ref"), String::from("own"))
     return match d:
         Dual::Pair(ref a, b) => a.len() + eat(b)
-        Dual::Empty => 0u64
+        Dual::Empty => 0usize
 `, "WON-SEM-010")
 
 	assertFailCode(t, "OpaqueTupleSharedRefPlusMoveRejected", `
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     let pair = (String::from("ref"), String::from("own"))
     return match pair:
         (ref a, b) => a.len() + eat(b)
@@ -99,14 +99,14 @@ enum Boxed:
         right: String
     Empty
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     let b = Boxed::Empty
     return match b:
         Boxed::Item { left: ref l, right } => l.len() + eat(right)
-        Boxed::Empty => 0u64
+        Boxed::Empty => 0usize
 `, "WON-SEM-010")
 
 	// 4. 非直接聚合模式混合 ref mut 与非 Copy 按值移动：显式 WON-SEM-010
@@ -115,21 +115,21 @@ enum Dual:
     Pair(String, String)
     Empty
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     var d = Dual::Pair(String::from("mutref"), String::from("own"))
     return match d:
         Dual::Pair(ref mut a, b) => a.len() + eat(b)
-        Dual::Empty => 0u64
+        Dual::Empty => 0usize
 `, "WON-SEM-010")
 
 	assertFailCode(t, "OpaqueTupleMutRefPlusMoveRejected", `
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     var pair = (String::from("mutref"), String::from("own"))
     return match pair:
         (ref mut a, b) => a.len() + eat(b)
@@ -141,10 +141,10 @@ struct PairStr:
     var a: String
     var b: String
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     var pair = PairStr { a: String::from("mut"), b: String::from("move") }
     let x = match pair:
         PairStr { a: ref mut ra, b } => ra.len() + eat(b)
@@ -161,10 +161,10 @@ struct Outer:
     inner: Inner
     tag: String
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     let o = Outer {
         inner: Inner { a: String::from("aa"), b: String::from("bb") },
         tag: String::from("tag")
@@ -179,10 +179,10 @@ struct WrapTuple:
     pair: (String, String)
     id: i32
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     let w = WrapTuple { pair: (String::from("a"), String::from("b")), id: 1 }
     return match w:
         WrapTuple { pair: (ref a, b), id } => a.len() + eat(b)
@@ -194,7 +194,7 @@ struct Mixed:
     count: i32
     label: String
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
 fn main() -> i32:
@@ -216,13 +216,13 @@ fn main() -> i32:
 `)
 
 	assertFailCode(t, "OpaqueTupleCopyBesideNonCopyMovesAggregate", `
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn use_tup(t: (String, i32)) -> u64:
-    return 1u64
+fn use_tup(t: (String, i32)) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let t: (String, i32) = (String::from("gone"), 9i32)
     let n = match t:
         (s, c) => eat(s)
@@ -238,15 +238,15 @@ enum OptStr:
     Some(String)
     None
 
-fn take(o: OptStr) -> u64:
-    return 1u64
+fn take(o: OptStr) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let opt = OptStr::Some(String::from("guarded"))
     let n = match opt:
-        OptStr::Some(ref r) if r.len() > 2u64 => r.len()
+        OptStr::Some(ref r) if r.len() > 2usize => r.len()
         OptStr::Some(ref r) => r.len()
-        OptStr::None => 0u64
+        OptStr::None => 0usize
     return n + take(opt)
 `)
 
@@ -279,16 +279,16 @@ enum OptStr:
     Some(String)
     None
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn take(o: OptStr) -> u64:
-    return 1u64
+fn take(o: OptStr) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let opt = OptStr::Some(String::from("secret"))
     let n = match opt:
-        OptStr::Some(s) if s.len() > 0u64 => eat(s)
+        OptStr::Some(s) if s.len() > 0usize => eat(s)
         _ => take(opt)
     return n
 `, "WON-SEM-010")
@@ -298,25 +298,25 @@ struct PairStr:
     a: String
     b: String
 
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     let p = PairStr { a: String::from("a"), b: String::from("b") }
     return match p:
-        PairStr { a, b: ref rb } if rb.len() > 0u64 => eat(a)
-        _ => 0u64
+        PairStr { a, b: ref rb } if rb.len() > 0usize => eat(a)
+        _ => 0usize
 `, "WON-SEM-010")
 
 	assertFailCode(t, "GuardedNonCopyIdentMoveRejectedSem010", `
-fn eat(s: String) -> u64:
+fn eat(s: String) -> usize:
     return s.len()
 
-fn main() -> u64:
+fn main() -> usize:
     let s = String::from("ident")
     return match s:
-        v if v.len() > 0u64 => eat(v)
-        _ => 0u64
+        v if v.len() > 0usize => eat(v)
+        _ => 0usize
 `, "WON-SEM-010")
 
 	// 4 & 5 & 6. 守卫失败并落空至后续按值或主体复用分支，主体未被提前移走
@@ -325,10 +325,10 @@ enum OptStr:
     Some(String)
     None
 
-fn take(o: OptStr) -> u64:
-    return 1u64
+fn take(o: OptStr) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let opt = OptStr::Some(String::from("fallthrough"))
     let flag = false
     let res = match opt:
@@ -343,15 +343,15 @@ enum OptStr:
     Some(String)
     None
 
-fn take(o: OptStr) -> u64:
-    return 1u64
+fn take(o: OptStr) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let opt = OptStr::Some(String::from("cascade"))
     let res = match opt:
-        OptStr::Some(ref r) if r.len() > 100u64 => 1u64
-        OptStr::Some(ref r) if r.len() > 50u64 => 2u64
-        OptStr::Some(ref r) if r.len() > 10u64 => 3u64
+        OptStr::Some(ref r) if r.len() > 100usize => 1usize
+        OptStr::Some(ref r) if r.len() > 50usize => 2usize
+        OptStr::Some(ref r) if r.len() > 10usize => 3usize
         _ => take(opt)
     return res
 `)
@@ -362,18 +362,18 @@ enum OptStr:
     Some(String)
     None
 
-fn take(o: OptStr) -> u64:
-    return 1u64
+fn take(o: OptStr) -> usize:
+    return 1usize
 
-fn main() -> u64:
+fn main() -> usize:
     let opt = OptStr::Some(String::from("nested"))
     let mode = true
     let out = match opt:
-        OptStr::Some(ref r) if r.len() > 2u64 =>
+        OptStr::Some(ref r) if r.len() > 2usize =>
             match mode:
-                true if r.len() < 100u64 => r.len()
-                _ => 0u64
-        _ => 0u64
+                true if r.len() < 100usize => r.len()
+                _ => 0usize
+        _ => 0usize
     return out + take(opt)
 `)
 }
