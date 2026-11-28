@@ -40,17 +40,18 @@ func (e *Emitter) Emit(prog *tir.Program) (string, error) {
 }
 
 type emitCtx struct {
-	prog         *tir.Program
-	tt           *tir.TypeTable
-	layout       *TargetLayout
-	sb           strings.Builder
-	indent       int
-	litDecls     []litDecl
-	litByContent map[string]string
-	needEmpty    bool
-	needZSTDummy bool
-	needBoundsU  bool
-	needBoundsS  bool
+	prog           *tir.Program
+	tt             *tir.TypeTable
+	layout         *TargetLayout
+	sb             strings.Builder
+	indent         int
+	litDecls       []litDecl
+	litByContent   map[string]string
+	needEmpty      bool
+	needZSTDummy   bool
+	needBoundsU    bool
+	needBoundsS    bool
+	needWriteBytes bool
 }
 
 type litDecl struct {
@@ -235,7 +236,16 @@ func (c *emitCtx) emitProgram() error {
 		c.writeLine("    return (size_t)idx;")
 		c.writeLine("}")
 	}
-	if bodyBuf.needEmpty || len(bodyBuf.litDecls) > 0 || bodyBuf.needZSTDummy || bodyBuf.needBoundsU || bodyBuf.needBoundsS {
+	if bodyBuf.needWriteBytes {
+		c.writeLine("#ifndef _WON_WRITE_BYTES_IMPL")
+		c.writeLine("#define _WON_WRITE_BYTES_IMPL(ptr, len) (void)fwrite((ptr), 1, (len), stdout)")
+		c.writeLine("#endif")
+		c.writeLine("static inline void _won_write_bytes(const uint8_t *ptr, size_t len) {")
+		c.writeLine("    if (len == 0) return;")
+		c.writeLine("    _WON_WRITE_BYTES_IMPL(ptr, len);")
+		c.writeLine("}")
+	}
+	if bodyBuf.needEmpty || len(bodyBuf.litDecls) > 0 || bodyBuf.needZSTDummy || bodyBuf.needBoundsU || bodyBuf.needBoundsS || bodyBuf.needWriteBytes {
 		c.writeLine("")
 	}
 
@@ -1045,7 +1055,7 @@ func (fs *fnEmitState) analyzeCFGAndUses() {
 				}
 			case tir.OpBuiltinCall:
 				for _, a := range inst.Args {
-					if inst.BuiltinKind == tir.BuiltinPrintln && a.Kind == tir.OperandValue && fs.hasStaticStrVal[a.Value] {
+					if inst.BuiltinKind == tir.BuiltinPrintln && a.Kind == tir.OperandValue && fs.hasStaticStrVal[a.Value] && !strings.ContainsRune(fs.staticStrVal[a.Value], 0) {
 						continue
 					}
 					markOperand(a)
@@ -1853,7 +1863,7 @@ func (fs *fnEmitState) emitBuiltinCall(inst tir.Instruction) error {
 	var expr string
 	switch inst.BuiltinKind {
 	case tir.BuiltinPrintln:
-		expr = fs.buildPrintlnExpr(inst.Args, args)
+		return fs.emitPrintlnStmt(inst.Args, args)
 	case tir.BuiltinBytesEqual:
 		if len(args) != 3 {
 			return newCapErr("WON-GEN-002", fmt.Sprintf("内置 bytes_equal 期望 3 个实参，实际收到 %d 个", len(args)), inst.Span, "")
@@ -1991,56 +2001,95 @@ func (fs *fnEmitState) emitTryUnwrapBuiltin(inst tir.Instruction, srcExpr string
 	return nil
 }
 
-func (fs *fnEmitState) buildPrintlnExpr(argOps []tir.Operand, args []string) string {
-	if len(args) == 0 {
-		return `printf("\n")`
-	}
+// emitPrintlnStmt 发射保持从左至右求值序与最终唯一换行的 println 语句。
+// 对 &str / 字符串视图严格调用 _won_write_bytes(ptr, len) 进行定长字节流写入，
+// 规避 printf("%.*s") 将 size_t 窄化为 int 产生的负精度及越界扫描 NUL 缺陷，完整支持嵌入 NUL 字节。
+func (fs *fnEmitState) emitPrintlnStmt(argOps []tir.Operand, args []string) error {
 	c := fs.ctx
-	var format strings.Builder
-	passArgs := make([]string, 0, len(args))
+	if len(args) == 0 {
+		c.writeLine(`printf("\n");`)
+		return nil
+	}
+
+	var curFmt strings.Builder
+	var curArgs []string
+
+	flushPrintf := func(appendNewline bool) {
+		if curFmt.Len() == 0 && !appendNewline {
+			return
+		}
+		if appendNewline {
+			curFmt.WriteString("\\n")
+		}
+		fmtStr := curFmt.String()
+		if len(curArgs) == 0 {
+			c.writeLine(fmt.Sprintf(`printf("%s");`, fmtStr))
+		} else {
+			c.writeLine(fmt.Sprintf(`printf("%s", %s);`, fmtStr, strings.Join(curArgs, ", ")))
+		}
+		curFmt.Reset()
+		curArgs = curArgs[:0]
+	}
+
 	for i, argOp := range argOps {
-		if argOp.Kind == tir.OperandConst && argOp.Const.Kind == tir.ConstString {
-			format.WriteString(escapePrintfLiteral(argOp.Const.StrVal))
+		// 无嵌入 NUL 字符的纯静态字符串字面量可直接合并至 C printf 格式串
+		if argOp.Kind == tir.OperandConst && argOp.Const.Kind == tir.ConstString && !strings.ContainsRune(argOp.Const.StrVal, 0) {
+			curFmt.WriteString(escapePrintfLiteral(argOp.Const.StrVal))
 			continue
 		}
-		if argOp.Kind == tir.OperandValue && fs.hasStaticStrVal[argOp.Value] {
-			format.WriteString(escapePrintfLiteral(fs.staticStrVal[argOp.Value]))
+		if argOp.Kind == tir.OperandValue && fs.hasStaticStrVal[argOp.Value] && !strings.ContainsRune(fs.staticStrVal[argOp.Value], 0) {
+			curFmt.WriteString(escapePrintfLiteral(fs.staticStrVal[argOp.Value]))
 			continue
 		}
 
 		ti := c.tt.Info(argOp.Type)
+		if (ti.Kind == tir.TypeRef && c.tt.Info(ti.Elem).Kind == tir.TypeStr) || ti.Kind == tir.TypeStr || ti.Kind == tir.TypeString {
+			// 遇到字符串视图：先刷出此前累积的 printf 片段（不换行），随后使用定长 fwrite 发射字节流
+			flushPrintf(false)
+
+			var ptrExpr, lenExpr string
+			if argOp.Kind == tir.OperandConst && argOp.Const.Kind == tir.ConstString {
+				litSym := c.registerStringLit(argOp.Const.StrVal)
+				ptrExpr = litSym
+				lenExpr = fmt.Sprintf("((size_t)UINT64_C(%d))", len(argOp.Const.StrVal))
+			} else {
+				ptrExpr = fmt.Sprintf("((%s).ptr)", args[i])
+				lenExpr = fmt.Sprintf("((%s).len)", args[i])
+			}
+			c.writeLine(fmt.Sprintf("_won_write_bytes(%s, %s);", ptrExpr, lenExpr))
+			c.needWriteBytes = true
+			continue
+		}
+
+		// 标量及裸指针按 printf 安全类型说明符格式化
 		switch {
-		case ti.Kind == tir.TypeRef && c.tt.Info(ti.Elem).Kind == tir.TypeStr:
-			format.WriteString("%.*s")
-			passArgs = append(passArgs, fmt.Sprintf("(int)((%s).len)", args[i]), fmt.Sprintf("(const char*)((%s).ptr)", args[i]))
 		case ti.Kind == tir.TypeBool:
-			format.WriteString("%s")
-			passArgs = append(passArgs, fmt.Sprintf("((%s) ? \"true\" : \"false\")", args[i]))
+			curFmt.WriteString("%s")
+			curArgs = append(curArgs, fmt.Sprintf("((%s) ? \"true\" : \"false\")", args[i]))
 		case ti.Kind == tir.TypeChar:
-			format.WriteString("%u")
-			passArgs = append(passArgs, fmt.Sprintf("(unsigned int)(%s)", args[i]))
+			curFmt.WriteString("%u")
+			curArgs = append(curArgs, fmt.Sprintf("(unsigned int)(%s)", args[i]))
 		case ti.Kind == tir.TypeInt && !ti.Signed:
-			format.WriteString("%llu")
-			passArgs = append(passArgs, fmt.Sprintf("(unsigned long long)(%s)", args[i]))
+			curFmt.WriteString("%llu")
+			curArgs = append(curArgs, fmt.Sprintf("(unsigned long long)(%s)", args[i]))
 		case ti.Kind == tir.TypeInt && ti.Signed:
-			format.WriteString("%lld")
-			passArgs = append(passArgs, fmt.Sprintf("(long long)(%s)", args[i]))
+			curFmt.WriteString("%lld")
+			curArgs = append(curArgs, fmt.Sprintf("(long long)(%s)", args[i]))
 		case ti.Kind == tir.TypeFloat:
-			format.WriteString("%g")
-			passArgs = append(passArgs, fmt.Sprintf("(double)(%s)", args[i]))
+			curFmt.WriteString("%g")
+			curArgs = append(curArgs, fmt.Sprintf("(double)(%s)", args[i]))
 		case ti.Kind == tir.TypeRawPtr || ti.Kind == tir.TypeRef:
-			format.WriteString("%p")
-			passArgs = append(passArgs, fmt.Sprintf("(const void*)(%s)", args[i]))
+			curFmt.WriteString("%p")
+			curArgs = append(curArgs, fmt.Sprintf("(const void*)(%s)", args[i]))
 		default:
-			format.WriteString("%lld")
-			passArgs = append(passArgs, fmt.Sprintf("(long long)(%s)", args[i]))
+			curFmt.WriteString("%lld")
+			curArgs = append(curArgs, fmt.Sprintf("(long long)(%s)", args[i]))
 		}
 	}
-	format.WriteString("\\n")
-	if len(passArgs) == 0 {
-		return fmt.Sprintf(`printf("%s")`, format.String())
-	}
-	return fmt.Sprintf(`printf("%s", %s)`, format.String(), strings.Join(passArgs, ", "))
+
+	// 最终刷出尾部格式串并附带整句唯一换行符
+	flushPrintf(true)
+	return nil
 }
 
 func (fs *fnEmitState) emitDrop(inst tir.Instruction) error {
