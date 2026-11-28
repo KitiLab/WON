@@ -2139,6 +2139,8 @@ func classifyBuiltin(name string) tir.BuiltinKind {
 		return tir.BuiltinIsEmpty
 	case name == "push_str":
 		return tir.BuiltinPushStr
+	case name == "as_str":
+		return tir.BuiltinAsStr
 	default:
 		return tir.BuiltinOther
 	}

@@ -378,6 +378,7 @@ const (
 	BuiltinIsEmpty
 	BuiltinPushStr
 	BuiltinTryUnwrap
+	BuiltinAsStr
 )
 
 // DropGlueKind 定义确定性资源清理胶水分类。

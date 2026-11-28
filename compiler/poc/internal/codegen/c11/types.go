@@ -143,9 +143,12 @@ func MapType(tt *tir.TypeTable, tid tir.TypeID, pos TypePos) (string, error) {
 		}
 		return "const " + elemC + "*", nil
 
+	case tir.TypeString:
+		return "_won_string_t", nil
+
 	case tir.TypeArray, tir.TypeTuple, tir.TypeEnum:
 		if hasUnsupportedNativeFeature(tt, tid, make(map[tir.TypeID]bool, 8)) {
-			return "", fmt.Errorf("聚合类型 '%s' 包含当前 C11 后端尚未支持的元素或负载类型（如 String / &[T] / i128）", tt.Format(tid))
+			return "", fmt.Errorf("聚合类型 '%s' 包含当前 C11 后端尚未支持的元素或负载类型（如 &[T] / i128）", tt.Format(tid))
 		}
 		tl, err := NewTargetLayout(DefaultLinuxX86_64(), tt)
 		if err != nil {
@@ -166,7 +169,7 @@ func MapType(tt *tir.TypeTable, tid tir.TypeID, pos TypePos) (string, error) {
 			return "", fmt.Errorf("外部不透明结构体类型 '%s' 缺少合法命名空间或有效 C 标识符", tt.Format(tid))
 		}
 		if hasUnsupportedNativeFeature(tt, tid, make(map[tir.TypeID]bool, 8)) {
-			return "", fmt.Errorf("结构体类型 '%s' 包含当前 C11 后端尚未支持的成员类型（如 String / &[T] / i128）", tt.Format(tid))
+			return "", fmt.Errorf("结构体类型 '%s' 包含当前 C11 后端尚未支持的成员类型（如 &[T] / i128）", tt.Format(tid))
 		}
 		tl, err := NewTargetLayout(DefaultLinuxX86_64(), tt)
 		if err != nil {
@@ -183,7 +186,7 @@ func MapType(tt *tir.TypeTable, tid tir.TypeID, pos TypePos) (string, error) {
 	}
 }
 
-// hasUnsupportedNativeFeature 递归检查类型是否传递包含当前阶段禁用的拥有型 String、&mut str 或非受控切片。
+// hasUnsupportedNativeFeature 递归检查类型是否传递包含当前阶段禁用的 &mut str 或非受控切片。
 func hasUnsupportedNativeFeature(tt *tir.TypeTable, tid tir.TypeID, seen map[tir.TypeID]bool) bool {
 	if tt == nil || !tt.Valid(tid) || seen[tid] {
 		return false
@@ -192,7 +195,7 @@ func hasUnsupportedNativeFeature(tt *tir.TypeTable, tid tir.TypeID, seen map[tir
 	defer delete(seen, tid)
 	info := tt.Info(tid)
 	switch info.Kind {
-	case tir.TypeString, tir.TypeStr, tir.TypeSlice, tir.TypeTypeParam, tir.TypeNever:
+	case tir.TypeStr, tir.TypeSlice, tir.TypeTypeParam, tir.TypeNever:
 		return true
 	case tir.TypeInt:
 		return !info.IsPtrSized && info.Bits != 8 && info.Bits != 16 && info.Bits != 32 && info.Bits != 64

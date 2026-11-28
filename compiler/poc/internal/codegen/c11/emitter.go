@@ -40,18 +40,23 @@ func (e *Emitter) Emit(prog *tir.Program) (string, error) {
 }
 
 type emitCtx struct {
-	prog           *tir.Program
-	tt             *tir.TypeTable
-	layout         *TargetLayout
-	sb             strings.Builder
-	indent         int
-	litDecls       []litDecl
-	litByContent   map[string]string
-	needEmpty      bool
-	needZSTDummy   bool
-	needBoundsU    bool
-	needBoundsS    bool
-	needWriteBytes bool
+	prog               *tir.Program
+	tt                 *tir.TypeTable
+	layout             *TargetLayout
+	sb                 strings.Builder
+	indent             int
+	litDecls           []litDecl
+	litByContent       map[string]string
+	needEmpty          bool
+	needZSTDummy       bool
+	needBoundsU        bool
+	needBoundsS        bool
+	needWriteBytes     bool
+	needStringRuntime  bool
+	needDropString     bool
+	needStringFrom     bool
+	needStringPushStr  bool
+	needStringPushChar bool
 }
 
 type litDecl struct {
@@ -214,9 +219,179 @@ func (c *emitCtx) emitProgram() error {
 		}
 	}
 
-	// 按需写入静态字节字面量、空串哨兵、ZST 哑元与越界检查辅助函数
+	// 按需写入静态字节字面量、空串哨兵、ZST 哑元、运行时分配器与越界检查辅助函数
+	if bodyBuf.needStringRuntime || bodyBuf.needDropString || bodyBuf.needStringFrom || bodyBuf.needStringPushStr || bodyBuf.needStringPushChar {
+		bodyBuf.needStringRuntime = true
+		bodyBuf.needEmpty = true
+	}
+	if bodyBuf.needStringPushChar {
+		bodyBuf.needStringPushStr = true
+	}
 	if bodyBuf.needEmpty {
 		c.writeLine("static const uint8_t _won_empty_bytes[1] = {0};")
+	}
+	needAlloc := bodyBuf.needStringFrom || bodyBuf.needStringPushStr
+	needFree := bodyBuf.needDropString
+	if bodyBuf.needStringRuntime {
+		c.writeLine("#ifndef _WON_ALLOC_IMPL")
+		c.writeLine("#define _WON_ALLOC_IMPL(bytes) malloc(bytes)")
+		c.writeLine("#endif")
+		c.writeLine("#ifndef _WON_REALLOC_IMPL")
+		c.writeLine("#define _WON_REALLOC_IMPL(ptr, new_cap) realloc((ptr), (new_cap))")
+		c.writeLine("#endif")
+		c.writeLine("#ifndef _WON_FREE_IMPL")
+		c.writeLine("#define _WON_FREE_IMPL(ptr, cap) free(ptr)")
+		c.writeLine("#endif")
+	}
+	if needAlloc {
+		c.writeLine("")
+		c.writeLine("_Noreturn static inline void _won_panic_oom(size_t bytes) {")
+		c.writeLine("    fprintf(stderr, \"WON runtime panic: out of memory allocating %zu bytes\\n\", bytes);")
+		c.writeLine("    abort();")
+		c.writeLine("}")
+		c.writeLine("")
+		c.writeLine("static inline void* _won_alloc(size_t bytes) {")
+		c.writeLine("    if (bytes == 0) {")
+		c.writeLine("        fprintf(stderr, \"WON runtime panic: _won_alloc called with 0 bytes\\n\");")
+		c.writeLine("        abort();")
+		c.writeLine("    }")
+		c.writeLine("    void* p = _WON_ALLOC_IMPL(bytes);")
+		c.writeLine("    if (p == NULL) {")
+		c.writeLine("        _won_panic_oom(bytes);")
+		c.writeLine("    }")
+		c.writeLine("    return p;")
+		c.writeLine("}")
+	}
+	if needFree {
+		c.writeLine("")
+		c.writeLine("static inline void _won_free(void* ptr, size_t cap) {")
+		c.writeLine("    if (cap == 0 || ptr == NULL || ptr == (void*)_won_empty_bytes) {")
+		c.writeLine("        return;")
+		c.writeLine("    }")
+		c.writeLine("    _WON_FREE_IMPL(ptr, cap);")
+		c.writeLine("}")
+	}
+	if bodyBuf.needStringPushStr {
+		c.writeLine("")
+		c.writeLine("static inline size_t _won_calc_growth(size_t old_cap, size_t len, size_t add_len) {")
+		c.writeLine("    if (add_len > SIZE_MAX - len) {")
+		c.writeLine("        fprintf(stderr, \"WON runtime panic: string capacity overflow\\n\");")
+		c.writeLine("        abort();")
+		c.writeLine("    }")
+		c.writeLine("    size_t required = len + add_len;")
+		c.writeLine("    size_t new_cap = 16;")
+		c.writeLine("    if (old_cap > 0) {")
+		c.writeLine("        if (old_cap > SIZE_MAX / 2) {")
+		c.writeLine("            new_cap = SIZE_MAX;")
+		c.writeLine("        } else {")
+		c.writeLine("            new_cap = old_cap * 2;")
+		c.writeLine("        }")
+		c.writeLine("    }")
+		c.writeLine("    if (new_cap < required) {")
+		c.writeLine("        new_cap = required;")
+		c.writeLine("    }")
+		c.writeLine("    if (new_cap < 16) {")
+		c.writeLine("        new_cap = 16;")
+		c.writeLine("    }")
+		c.writeLine("    return new_cap;")
+		c.writeLine("}")
+		c.writeLine("")
+		c.writeLine("static inline void* _won_realloc(void* ptr, size_t old_cap, size_t new_cap) {")
+		c.writeLine("    if (new_cap == 0) {")
+		c.writeLine("        fprintf(stderr, \"WON runtime panic: _won_realloc called with 0 new_cap\\n\");")
+		c.writeLine("        abort();")
+		c.writeLine("    }")
+		c.writeLine("    if (old_cap == 0 || ptr == (void*)_won_empty_bytes) {")
+		c.writeLine("        return _won_alloc(new_cap);")
+		c.writeLine("    }")
+		c.writeLine("    void* new_ptr = _WON_REALLOC_IMPL(ptr, new_cap);")
+		c.writeLine("    if (new_ptr == NULL) {")
+		c.writeLine("        _won_panic_oom(new_cap);")
+		c.writeLine("    }")
+		c.writeLine("    return new_ptr;")
+		c.writeLine("}")
+	}
+	if bodyBuf.needDropString {
+		c.writeLine("")
+		c.writeLine("static inline void _won_drop_string(_won_string_t* s) {")
+		c.writeLine("    if (s == NULL) return;")
+		c.writeLine("    if (s->cap > 0) {")
+		c.writeLine("        _won_free(s->ptr, s->cap);")
+		c.writeLine("    }")
+		c.writeLine("    s->ptr = (uint8_t*)_won_empty_bytes;")
+		c.writeLine("    s->len = 0;")
+		c.writeLine("    s->cap = 0;")
+		c.writeLine("}")
+	}
+	if bodyBuf.needStringFrom {
+		c.writeLine("")
+		c.writeLine("static inline _won_string_t _won_string_from(_won_str_t view) {")
+		c.writeLine("    if (view.len == 0) {")
+		c.writeLine("        return (_won_string_t){")
+		c.writeLine("            .ptr = (uint8_t*)_won_empty_bytes,")
+		c.writeLine("            .len = 0,")
+		c.writeLine("            .cap = 0,")
+		c.writeLine("        };")
+		c.writeLine("    }")
+		c.writeLine("    size_t cap = view.len < 16 ? 16 : view.len;")
+		c.writeLine("    uint8_t* buf = (uint8_t*)_won_alloc(cap);")
+		c.writeLine("    memcpy(buf, view.ptr, view.len);")
+		c.writeLine("    return (_won_string_t){")
+		c.writeLine("        .ptr = buf,")
+		c.writeLine("        .len = view.len,")
+		c.writeLine("        .cap = cap,")
+		c.writeLine("    };")
+		c.writeLine("}")
+	}
+	if bodyBuf.needStringPushStr {
+		c.writeLine("")
+		c.writeLine("static inline void _won_string_push_str(_won_string_t* s, _won_str_t view) {")
+		c.writeLine("    if (s == NULL || view.len == 0) {")
+		c.writeLine("        return;")
+		c.writeLine("    }")
+		c.writeLine("    if (view.len > SIZE_MAX - s->len) {")
+		c.writeLine("        fprintf(stderr, \"WON runtime panic: string capacity overflow\\n\");")
+		c.writeLine("        abort();")
+		c.writeLine("    }")
+		c.writeLine("    size_t required = s->len + view.len;")
+		c.writeLine("    if (required > s->cap) {")
+		c.writeLine("        size_t new_cap = _won_calc_growth(s->cap, s->len, view.len);")
+		c.writeLine("        s->ptr = (uint8_t*)_won_realloc(s->ptr, s->cap, new_cap);")
+		c.writeLine("        s->cap = new_cap;")
+		c.writeLine("    }")
+		c.writeLine("    memcpy(s->ptr + s->len, view.ptr, view.len);")
+		c.writeLine("    s->len = required;")
+		c.writeLine("}")
+	}
+	if bodyBuf.needStringPushChar {
+		c.writeLine("")
+		c.writeLine("static inline void _won_string_push_char(_won_string_t* s, uint32_t cp) {")
+		c.writeLine("    uint8_t buf[4];")
+		c.writeLine("    size_t len = 0;")
+		c.writeLine("    if (cp <= 0x7F) {")
+		c.writeLine("        buf[0] = (uint8_t)cp;")
+		c.writeLine("        len = 1;")
+		c.writeLine("    } else if (cp <= 0x7FF) {")
+		c.writeLine("        buf[0] = (uint8_t)(0xC0 | (cp >> 6));")
+		c.writeLine("        buf[1] = (uint8_t)(0x80 | (cp & 0x3F));")
+		c.writeLine("        len = 2;")
+		c.writeLine("    } else if (cp <= 0xFFFF) {")
+		c.writeLine("        buf[0] = (uint8_t)(0xE0 | (cp >> 12));")
+		c.writeLine("        buf[1] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));")
+		c.writeLine("        buf[2] = (uint8_t)(0x80 | (cp & 0x3F));")
+		c.writeLine("        len = 3;")
+		c.writeLine("    } else if (cp <= 0x10FFFF) {")
+		c.writeLine("        buf[0] = (uint8_t)(0xF0 | (cp >> 18));")
+		c.writeLine("        buf[1] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));")
+		c.writeLine("        buf[2] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));")
+		c.writeLine("        buf[3] = (uint8_t)(0x80 | (cp & 0x3F));")
+		c.writeLine("        len = 4;")
+		c.writeLine("    } else {")
+		c.writeLine("        buf[0] = 0xEF; buf[1] = 0xBF; buf[2] = 0xBD;")
+		c.writeLine("        len = 3;")
+		c.writeLine("    }")
+		c.writeLine("    _won_string_push_str(s, (_won_str_t){ .ptr = buf, .len = len });")
+		c.writeLine("}")
 	}
 	if bodyBuf.needZSTDummy {
 		c.writeLine("static _won_zst_t _won_zst_dummy = {0};")
@@ -245,7 +420,7 @@ func (c *emitCtx) emitProgram() error {
 		c.writeLine("    _WON_WRITE_BYTES_IMPL(ptr, len);")
 		c.writeLine("}")
 	}
-	if bodyBuf.needEmpty || len(bodyBuf.litDecls) > 0 || bodyBuf.needZSTDummy || bodyBuf.needBoundsU || bodyBuf.needBoundsS || bodyBuf.needWriteBytes {
+	if bodyBuf.needEmpty || len(bodyBuf.litDecls) > 0 || bodyBuf.needZSTDummy || bodyBuf.needBoundsU || bodyBuf.needBoundsS || bodyBuf.needWriteBytes || bodyBuf.needStringRuntime {
 		c.writeLine("")
 	}
 
@@ -406,8 +581,63 @@ func (c *emitCtx) emitAggregateTypedefs() {
 	}
 }
 
+func collectUsedDropGlues(prog *tir.Program) map[tir.DropGlueID]bool {
+	used := make(map[tir.DropGlueID]bool)
+	glueByID := make(map[tir.DropGlueID]tir.DropGlueDesc, len(prog.DropGlues))
+	for _, g := range prog.DropGlues {
+		glueByID[g.ID] = g
+	}
+
+	var mark func(id tir.DropGlueID)
+	mark = func(id tir.DropGlueID) {
+		if id == tir.InvalidDropGlue || used[id] {
+			return
+		}
+		used[id] = true
+		g, ok := glueByID[id]
+		if !ok {
+			return
+		}
+		for _, f := range g.Fields {
+			mark(f.GlueID)
+		}
+		for _, e := range g.TupleElems {
+			mark(e.GlueID)
+		}
+		if g.ElemGlueID != tir.InvalidDropGlue {
+			mark(g.ElemGlueID)
+		}
+		for _, v := range g.Variants {
+			for _, f := range v.StructFields {
+				mark(f.GlueID)
+			}
+			for _, e := range v.TupleElems {
+				mark(e.GlueID)
+			}
+		}
+	}
+
+	for _, fn := range prog.Functions {
+		if fn == nil {
+			continue
+		}
+		for _, bb := range fn.Blocks {
+			for _, inst := range bb.Instructions {
+				if (inst.Kind == tir.OpDrop || inst.Kind == tir.OpCondDrop) && inst.GlueID != tir.InvalidDropGlue {
+					mark(inst.GlueID)
+				}
+			}
+		}
+	}
+	return used
+}
+
 func (c *emitCtx) emitDropGlues() error {
 	if len(c.prog.DropGlues) == 0 {
+		return nil
+	}
+	usedGlues := collectUsedDropGlues(c.prog)
+	if len(usedGlues) == 0 {
 		return nil
 	}
 	glueMap := make(map[tir.DropGlueID]tir.DropGlueDesc, len(c.prog.DropGlues))
@@ -415,6 +645,9 @@ func (c *emitCtx) emitDropGlues() error {
 		glueMap[g.ID] = g
 	}
 	for _, g := range c.prog.DropGlues {
+		if !usedGlues[g.ID] {
+			continue
+		}
 		cTyp, err := c.typeCName(g.Type, PosLocal)
 		if err != nil {
 			return err
@@ -424,6 +657,9 @@ func (c *emitCtx) emitDropGlues() error {
 	c.writeLine("")
 
 	for _, g := range c.prog.DropGlues {
+		if !usedGlues[g.ID] {
+			continue
+		}
 		cTyp, err := c.typeCName(g.Type, PosLocal)
 		if err != nil {
 			return err
@@ -436,6 +672,12 @@ func (c *emitCtx) emitDropGlues() error {
 		c.indent++
 		c.writeLine("if (v == NULL) return;")
 		switch g.Kind {
+		case tir.GlueString:
+			c.needDropString = true
+			c.needStringRuntime = true
+			c.needEmpty = true
+			c.writeLine("_won_drop_string(v);")
+
 		case tir.GlueForeignResource:
 			_, releaseC, okSym := splitForeignSymbol(g.ReleaseSymbol)
 			if !okSym {
@@ -1504,6 +1746,59 @@ func (fs *fnEmitState) emitAggregateConstruct(inst tir.Instruction) error {
 			c.writeLine(fmt.Sprintf("%s.payload.%s.%s = %s;", destVar, vl.CFieldName, vl.Fields[fIdx].CName, valExpr))
 		}
 		return nil
+
+	case tir.AggInterpString:
+		c.needStringRuntime = true
+		c.needStringPushStr = true
+		c.needEmpty = true
+		c.writeLine(fmt.Sprintf("%s = (_won_string_t){ .ptr = (uint8_t*)_won_empty_bytes, .len = 0, .cap = 0 };", destVar))
+		for _, it := range inst.AggItems {
+			valExpr, err := fs.operandCExpr(it.Value)
+			if err != nil {
+				return err
+			}
+			ti := c.tt.Info(it.Value.Type)
+			if it.Value.Kind == tir.OperandConst && it.Value.Const.Kind == tir.ConstString {
+				litSym := c.registerStringLit(it.Value.Const.StrVal)
+				c.writeLine(fmt.Sprintf("_won_string_push_str(&(%s), (_won_str_t){ .ptr = %s, .len = ((size_t)UINT64_C(%d)) });", destVar, litSym, len(it.Value.Const.StrVal)))
+			} else if (ti.Kind == tir.TypeRef && c.tt.Info(ti.Elem).Kind == tir.TypeStr) || ti.Kind == tir.TypeStr {
+				c.writeLine(fmt.Sprintf("_won_string_push_str(&(%s), %s);", destVar, valExpr))
+			} else if ti.Kind == tir.TypeString {
+				c.writeLine(fmt.Sprintf("_won_string_push_str(&(%s), (_won_str_t){ .ptr = ((%s).ptr), .len = ((%s).len) });", destVar, valExpr, valExpr))
+			} else if ti.Kind == tir.TypeChar {
+				c.needStringPushChar = true
+				c.writeLine(fmt.Sprintf("_won_string_push_char(&(%s), (uint32_t)(%s));", destVar, valExpr))
+			} else if ti.Kind == tir.TypeBool {
+				c.writeLine(fmt.Sprintf("_won_string_push_str(&(%s), (%s) ? (_won_str_t){ .ptr = (const uint8_t*)\"true\", .len = 4 } : (_won_str_t){ .ptr = (const uint8_t*)\"false\", .len = 5 });", destVar, valExpr))
+			} else if ti.Kind == tir.TypeInt {
+				c.writeLine("{")
+				c.indent++
+				c.writeLine("char _tmp_buf[32];")
+				if ti.Signed {
+					c.writeLine(fmt.Sprintf("int _w = snprintf(_tmp_buf, sizeof(_tmp_buf), \"%%lld\", (long long)(%s));", valExpr))
+				} else {
+					c.writeLine(fmt.Sprintf("int _w = snprintf(_tmp_buf, sizeof(_tmp_buf), \"%%llu\", (unsigned long long)(%s));", valExpr))
+				}
+				c.writeLine("if (_w > 0) {")
+				c.writeLine(fmt.Sprintf("    _won_string_push_str(&(%s), (_won_str_t){ .ptr = (const uint8_t*)_tmp_buf, .len = (size_t)_w });", destVar))
+				c.writeLine("}")
+				c.indent--
+				c.writeLine("}")
+			} else if ti.Kind == tir.TypeFloat {
+				c.writeLine("{")
+				c.indent++
+				c.writeLine("char _tmp_buf[64];")
+				c.writeLine(fmt.Sprintf("int _w = snprintf(_tmp_buf, sizeof(_tmp_buf), \"%%g\", (double)(%s));", valExpr))
+				c.writeLine("if (_w > 0) {")
+				c.writeLine(fmt.Sprintf("    _won_string_push_str(&(%s), (_won_str_t){ .ptr = (const uint8_t*)_tmp_buf, .len = (size_t)_w });", destVar))
+				c.writeLine("}")
+				c.indent--
+				c.writeLine("}")
+			} else {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("插值字符串不支持类型 '%s'", c.tt.Format(it.Value.Type)), inst.Span, "")
+			}
+		}
+		return nil
 	}
 	return newCapErr("WON-GEN-002", fmt.Sprintf("不支持的聚合构造 %s", inst.AggKind), inst.Span, "")
 }
@@ -1869,6 +2164,47 @@ func (fs *fnEmitState) emitBuiltinCall(inst tir.Instruction) error {
 			return newCapErr("WON-GEN-002", fmt.Sprintf("内置 bytes_equal 期望 3 个实参，实际收到 %d 个", len(args)), inst.Span, "")
 		}
 		expr = fmt.Sprintf("won_bytes_equal(%s, %s, %s)", args[0], args[1], args[2])
+	case tir.BuiltinStringFrom:
+		if len(args) != 1 {
+			return newCapErr("WON-GEN-002", fmt.Sprintf("内置 String::from 期望 1 个实参，实际收到 %d 个", len(args)), inst.Span, "")
+		}
+		c.needStringFrom = true
+		c.needStringRuntime = true
+		c.needEmpty = true
+		expr = fmt.Sprintf("_won_string_from(%s)", args[0])
+	case tir.BuiltinPushStr:
+		if len(args) != 2 {
+			return newCapErr("WON-GEN-002", fmt.Sprintf("内置 push_str 期望 2 个实参，实际收到 %d 个", len(args)), inst.Span, "")
+		}
+		c.needStringPushStr = true
+		c.needStringRuntime = true
+		c.needEmpty = true
+		recTi := c.tt.Info(inst.Args[0].Type)
+		if recTi.Kind == tir.TypeRef && c.tt.Info(recTi.Elem).Kind == tir.TypeString {
+			expr = fmt.Sprintf("_won_string_push_str(%s, %s)", args[0], args[1])
+		} else {
+			expr = fmt.Sprintf("_won_string_push_str(&(%s), %s)", args[0], args[1])
+		}
+	case tir.BuiltinCapacity:
+		if len(args) != 1 {
+			return newCapErr("WON-GEN-002", fmt.Sprintf("内置 capacity 期望 1 个实参，实际收到 %d 个", len(args)), inst.Span, "")
+		}
+		recTi := c.tt.Info(inst.Args[0].Type)
+		if recTi.Kind == tir.TypeRef && c.tt.Info(recTi.Elem).Kind == tir.TypeString {
+			expr = fmt.Sprintf("((size_t)((%s)->cap))", args[0])
+		} else {
+			expr = fmt.Sprintf("((size_t)((%s).cap))", args[0])
+		}
+	case tir.BuiltinAsStr:
+		if len(args) != 1 {
+			return newCapErr("WON-GEN-002", fmt.Sprintf("内置 as_str 期望 1 个实参，实际收到 %d 个", len(args)), inst.Span, "")
+		}
+		recTi := c.tt.Info(inst.Args[0].Type)
+		if recTi.Kind == tir.TypeRef && c.tt.Info(recTi.Elem).Kind == tir.TypeString {
+			expr = fmt.Sprintf("((_won_str_t){ .ptr = ((%s)->ptr), .len = ((%s)->len) })", args[0], args[0])
+		} else {
+			expr = fmt.Sprintf("((_won_str_t){ .ptr = ((%s).ptr), .len = ((%s).len) })", args[0], args[0])
+		}
 	case tir.BuiltinAsBytes:
 		argTi := c.tt.Info(inst.Args[0].Type)
 		if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeStr {
@@ -1880,6 +2216,10 @@ func (fs *fnEmitState) emitBuiltinCall(inst tir.Instruction) error {
 		argTi := c.tt.Info(inst.Args[0].Type)
 		if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeStr {
 			expr = fmt.Sprintf("((%s).ptr)", args[0])
+		} else if argTi.Kind == tir.TypeString {
+			expr = fmt.Sprintf("((const uint8_t*)((%s).ptr))", args[0])
+		} else if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeString {
+			expr = fmt.Sprintf("((const uint8_t*)((%s)->ptr))", args[0])
 		} else if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeArray {
 			arrLay, err := c.layoutOf(argTi.Elem)
 			if err != nil {
@@ -1900,24 +2240,36 @@ func (fs *fnEmitState) emitBuiltinCall(inst tir.Instruction) error {
 		}
 	case tir.BuiltinAsMutPtr:
 		argTi := c.tt.Info(inst.Args[0].Type)
-		arrLay, err := c.layoutOf(argTi.Elem)
-		if err != nil {
-			return err
-		}
-		elemC, err := c.typeCName(arrLay.ElemType, PosValue)
-		if err != nil {
-			return err
-		}
-		if arrLay.IsZST || arrLay.ArrayLen == 0 {
-			c.needZSTDummy = true
-			expr = fmt.Sprintf("(((void)(%s), ((%s*)(&_won_zst_dummy))))", args[0], elemC)
+		if argTi.Kind == tir.TypeString {
+			expr = fmt.Sprintf("((uint8_t*)((%s).ptr))", args[0])
+		} else if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeString {
+			expr = fmt.Sprintf("((uint8_t*)((%s)->ptr))", args[0])
+		} else if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeArray {
+			arrLay, err := c.layoutOf(argTi.Elem)
+			if err != nil {
+				return err
+			}
+			elemC, err := c.typeCName(arrLay.ElemType, PosValue)
+			if err != nil {
+				return err
+			}
+			if arrLay.IsZST || arrLay.ArrayLen == 0 {
+				c.needZSTDummy = true
+				expr = fmt.Sprintf("(((void)(%s), ((%s*)(&_won_zst_dummy))))", args[0], elemC)
+			} else {
+				expr = fmt.Sprintf("((%s*)((%s)->elems))", elemC, args[0])
+			}
 		} else {
-			expr = fmt.Sprintf("((%s*)((%s)->elems))", elemC, args[0])
+			expr = fmt.Sprintf("((uint8_t*)(%s))", args[0])
 		}
 	case tir.BuiltinLen:
 		argTi := c.tt.Info(inst.Args[0].Type)
 		if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeStr {
 			expr = fmt.Sprintf("((%s).len)", args[0])
+		} else if argTi.Kind == tir.TypeString {
+			expr = fmt.Sprintf("((%s).len)", args[0])
+		} else if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeString {
+			expr = fmt.Sprintf("((%s)->len)", args[0])
 		} else {
 			arrLen := c.tt.Info(argTi.Elem).ArrayLen
 			expr = fmt.Sprintf("(((void)(%s), ((size_t)UINT64_C(%d))))", args[0], arrLen)
@@ -1926,6 +2278,10 @@ func (fs *fnEmitState) emitBuiltinCall(inst tir.Instruction) error {
 		argTi := c.tt.Info(inst.Args[0].Type)
 		if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeStr {
 			expr = fmt.Sprintf("(((%s).len) == 0)", args[0])
+		} else if argTi.Kind == tir.TypeString {
+			expr = fmt.Sprintf("(((%s).len) == 0)", args[0])
+		} else if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeString {
+			expr = fmt.Sprintf("(((%s)->len) == 0)", args[0])
 		} else {
 			arrLen := c.tt.Info(argTi.Elem).ArrayLen
 			isZero := "false"
@@ -2043,7 +2399,7 @@ func (fs *fnEmitState) emitPrintlnStmt(argOps []tir.Operand, args []string) erro
 		}
 
 		ti := c.tt.Info(argOp.Type)
-		if (ti.Kind == tir.TypeRef && c.tt.Info(ti.Elem).Kind == tir.TypeStr) || ti.Kind == tir.TypeStr || ti.Kind == tir.TypeString {
+		if (ti.Kind == tir.TypeRef && c.tt.Info(ti.Elem).Kind == tir.TypeStr) || ti.Kind == tir.TypeStr || ti.Kind == tir.TypeString || (ti.Kind == tir.TypeRef && c.tt.Info(ti.Elem).Kind == tir.TypeString) {
 			// 遇到字符串视图：先刷出此前累积的 printf 片段（不换行），随后使用定长 fwrite 发射字节流
 			flushPrintf(false)
 
@@ -2052,6 +2408,9 @@ func (fs *fnEmitState) emitPrintlnStmt(argOps []tir.Operand, args []string) erro
 				litSym := c.registerStringLit(argOp.Const.StrVal)
 				ptrExpr = litSym
 				lenExpr = fmt.Sprintf("((size_t)UINT64_C(%d))", len(argOp.Const.StrVal))
+			} else if ti.Kind == tir.TypeRef && c.tt.Info(ti.Elem).Kind == tir.TypeString {
+				ptrExpr = fmt.Sprintf("((%s)->ptr)", args[i])
+				lenExpr = fmt.Sprintf("((%s)->len)", args[i])
 			} else {
 				ptrExpr = fmt.Sprintf("((%s).ptr)", args[i])
 				lenExpr = fmt.Sprintf("((%s).len)", args[i])

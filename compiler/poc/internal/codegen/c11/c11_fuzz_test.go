@@ -55,3 +55,56 @@ func FuzzC11Emitter(f *testing.F) {
 		}
 	})
 }
+
+// FuzzStringLifecycleAndReallocation 模糊测试随机字符串构造、追加扩容与生命周期释放的鲁棒性。
+func FuzzStringLifecycleAndReallocation(f *testing.F) {
+	f.Add("hello", "world")
+	f.Add("", "")
+	f.Add("multibyte_世界", "long_chunk_forcing_reallocation_exceeding_initial_capacity")
+	f.Add("a\x00b", "c\x00d")
+
+	em := c11.NewEmitter(c11.DefaultLinuxX86_64())
+	f.Fuzz(func(t *testing.T, s1, s2 string) {
+		// 过滤导致语法解析歧义的极端控制字符
+		if strings.ContainsAny(s1, "\r\n\"\\") || strings.ContainsAny(s2, "\r\n\"\\") {
+			return
+		}
+		src := "fn main() -> i32:\n" +
+			"    var s = String::from(\"" + s1 + "\")\n" +
+			"    s.push_str(\"" + s2 + "\")\n" +
+			"    let l = s.len()\n" +
+			"    let cap = s.capacity()\n" +
+			"    if cap < l:\n" +
+			"        return 1\n" +
+			"    println(s)\n" +
+			"    return 0\n"
+
+		rep := diagnostic.NewReport()
+		lex := lexer.New("fuzz_string.won", src, rep)
+		p := parser.New(lex, rep, "fuzz_string.won")
+		prog := p.ParseProgram()
+		if rep.HasErrors() || prog == nil {
+			return
+		}
+		chk := checker.New(rep, nil)
+		tp := chk.CheckProgram(prog)
+		if rep.HasErrors() || tp == nil || !tp.OwnershipChecked || !tp.DropElaborated {
+			return
+		}
+		tirProg, err := lower.LowerProgram(tp, nil)
+		if err != nil {
+			return
+		}
+		cCode, emitErr := em.Emit(tirProg)
+		if emitErr != nil {
+			var capErr *c11.CapabilityError
+			if !errors.As(emitErr, &capErr) || capErr.Code != "WON-GEN-002" {
+				t.Fatalf("未结构化拒止: %v", emitErr)
+			}
+			return
+		}
+		if strings.Contains(cCode, "<invalid>") {
+			t.Fatalf("生成源码包含无效类型标记:\n%s", cCode)
+		}
+	})
+}

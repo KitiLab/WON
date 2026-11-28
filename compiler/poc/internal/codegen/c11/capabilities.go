@@ -399,6 +399,13 @@ func validateInstructionCaps(
 				return newCapErr("WON-GEN-002", fmt.Sprintf("定长数组重复构造长度 %d 非法", inst.RepeatLen), inst.Span, "")
 			}
 			return checkNonReturnType(inst.Type, "定长数组重复构造")
+		case tir.AggInterpString:
+			for _, it := range inst.AggItems {
+				if err := checkNonReturnType(it.Value.Type, "插值字符串分量"); err != nil {
+					return err
+				}
+			}
+			return checkNonReturnType(inst.Type, "插值字符串构造")
 		default:
 			return newCapErr("WON-GEN-002", fmt.Sprintf("聚合值构造 (%s) 尚未在当前 C11 后端实现", inst.AggKind), inst.Span, "")
 		}
@@ -444,6 +451,46 @@ func validateInstructionCaps(
 		switch inst.BuiltinKind {
 		case tir.BuiltinPrintln, tir.BuiltinBytesEqual:
 			return nil
+		case tir.BuiltinStringFrom:
+			if len(inst.Args) != 1 {
+				return newCapErr("WON-GEN-002", "内置 String::from 期望 1 个实参", inst.Span, "")
+			}
+			argTi := tt.Info(inst.Args[0].Type)
+			if (argTi.Kind == tir.TypeRef && tt.Info(argTi.Elem).Kind == tir.TypeStr) || argTi.Kind == tir.TypeStr {
+				return checkNonReturnType(inst.Type, "String::from 结果")
+			}
+			return newCapErr("WON-GEN-002", fmt.Sprintf("内置 String::from 仅支持 &str 参数，实际为 '%s'", tt.Format(inst.Args[0].Type)), inst.Span, "")
+		case tir.BuiltinPushStr:
+			if len(inst.Args) != 2 {
+				return newCapErr("WON-GEN-002", "内置 push_str 期望 2 个实参", inst.Span, "")
+			}
+			recTi := tt.Info(inst.Args[0].Type)
+			if recTi.Kind != tir.TypeString && (recTi.Kind != tir.TypeRef || tt.Info(recTi.Elem).Kind != tir.TypeString) {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("内置 push_str 仅支持在 String / &mut String 接收者上调用，实际为 '%s'", tt.Format(inst.Args[0].Type)), inst.Span, "")
+			}
+			argTi := tt.Info(inst.Args[1].Type)
+			if (argTi.Kind != tir.TypeRef || tt.Info(argTi.Elem).Kind != tir.TypeStr) && argTi.Kind != tir.TypeStr {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("内置 push_str 待追加实参必须为 &str，实际为 '%s'", tt.Format(inst.Args[1].Type)), inst.Span, "")
+			}
+			return nil
+		case tir.BuiltinCapacity:
+			if len(inst.Args) != 1 {
+				return newCapErr("WON-GEN-002", "内置 .capacity() 期望 1 个实参", inst.Span, "")
+			}
+			argTi := tt.Info(inst.Args[0].Type)
+			if argTi.Kind == tir.TypeString || (argTi.Kind == tir.TypeRef && tt.Info(argTi.Elem).Kind == tir.TypeString) {
+				return nil
+			}
+			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端仅支持在 String 上调用 .capacity()，不支持 '%s'", tt.Format(inst.Args[0].Type)), inst.Span, "")
+		case tir.BuiltinAsStr:
+			if len(inst.Args) != 1 {
+				return newCapErr("WON-GEN-002", "内置 .as_str() 期望 1 个实参", inst.Span, "")
+			}
+			argTi := tt.Info(inst.Args[0].Type)
+			if argTi.Kind == tir.TypeString || (argTi.Kind == tir.TypeRef && tt.Info(argTi.Elem).Kind == tir.TypeString) {
+				return nil
+			}
+			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端仅支持在 String 上调用 .as_str()，不支持 '%s'", tt.Format(inst.Args[0].Type)), inst.Span, "")
 		case tir.BuiltinTryUnwrap:
 			if len(inst.Args) != 1 || tt.Info(inst.Args[0].Type).Kind != tir.TypeEnum {
 				return newCapErr("WON-GEN-002", "内置 '?' 解包操作符要求枚举 Result/Option 源操作数", inst.Span, "")
@@ -466,7 +513,8 @@ func validateInstructionCaps(
 				return newCapErr("WON-GEN-002", "内置 .as_ptr() 参数数量非法", inst.Span, "")
 			}
 			argTi := tt.Info(inst.Args[0].Type)
-			if argTi.Kind == tir.TypeRef && (tt.Info(argTi.Elem).Kind == tir.TypeStr || isSupportedArrayType(tt, argTi.Elem) || isU8SliceRef(tt, inst.Args[0].Type)) {
+			if (argTi.Kind == tir.TypeRef && (tt.Info(argTi.Elem).Kind == tir.TypeStr || isSupportedArrayType(tt, argTi.Elem) || isU8SliceRef(tt, inst.Args[0].Type))) ||
+				argTi.Kind == tir.TypeString || (argTi.Kind == tir.TypeRef && tt.Info(argTi.Elem).Kind == tir.TypeString) {
 				return nil
 			}
 			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端暂不支持在 '%s' 上调用 .as_ptr()", tt.Format(inst.Args[0].Type)), inst.Span, "")
@@ -475,19 +523,21 @@ func validateInstructionCaps(
 				return newCapErr("WON-GEN-002", "内置 .as_mut_ptr() 参数数量非法", inst.Span, "")
 			}
 			argTi := tt.Info(inst.Args[0].Type)
-			if argTi.Kind == tir.TypeRef && argTi.IsMut && isSupportedArrayType(tt, argTi.Elem) {
+			if (argTi.Kind == tir.TypeRef && argTi.IsMut && isSupportedArrayType(tt, argTi.Elem)) ||
+				argTi.Kind == tir.TypeString || (argTi.Kind == tir.TypeRef && argTi.IsMut && tt.Info(argTi.Elem).Kind == tir.TypeString) {
 				return nil
 			}
-			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端仅支持在可变局部定长数组上调用 .as_mut_ptr()，不支持 '%s'", tt.Format(inst.Args[0].Type)), inst.Span, "")
+			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端仅支持在可变定长数组或可变 String 上调用 .as_mut_ptr()，不支持 '%s'", tt.Format(inst.Args[0].Type)), inst.Span, "")
 		case tir.BuiltinLen, tir.BuiltinIsEmpty:
 			if len(inst.Args) != 1 {
 				return newCapErr("WON-GEN-002", fmt.Sprintf("内置 .%s() 参数数量非法", inst.CalleeName), inst.Span, "")
 			}
 			argTi := tt.Info(inst.Args[0].Type)
-			if argTi.Kind == tir.TypeRef && ((tt.Info(argTi.Elem).Kind == tir.TypeStr && !argTi.IsMut) || isSupportedArrayType(tt, argTi.Elem)) {
+			if (argTi.Kind == tir.TypeRef && ((tt.Info(argTi.Elem).Kind == tir.TypeStr && !argTi.IsMut) || isSupportedArrayType(tt, argTi.Elem))) ||
+				argTi.Kind == tir.TypeString || (argTi.Kind == tir.TypeRef && tt.Info(argTi.Elem).Kind == tir.TypeString) {
 				return nil
 			}
-			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端仅支持 '&str' 与定长数组 '[T; N]' 的 .%s()，不支持 '%s'", inst.CalleeName, tt.Format(inst.Args[0].Type)), inst.Span, "")
+			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端仅支持 '&str'、'String' 与定长数组 '[T; N]' 的 .%s()，不支持 '%s'", inst.CalleeName, tt.Format(inst.Args[0].Type)), inst.Span, "")
 		default:
 			return newCapErr("WON-GEN-002", fmt.Sprintf("内置函数或方法 '%s' 尚未在当前 C11 后端实现", inst.CalleeName), inst.Span, "")
 		}
@@ -629,8 +679,10 @@ func validateSupportedDropGlue(tt *tir.TypeTable, g tir.DropGlueDesc, glueMap ma
 			}
 		}
 		return nil
+	case tir.GlueString:
+		return nil
 	default:
-		return newCapErr("WON-GEN-002", fmt.Sprintf("析构胶水 '%s' (%s, 类型 %s) 尚未在当前 C11 后端实现原生析构支持", g.CanonicalName, g.Kind, tt.Format(g.Type)), tir.SourceSpan{}, "String 堆释放 (_won_free) 与自定义 impl Drop 析构留待后续阶段启用。")
+		return newCapErr("WON-GEN-002", fmt.Sprintf("析构胶水 '%s' (%s, 类型 %s) 尚未在当前 C11 后端实现原生析构支持", g.CanonicalName, g.Kind, tt.Format(g.Type)), tir.SourceSpan{}, "自定义 impl Drop 析构留待后续阶段启用。")
 	}
 }
 

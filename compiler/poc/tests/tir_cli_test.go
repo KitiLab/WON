@@ -90,11 +90,32 @@ fn main() -> i32:
 	buildAdtCmd := exec.Command(woncBin, "build", adtSrc)
 	buildAdtCmd.Dir = tmpDir
 	buildOut, err := buildAdtCmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(buildOut), "WON-GEN-002") {
-		t.Fatalf("非 C11 子集程序 wonc build 必须维持 WON-GEN-002 阻断，实际 err=%v:\n%s", err, string(buildOut))
+	if err != nil {
+		t.Fatalf("Phase 2C.2.2 原生构建包含 String/Struct 的程序失败: %v\n%s", err, string(buildOut))
 	}
-	if _, statErr := os.Stat(filepath.Join(tmpDir, "adt_drop.won.c")); statErr == nil {
-		t.Fatalf("WON-GEN-002 阻断后不得在磁盘生成 adt_drop.won.c")
+	adtBin := filepath.Join(tmpDir, "adt_drop")
+	adtRunOut, runErr := exec.Command(adtBin).CombinedOutput()
+	if runErr != nil && runErr.Error() != "exit status 1" {
+		t.Fatalf("adt_drop 运行失败: %v\n%s", runErr, string(adtRunOut))
+	}
+	if !strings.Contains(string(adtRunOut), "ok") {
+		t.Fatalf("adt_drop 运行输出缺少 'ok':\n%s", string(adtRunOut))
+	}
+
+	// 验证真正未实现的语言特性（如 i128）在 wonc build 下严格保持 WON-GEN-002 阻断
+	unsuppSrc := filepath.Join(tmpDir, "unsupp.won")
+	unsuppContent := "fn bad() -> i128:\n    return 0\nfn main() -> i32:\n    return 0\n"
+	if err := os.WriteFile(unsuppSrc, []byte(unsuppContent), 0644); err != nil {
+		t.Fatalf("写入未支持特性临时源码失败: %v", err)
+	}
+	buildUnsuppCmd := exec.Command(woncBin, "build", unsuppSrc)
+	buildUnsuppCmd.Dir = tmpDir
+	unsuppOut, err := buildUnsuppCmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(unsuppOut), "WON-GEN-002") {
+		t.Fatalf("未支持特性 wonc build 必须维持 WON-GEN-002 阻断，实际 err=%v:\n%s", err, string(unsuppOut))
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "unsupp.won.c")); statErr == nil {
+		t.Fatalf("WON-GEN-002 阻断后不得在磁盘生成 unsupp.won.c")
 	}
 
 	// 3. Phase 2C.1: 验证 wonc build --emit-c 实际经由 TIR->C11 路径产出可执行文件及 C 文件

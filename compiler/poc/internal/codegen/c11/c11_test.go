@@ -105,6 +105,12 @@ func TestC11MapTypeFailClosedAndTargetGate(t *testing.T) {
 			t.Fatalf("MapType([u8; 16], %d) = (%q, %v), want _won_arr_*", pos, arrC, err)
 		}
 	}
+	for _, pos := range []c11.TypePos{c11.PosLocal, c11.PosParam, c11.PosReturn} {
+		strC, err := c11.MapType(tt, tString, pos)
+		if err != nil || strC != "_won_string_t" {
+			t.Fatalf("MapType(String, %d) = (%q, %v), want _won_string_t", pos, strC, err)
+		}
+	}
 
 	invalid := []struct {
 		id  tir.TypeID
@@ -114,7 +120,6 @@ func TestC11MapTypeFailClosedAndTargetGate(t *testing.T) {
 		{tUnit, c11.PosLocal},
 		{tUnit, c11.PosParam},
 		{tI128, c11.PosLocal},
-		{tString, c11.PosLocal},
 	}
 	for _, tc := range invalid {
 		if got, err := c11.MapType(tt, tc.id, tc.pos); err == nil {
@@ -147,9 +152,6 @@ func TestC11CapabilitiesRejectUnsupportedWithWONGEN002(t *testing.T) {
 		{"MainTakesParam", "fn main(x: i32) -> i32:\n    return x\n"},
 		{"FloatModulo", "fn main() -> i32:\n    let x: f64 = 5.0 % 2.0\n    return 0\n"},
 		{"StrEquality", "fn main() -> i32:\n    let eq = \"a\" == \"b\"\n    return 0\n"},
-		{"StringLocal", "fn main() -> i32:\n    let s = String::from(\"x\")\n    return 0\n"},
-		{"StructWithString", "struct S:\n    s: String\nfn main() -> i32:\n    let x = S { s: String::from(\"a\") }\n    return 0\n"},
-		{"EnumWithString", "enum E:\n    A(String)\n    B\nfn main() -> i32:\n    let x = E::A(String::from(\"a\"))\n    return 0\n"},
 		{"ForLoop", "fn main() -> i32:\n    for i in 0..3:\n        return 0\n    return 0\n"},
 		{"UnitLiteralReturn", "fn main() -> unit:\n    return ()\n"},
 		{"CastOp", "fn main() -> i32:\n    let x: i64 = 1\n    return x as i32\n"},

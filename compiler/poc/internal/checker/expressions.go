@@ -1897,7 +1897,7 @@ func (c *Checker) resolveBuiltinMethodSig(recType, baseID types.TypeID, baseInfo
 		}
 	case "capacity":
 		if baseID == c.types.StringT {
-			return builtinMethodSig{retType: c.types.USize, unsupportedCodegen: true}, true
+			return builtinMethodSig{retType: c.types.USize}, true
 		}
 	case "is_empty":
 		if isStringOrView || isBuffer {
@@ -1906,11 +1906,14 @@ func (c *Checker) resolveBuiltinMethodSig(recType, baseID types.TypeID, baseInfo
 	case "push_str":
 		if baseID == c.types.StringT {
 			return builtinMethodSig{
-				paramTypes:         []types.TypeID{c.types.StrView},
-				retType:            c.types.Unit,
-				requiresMut:        true,
-				unsupportedCodegen: true,
+				paramTypes:  []types.TypeID{c.types.StrView},
+				retType:     c.types.Unit,
+				requiresMut: true,
 			}, true
+		}
+	case "as_str":
+		if baseID == c.types.StringT {
+			return builtinMethodSig{retType: c.types.StrView}, true
 		}
 	}
 	return builtinMethodSig{}, false

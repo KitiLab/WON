@@ -340,6 +340,97 @@ func (b *funcBuilder) hasRefRec(tid types.TypeID, visited map[types.TypeID]bool)
 	}
 }
 
+// isDropWorthyType 判断类型自身是否属于需要 Drop 清理的拥有型资源（String、外部受管资源句柄或递归包含它们的复合聚合）。
+func (b *funcBuilder) isDropWorthyType(tid types.TypeID) bool {
+	if tid == types.Invalid || b.view == nil || b.view.GetTypes() == nil {
+		return false
+	}
+	visited := make(map[types.TypeID]bool, 8)
+	return b.hasDropResourceRec(tid, visited)
+}
+
+func (b *funcBuilder) hasDropResourceRec(tid types.TypeID, visited map[types.TypeID]bool) bool {
+	if tid == types.Invalid || visited[tid] {
+		return false
+	}
+	visited[tid] = true
+	tctx := b.view.GetTypes()
+	symTab := b.view.GetSymbols()
+	if tid == tctx.StringT {
+		return true
+	}
+	info := tctx.Info(tid)
+	if info.Kind == types.KindString {
+		return true
+	}
+	if info.Kind == types.KindRef || info.Kind == types.KindRawPtr || info.Kind == types.KindFn ||
+		info.Kind == types.KindBool || info.Kind == types.KindChar || info.Kind == types.KindUnit || info.Kind == types.KindNever ||
+		info.Kind == types.KindStr || info.Kind == types.KindSlice || tctx.IsInteger(tid) || tctx.IsFloat(tid) {
+		return false
+	}
+	if tctx.IsCopy(tid) {
+		return false
+	}
+	switch info.Kind {
+	case types.KindArray:
+		return b.hasDropResourceRec(info.Elem, visited)
+	case types.KindTuple:
+		for _, el := range info.Elems {
+			if b.hasDropResourceRec(el, visited) {
+				return true
+			}
+		}
+		return false
+	case types.KindStruct:
+		if symTab != nil {
+			if sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]; sym != nil {
+				if len(sym.Fields) == 0 {
+					return !tctx.IsCopy(tid)
+				}
+				for _, f := range sym.Fields {
+					ft := f.Type
+					if len(sym.GenericParamIDs) > 0 && len(sym.GenericParamIDs) == len(info.GenericArgs) {
+						subst := make(map[uint64]types.TypeID, len(info.GenericArgs))
+						for i, gid := range sym.GenericParamIDs {
+							subst[uint64(gid)] = info.GenericArgs[i]
+						}
+						ft = tctx.Substitute(ft, subst)
+					}
+					if b.hasDropResourceRec(ft, visited) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	case types.KindEnum:
+		for _, ga := range info.GenericArgs {
+			if b.hasDropResourceRec(ga, visited) {
+				return true
+			}
+		}
+		if symTab != nil {
+			if sym := symTab.ByID[symbols.SymbolID(info.SymbolID)]; sym != nil {
+				for _, v := range sym.Variants {
+					for _, tp := range v.TupleTypes {
+						if b.hasDropResourceRec(tp, visited) {
+							return true
+						}
+					}
+					for _, sf := range v.StructFields {
+						if b.hasDropResourceRec(sf.Type, visited) {
+							return true
+						}
+					}
+				}
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
 func (b *funcBuilder) emitInternalError(span diagnostic.Span, msg string) {
 	if b.report == nil {
 		return
@@ -2567,10 +2658,12 @@ func (b *funcBuilder) lowerExpr(expr ast.Expr) (ValueID, BridgeValID) {
 		fieldExprs := make([]ast.Expr, 0, len(e.Fields))
 		fieldNames := make([]string, 0, len(e.Fields))
 		for _, f := range e.Fields {
-			if f.Value != nil {
-				fieldExprs = append(fieldExprs, f.Value)
-				fieldNames = append(fieldNames, f.Name)
+			fVal := f.Value
+			if fVal == nil {
+				fVal = &ast.Identifier{Name: f.Name, Span: f.Span}
 			}
+			fieldExprs = append(fieldExprs, fVal)
+			fieldNames = append(fieldNames, f.Name)
 		}
 		if v, bv, ok := b.lowerAggregateExprsWithCleanup(fieldExprs, func(i int, tv ValueID) AggTemp {
 			return AggTemp{FieldName: fieldNames[i], Index: i, Temp: tv}
@@ -2895,6 +2988,15 @@ func (b *funcBuilder) lowerExpr(expr ast.Expr) (ValueID, BridgeValID) {
 			callCat = CallBuiltin
 		} else if e.Callee == "Some" || e.Callee == "Ok" || e.Callee == "Err" || (calSym != nil && calSym.Kind == symbols.SymEnumVariant) {
 			callCat = CallEnumVariant
+			if calSym != nil && calSym.Kind == symbols.SymEnumVariant {
+				if vi := b.view.VariantRef(e); vi != nil && vi.Kind == symbols.VariantTuple && len(e.Args) >= 2 {
+					if v, bv, ok := b.lowerAggregateExprsWithCleanup(e.Args, func(i int, tv ValueID) AggTemp {
+						return AggTemp{Index: i, Temp: tv}
+					}, "enum_variant", nil, vi, exprType, e.Span); ok {
+						return v, bv
+					}
+				}
+			}
 		}
 		return b.emitCallExpr(calSym, e.Callee, e.Args, exprType, e.Span, nil, InvalidBridgeVal, callCat, "")
 
@@ -2906,6 +3008,13 @@ func (b *funcBuilder) lowerExpr(expr ast.Expr) (ValueID, BridgeValID) {
 		if vi := b.view.VariantRef(e); vi != nil || e.Namespace == "Option" || e.Namespace == "Result" {
 			callCat = CallEnumVariant
 			foreignNS = ""
+			if vi != nil && vi.Kind == symbols.VariantTuple && len(e.Args) >= 2 {
+				if v, bv, ok := b.lowerAggregateExprsWithCleanup(e.Args, func(i int, tv ValueID) AggTemp {
+					return AggTemp{Index: i, Temp: tv}
+				}, "enum_variant", nil, vi, exprType, e.Span); ok {
+					return v, bv
+				}
+			}
 		} else if calSym != nil {
 			callCat = CallNormal
 			foreignNS = ""
@@ -3103,7 +3212,6 @@ func (b *funcBuilder) lowerAggregateExprsWithCleanup(exprs []ast.Expr, buildItem
 	if len(exprs) < 2 || b.view == nil || b.view.GetTypes() == nil || b.view.GetSymbols() == nil {
 		return InvalidValue, InvalidBridgeVal, false
 	}
-	tctx := b.view.GetTypes()
 	symTab := b.view.GetSymbols()
 
 	lastTryIdx := -1
@@ -3119,7 +3227,7 @@ func (b *funcBuilder) lowerAggregateExprsWithCleanup(exprs []ast.Expr, buildItem
 	hasPriorOwned := false
 	for i := 0; i < lastTryIdx; i++ {
 		et := b.view.ExprType(exprs[i])
-		if et != types.Invalid && !tctx.IsCopy(et) && !b.isRefCarryingType(et) {
+		if et != types.Invalid && b.isDropWorthyType(et) {
 			hasPriorOwned = true
 			break
 		}
@@ -3152,7 +3260,7 @@ func (b *funcBuilder) lowerAggregateExprsWithCleanup(exprs []ast.Expr, buildItem
 			break
 		}
 		et := b.view.ExprType(ex)
-		if i < lastTryIdx && et != types.Invalid && !tctx.IsCopy(et) && !b.isRefCarryingType(et) {
+		if i < lastTryIdx && et != types.Invalid && b.isDropWorthyType(et) {
 			b.tempSymSeq++
 			tmpSym := symTab.AllocSymbol(symbols.SymVar, fmt.Sprintf("__agg_tmp_%d", b.tempSymSeq), ex.GetSpan())
 			tmpSym.Type = et
