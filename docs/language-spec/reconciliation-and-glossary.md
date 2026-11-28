@@ -108,26 +108,29 @@ To ensure the language specification suite is completely cohesive, rigorous, and
 ## 3. Design Decision Register & Owner Approval Matrix
 
 Governance in the WON project strictly distinguishes between three distinct architectural tiers:
-1. **Accepted Architectural Foundations (ADR-001 through ADR-010)**: Foundational design directions formally approved by KitiLab project leadership (ADR-001 through ADR-006 in Phase 0; ADR-007 through ADR-010 ratified on November 24, 2026 via [OWNER-APPROVAL-2026-11-24.md](../decisions/OWNER-APPROVAL-2026-11-24.md)).
-2. **Phase 1 Detailed Specifications**: Elaborations (such as reference provenance analysis $\text{Prov}(e)$, the 3-tier string model, and sidecar `.wonbind` contracts) that flesh out the accepted foundations. These remain `SPECIFIED` / `UNDER INVESTIGATION` until implemented and verified in the compiler.
+1. **Accepted Architectural Foundations (ADR-001 through ADR-012)**: Foundational design directions formally approved by KitiLab project leadership (ADR-001 through ADR-006 in Phase 0; ADR-007 through ADR-010 ratified on November 24, 2026 via [OWNER-APPROVAL-2026-11-24.md](../decisions/OWNER-APPROVAL-2026-11-24.md); ADR-011 ratified on November 25, 2026 via [OWNER-APPROVAL-ADR-011-2026-11-25.md](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md); ADR-012 ratified on November 28, 2026 via [OWNER-APPROVAL-ADR-012-2026-11-28.md](../decisions/OWNER-APPROVAL-ADR-012-2026-11-28.md)).
+2. **Phase 1–2C Detailed Specifications**: Elaborations (such as reference provenance analysis $\text{Prov}(e)$, the 3-tier string model, native layout/allocator contracts, and sidecar `.wonbind` contracts) that flesh out the accepted foundations. Implementation guarantees follow explicit CI verification gates in the compiler.
 3. **Implementation & Verification Boundaries**: An `ACCEPTED` ADR authorizes design direction and implementation effort; it is NOT proof of implemented functionality or verified safety guarantees.
 
-### Canonical Architectural Decision Records (ADR-001 through ADR-010)
+### Canonical Architectural Decision Records (ADR-001 through ADR-012)
 
 | ADR ID | Canonical Title | Scope | Recommendation / Summary | Existing Status | Implementation Status |
 | :--- | :--- | :--- | :--- | :--- | :---: |
 | **ADR-001** | C Code-Generation Backend | Backend | Emit ISO C11 initially; evaluate LLVM/QBE in Phase 5 | `ACCEPTED` (Phase 0A) | `IMPLEMENTED` (PoC) |
 | **ADR-002** | Compiler Implementation Language — Go Bootstrap | Frontend | Go 1.22+ for initial bootstrap prototype (`wonc0`) | `ACCEPTED` (Scoped to Phase 0B/1B) | `IMPLEMENTED` |
-| **ADR-003** | Ownership-Lite Memory Model | Type System | Memory safety without explicit lifetime parameters (`'a`) | `ACCEPTED` (Core Direction) | `SPECIFIED` / `UNDER INVESTIGATION` |
+| **ADR-003** | Ownership-Lite Memory Model | Type System | Memory safety without explicit lifetime parameters (`'a`) | `ACCEPTED` (Core Direction) | `IMPLEMENTED` (Phase 2B.1–2B.3 CFG/Borrow/Drop) |
 | **ADR-004** | AI-Independent Compiler Query Interface | Diagnostics | Neutral JSON-RPC and CLI diagnostic stream without vendor lock-in | `ACCEPTED` (Phase 0A) | `IMPLEMENTED` (PoC) |
 | **ADR-005** | Public Benchmark Methodology and Integrity Rules | Governance | Fair, transparent, reproducible benchmarks against native baselines | `ACCEPTED` (Phase 0A) | `IMPLEMENTED` (Phase 0B.1) |
 | **ADR-006** | C Header Parsing Strategy | Toolchain | Direct `#import <header.h>`, libclang AST discovery and caching | `ACCEPTED` (Phase 0B.2) | `IMPLEMENTED` (zlib) |
-| **ADR-007** | Formal Syntax and Indentation-Based Grammar | Grammar | Python-inspired indentation blocks (`:`), 4-space indent, `let`/`var` | `ACCEPTED` (2026-11-24) | Implementing in Phase 1B |
+| **ADR-007** | Formal Syntax and Indentation-Based Grammar | Grammar | Python-inspired indentation blocks (`:`), 4-space indent, `let`/`var` | `ACCEPTED` (2026-11-24) | `IMPLEMENTED` (Phase 1B) |
 | **ADR-008** | Structured Concurrency and Zero-GIL | Runtime | Lexical nursery scopes (`scope`/`spawn`), `Send`/`Sync`, Zero-GIL | `ACCEPTED` (2026-11-24) | `NOT IMPLEMENTED` (Phase 3) |
-| **ADR-009** | Typed Intermediate Representation (TIR) Architecture | Compiler | Basic-block CFG TIR with `ComputeAddress`, multi-backend abstraction | `ACCEPTED` (2026-11-24) | `NOT IMPLEMENTED` (Phase 2) |
-| **ADR-010** | Compiler Self-Hosting and Bootstrap Pipeline | Toolchain | 4-stage bootstrap pipeline, Go retirement criteria | `ACCEPTED` (2026-11-24) | `NOT IMPLEMENTED` (Phase 2+) |
+| **ADR-009** | Typed Intermediate Representation (TIR) Architecture | Compiler | Basic-block CFG TIR with `ComputeAddress`, multi-backend abstraction | `ACCEPTED` (2026-11-24) | `IMPLEMENTED` (Phase 2C.0–2C.1 C11) |
+| **ADR-010** | Compiler Self-Hosting and Bootstrap Pipeline | Toolchain | 4-stage bootstrap pipeline, Go retirement criteria | `ACCEPTED` (2026-11-24) | `NOT IMPLEMENTED` (Bootstrap active) |
+| **ADR-011** | Ownership and Borrow-Checking Semantics | Ownership & IR | Ownership CFG, NLL borrows, `@derive(Copy)`, candidate provenance, lexical Drops | `ACCEPTED` (2026-11-25) | `IMPLEMENTED` (Phase 2B.1–2B.3) |
+| **ADR-012** | Native String Representation, Aggregate Memory Layout & Allocator Policy | Backend ABI & Runtime | Libc allocator wrappers + OOM abort, `cap==0` empty sentinel, `usize` len/cap, 16B `&str`, L2 structs, 8/16/32/64-bit tagged enums, `@repr` deferred | `ACCEPTED` (2026-11-28) | `SPECIFIED` (Authorized for Phase 2C.2.1+) |
 
 > [!IMPORTANT]
-> **ADR-003 Note**: ADR-003 accepts the ownership-lite architecture as an overarching project direction. It does **not** signify that every detailed borrowing pass or provenance algorithm proposed during Phase 1 has already been implemented or proven sound. Specific borrow-checker passes remain `SPECIFIED` / `UNDER INVESTIGATION` pending implementation in Phase 2.
->
-> **Ratification Notice (November 24, 2026)**: ADR-007 through ADR-010 were formally ratified by KitiLab leadership ([OWNER-APPROVAL-2026-11-24.md](../decisions/OWNER-APPROVAL-2026-11-24.md)) subject to explicit technical clarifications (e.g., M:N scheduler is an implementation strategy; C11 remains initial codegen; Go bootstrap remains active until 10 retirement criteria pass).
+> **Ratification Notices**:
+> - **Nov 24, 2026 ([OWNER-APPROVAL-2026-11-24.md](../decisions/OWNER-APPROVAL-2026-11-24.md))**: ADR-007 through ADR-010 ratified (M:N scheduler is implementation strategy; C11 initial codegen; Go bootstrap active until 10 retirement criteria pass).
+> - **Nov 25, 2026 ([OWNER-APPROVAL-ADR-011-2026-11-25.md](../decisions/OWNER-APPROVAL-ADR-011-2026-11-25.md))**: ADR-011 ratified (authorizing Phase 2B.1–2B.3 ownership/borrow/drop pipeline).
+> - **Nov 28, 2026 ([OWNER-APPROVAL-ADR-012-2026-11-28.md](../decisions/OWNER-APPROVAL-ADR-012-2026-11-28.md))**: ADR-012 ratified (D1–D7, including L2 struct layout and 8/16/32/64-bit enum tags, authorizing Phase 2C.2.1+ staged implementation while keeping `GlueString`/`@repr` gated behind verified milestones).

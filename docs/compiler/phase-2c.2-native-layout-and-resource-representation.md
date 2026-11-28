@@ -1,8 +1,8 @@
 # Phase 2C.2 — Native String & Aggregate Representation Specification
 
-> **Document Status**: `SPECIFIED` (Phase 2C.2.0 Architectural & Memory-Representation Design; Pending KitiLab Owner Approval of [ADR-012](../decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) Before Any Native Codegen Activation)  
+> **Document Status**: `SPECIFIED` (Phase 2C.2.0 Specification Ratified via [ADR-012](../decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) `ACCEPTED` Nov 28, 2026; Authorizes Staged Implementation Phases `2C.2.1`+)  
 > **Milestone**: Phase 2C.2.0 (Native `String` & Aggregate Layout, Drop Glue, and Target ABI Specification)  
-> **Governing Baseline**: [ADR-001](../decisions/ADR-001-c-codegen-backend.md) (`ACCEPTED`), [ADR-003](../decisions/ADR-003-ownership-lite-memory-model.md) (`ACCEPTED`), [ADR-009](../decisions/ADR-009-typed-intermediate-representation-architecture.md) (`ACCEPTED`), [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`ACCEPTED`), [ADR-012 (Proposed)](../decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) (`PROPOSED`)  
+> **Governing Baseline**: [ADR-001](../decisions/ADR-001-c-codegen-backend.md) (`ACCEPTED`), [ADR-003](../decisions/ADR-003-ownership-lite-memory-model.md) (`ACCEPTED`), [ADR-009](../decisions/ADR-009-typed-intermediate-representation-architecture.md) (`ACCEPTED`), [ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md) (`ACCEPTED`), [ADR-012](../decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) (`ACCEPTED`, [Owner Approval](../decisions/OWNER-APPROVAL-ADR-012-2026-11-28.md))  
 > **Baseline Codebase**: Commit `b6d45d8a3cde1b13aff7813df14c0013ca03cce4` (Phase 2C.1.1 — TIR Return Completeness & Fail-Closed C11 Emission)  
 > **Invariant**: Native `GlueString`, `GlueStruct`, `GlueEnum`, `GlueTuple`, `GlueArray`, `@repr(...)`, and `TermSwitch` remain strictly gated by `WON-GEN-002` / `WON-SEM-010` until owner approval and staged implementation milestones complete.
 
@@ -138,9 +138,9 @@ static inline void _won_drop_string(_won_string_t* s) {
 
 ### 6.1 Three-Tier Layout Separation
 1. **Language Guarantees**: Declaration order fixes initialization evaluation order, `StructFieldType.Index` / tuple index `0..N-1`, and field destruction order (`0..N-1`). No cross-version physical offset stability exists for unannotated `struct` or tuple types ([`versioning-and-compatibility.md`](../language-spec/versioning-and-compatibility.md)).
-2. **Compiler-Internal V1 Layout (`PROPOSED`)**:
+2. **Compiler-Internal V1 Layout (`ACCEPTED` via ADR-012 D5 — L2 Descending Alignment)**:
    - Realized per concrete monomorphized type as deterministic `typedef struct { ... } _won_s_<id>;` / `_won_tup_<id>;` inside `internal/codegen/c11` (`TargetLayout`).
-   - Either declaration order (L1, simplest for initial `2C.2.1` bring-up) or descending-alignment reordering (L2, matching [`type-system.md`](../language-spec/type-system.md)) may be ratified in [ADR-012](../decisions/ADR-012-native-string-aggregate-layout-and-allocator.md); both MUST store logical `Index` separately so initialization and `Drop` always follow source declaration order.
+   - Physical fields are ordered by **descending field alignment**, breaking equal-alignment ties deterministically by **ascending original declaration index** (`L2`, matching [`type-system.md`](../language-spec/type-system.md)). Logical `StructFieldType.Index` / tuple indices remain completely separate so construction evaluation and `Drop` always follow source declaration order.
 3. **C ABI Compatibility Boundary**: An unannotated WON `struct` is **never** automatically C ABI-compatible even when emitted as a C11 `struct` and is rejected on by-value `OpForeignCall`. Explicit C layout attributes (`@repr(C)`, `@repr(packed)`) remain **UNRATIFIED (`WON-SEM-010`)** pending future approval ([ADR-011](../decisions/ADR-011-ownership-and-borrow-checking-semantics.md)).
 
 ### 6.2 Alignment, Padding, Offsets, ZSTs & Access
@@ -152,17 +152,19 @@ static inline void _won_drop_string(_won_string_t* s) {
 
 ---
 
-## 7. Enum and Tagged-Value Layout (`PROPOSED`)
+## 7. Enum and Tagged-Value Layout (`ACCEPTED` via ADR-012 D6)
 
 Every concrete enum with `K` variants maps deterministically via `TargetLayout`:
 1. **Uninhabited (`K == 0`)**: 1-byte placeholder C type if referenced; any construction emits `abort()`.
 2. **Unit-Only Enum (all `K` variants have 0 non-ZST fields)**:
-   - Physical type is solely the unsigned discriminant integer:
-     - `K <= 256` -> `uint8_t` (size 1, align 1)
-     - `256 < K <= 65536` -> `uint16_t` (size 2, align 2)
-     - `K > 65536` -> `uint32_t` (size 4, align 4)
+   - Physical type is solely the smallest valid unsigned integer able to represent the maximum discriminant (`D6`):
+     - `max_disc <= 255` -> `uint8_t` (size 1, align 1)
+     - `255 < max_disc <= 65535` -> `uint16_t` (size 2, align 2)
+     - `65535 < max_disc <= 4294967295` -> `uint32_t` (size 4, align 4)
+     - `max_disc <= UINT64_MAX` -> `uint64_t` (size 8, align 8)
+   - Reject fail-closed if a discriminant cannot be represented in unsigned 64-bit.
    - Avoids ISO C11 constraint errors from empty `union {}`.
-   - Value equals declaration `VariantIdx` (`0..K-1`).
+   - Default declaration discriminant equals `VariantIdx` (`0..K-1`).
 3. **Payload-Carrying Enum (at least one variant has >= 1 non-ZST field)**:
    ```c
    typedef struct {
@@ -322,14 +324,14 @@ No codegen tests are invented in this spec-only milestone; future implementation
 
 ---
 
-## 20. Open Owner Decisions
+## 20. Ratified Owner Decisions (`ADR-012`, Nov 28, 2026)
 
-Activation of native `String` and aggregate emission awaits explicit KitiLab Project Owner sign-off on **Decisions D1–D7** formalized in [ADR-012](../decisions/ADR-012-native-string-aggregate-layout-and-allocator.md):
+On November 28, 2026 ([OWNER-APPROVAL-ADR-012-2026-11-28.md](../decisions/OWNER-APPROVAL-ADR-012-2026-11-28.md)), KitiLab project leadership formally ratified **Decisions D1–D7** in [ADR-012](../decisions/ADR-012-native-string-aggregate-layout-and-allocator.md):
 
-1. **D1**: Approve libc-backed static C allocator shims (`_won_alloc` / `_won_realloc` / `_won_free`) with `stderr` + `abort()` on OOM for V1 infallible `String` operations.
-2. **D2**: Approve `cap == 0` non-null static empty-string sentinel without hidden dynamic `cap + 1` trailing `\0` byte.
-3. **D3**: Decide `.len()` return type alignment: keep `u64` or migrate to `usize` (`size_t`) per [`type-system.md`](../language-spec/type-system.md).
-4. **D4**: Approve transitioning `&str` in C11 from `const char*` to 16-byte `{ptr, len}` while keeping explicit `*const u8` (`.as_ptr()`) / literal bridge at C FFI `const char*` sites.
-5. **D5**: Choose V1 default unannotated struct physical layout policy: declaration order (`L1`) vs alignment-descending reordering (`L2`), preserving declaration-order `Drop` unconditionally.
-6. **D6**: Ratify deferring SSO and enum niche optimization beyond V1 (`2C.2`).
-7. **D7**: Confirm keeping `@repr(C)` and `@repr(packed)` gated (`WON-SEM-010`) until follow-up milestone `2C.2.3`.
+1. **D1 (`APPROVED`)**: Libc-backed `_won_alloc(size_t)` / `_won_realloc(void* ptr, size_t old_cap, size_t new_cap)` / `_won_free(void* ptr, size_t cap)` single-family wrappers with overflow checks, min 16B capacity, 2x growth, no hidden `+1` NUL, and `stderr` + `abort()` on OOM.
+2. **D2 (`APPROVED`)**: Empty `String` uses `cap == 0` non-null static empty sentinel `_won_empty_bytes` (zero heap allocation; sentinel never written or freed).
+3. **D3 (`APPROVED`)**: `.len()` and `.capacity()` return `usize` (`size_t` on LP64), aligned across checker, TIR, C11, and docs.
+4. **D4 (`APPROVED`)**: `&str` uses 16-byte `{ const uint8_t* ptr; size_t len; }` on Linux x86_64 LP64 with explicit C-string interop boundaries.
+5. **D5 (`APPROVED`)**: Unannotated struct physical layout uses **L2 (descending alignment, ascending original declaration index tie-break)**, completely decoupled from declaration-order construction evaluation and destruction (`Drop`).
+6. **D6 (`APPROVED`)**: Tagged enums select the smallest valid unsigned width in `{uint8_t, uint16_t, uint32_t, uint64_t}` for max discriminant (rejecting non-u64-representable discriminants), preserve `Option`/`Result` indices, and defer SSO/niche compression beyond V1.
+7. **D7 (`APPROVED`)**: `@repr(C)` and `@repr(packed)` remain deferred and fail-closed (`WON-SEM-010`).

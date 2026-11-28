@@ -3,8 +3,8 @@
 ## Metadata
 - **Decision ID**: ADR-012
 - **Title**: Native `String` Representation, Fat `&str` Views, Aggregate Layout, Tagged Enums & Allocator Policy (Linux x86_64 LP64)
-- **Status**: `PROPOSED` (Pending KitiLab Project Owner Approval — NOT yet ratified for code generation)
-- **Date**: 2026-11-27
+- **Status**: `ACCEPTED` (KitiLab Owner Approval: November 28, 2026 — see [OWNER-APPROVAL-ADR-012-2026-11-28.md](OWNER-APPROVAL-ADR-012-2026-11-28.md))
+- **Date**: 2026-11-28 (Proposed 2026-11-27 in Phase 2C.2.0; Accepted Nov 28, 2026)
 - **Author**: KitiLab Engineering
 - **Builds Upon**: [ADR-001](ADR-001-c-codegen-backend.md), [ADR-003](ADR-003-ownership-lite-memory-model.md), [ADR-009](ADR-009-typed-intermediate-representation-architecture.md), [ADR-011](ADR-011-ownership-and-borrow-checking-semantics.md)
 - **Technical Specification**: [Phase 2C.2 Native Layout & Resource Representation](../compiler/phase-2c.2-native-layout-and-resource-representation.md)
@@ -13,59 +13,80 @@
 
 ## Context
 
-Following Phase 2C.1 (TIR-driven strict ISO C11 backend and native `GlueForeignResource` Drop execution), [`internal/codegen/c11`](../../compiler/poc/internal/codegen/c11/capabilities.go) still gates `String` (`GlueString`), general structs (`GlueStruct`), enums (`GlueEnum`), `Option`/`Result`, tuples (`GlueTuple`), resource-bearing arrays (`GlueArray`), and `&str.len()`/`==` with `WON-GEN-002`. Before removing those gates, KitiLab must lock down ABI, allocator, failure, ZST, and C-interop invariants in full conformance with [ADR-009](ADR-009-typed-intermediate-representation-architecture.md) and [ADR-011](ADR-011-ownership-and-borrow-checking-semantics.md).
+Following Phase 2C.1 (TIR-driven strict ISO C11 backend and native `GlueForeignResource` Drop execution), [`internal/codegen/c11`](../../compiler/poc/internal/codegen/c11/capabilities.go) gated `String` (`GlueString`), general structs (`GlueStruct`), enums (`GlueEnum`), `Option`/`Result`, tuples (`GlueTuple`), resource-bearing arrays (`GlueArray`), and `&str.len()`/`==` with `WON-GEN-002`. Before enabling native representation and execution, WON must lock down target ABI, allocator, empty-buffer sentinel, ZST, enum discriminant, and C-interop invariants in strict compliance with [ADR-009](ADR-009-typed-intermediate-representation-architecture.md) and [ADR-011](ADR-011-ownership-and-borrow-checking-semantics.md).
 
 ---
 
-## Considered Alternatives & Open Owner Decisions (`PROPOSED`)
+## Considered Alternatives & Final Decisions (D1–D7)
 
-### Decision Item D1: Heap Allocator & OOM Behavior for `String`
-- **Alternative 1 (Inline raw `malloc`/`free`)**: Scatters libc dependencies through emitted functions.
-- **Alternative 2 (Static C allocator shim `_won_alloc`/`_won_realloc`/`_won_free` wrapping libc `<stdlib.h>`, abort on OOM) — `PROPOSED`**: Keeps one allocator family, guarantees matched allocation/deallocation, avoids silent partial-string UB on OOM, and allows drop-in allocator replacement in one runtime translation unit later.
-- *Requires Owner Decision*: Confirm OOM aborts (`stderr` + `abort()`) for infallible V1 `String` operations (`String::from`, `push_str`).
+### Decision D1: Libc-Backed Allocator Wrappers & OOM Policy — `APPROVED`
+- **Alternative Considered**: Raw inline `malloc`/`free` scattered across functions, or custom allocator generic parameters (`String[A]`) / fallible runtime allocation returns in V1.
+- **Approved Resolution**: Adopt the minimal single-family libc-backed runtime allocator interface:
+  - `void* _won_alloc(size_t bytes)`: allocates `bytes` bytes from the WON allocator family.
+  - `void* _won_realloc(void* ptr, size_t old_cap, size_t new_cap)`: resizes an existing WON heap buffer whose prior capacity is `old_cap` (or allocates fresh storage if transitioning from zero capacity `old_cap == 0`) to `new_cap` bytes. Parameter order MUST remain `(ptr, old_cap, new_cap)`.
+  - `void _won_free(void* ptr, size_t cap)`: releases a WON heap allocation of capacity `cap` (no-op or strictly guarded never to receive `cap == 0`).
+- **Mandatory Invariants**:
+  - Use one allocator family for allocation, reallocation, and release.
+  - Check all capacity and size arithmetic for unsigned `size_t` overflow before allocation.
+  - Enforce minimum nonzero dynamic capacity of `16` bytes with deterministic geometric growth (initially `2x`).
+  - Do NOT allocate hidden trailing NUL bytes (`cap + 1`) on dynamic `String` buffers.
+  - On allocation failure in infallible V1 `String` operations, emit a fatal diagnostic and terminate via ISO C11 `abort()`. Fallible allocation APIs or custom allocator systems remain excluded from V1.
 
-### Decision Item D2: Empty `String` Representation & Trailing NUL Policy
-- **Alternative 1 (`ptr == NULL` when `cap == 0`, dynamic `cap + 1` trailing `\0`)**: Risks C11 UB if `NULL` flows into `memcpy(..., 0)` via `.as_ptr()`, and couples UTF-8 buffers to NUL sentinel allocation even though WON permits embedded `'\0'`.
-- **Alternative 2 (`cap == 0` paired with static non-null empty sentinel `""`, no hidden `+1` NUL allocation) — `PROPOSED`**: Zero heap allocation on empty strings, non-null `.as_ptr()` invariant preserved, and single condition `if (s.cap > 0) _won_free(s.ptr, s.cap)` in `GlueString`. No SSO in V1 (avoids stack-pointer relocation hazards).
+### Decision D2: Empty `String` Representation (`cap == 0` Non-Null Sentinel) — `APPROVED`
+- **Alternative Considered**: Nullable `ptr == NULL` when `cap == 0`, or Small-String Optimization (SSO).
+- **Approved Resolution**: An empty `String` uses a static non-null empty sentinel `_won_empty_bytes` with `len == 0` and `cap == 0` (zero heap allocation).
+  - The sentinel is immutable read-only storage and MUST NEVER be written to or passed to `_won_free`.
+  - Any mutating operation requiring heap storage when `cap == 0` MUST first allocate real writable owned memory via `_won_alloc` / `_won_realloc`.
+  - Dynamic `String` does NOT promise trailing NUL termination (embedded `'\0'` is legal UTF-8).
 
-### Decision Item D3: `.len()` Return Type (`u64` vs `usize`)
-- **Current Compiler Reality**: [`resolveBuiltinMethodSig`](../../compiler/poc/internal/checker/expressions.go#L1895) returns `u64`, whereas [`type-system.md`](../language-spec/type-system.md) models lengths/capacities as `usize`.
-- **Proposed Resolution**: Align `.len()` / `.capacity()` to `usize` (`size_t` on LP64, matching `[T; N]` and `&[T]` indexing) once owner approves updating Phase 2A.2 / Phase 2C tests from `u64` to `usize` (or retain `u64` until cross-target work).
+### Decision D3: Length & Capacity Type (`usize`) — `APPROVED`
+- **Alternative Considered**: Leaving `.len()` typed as `u64` in `internal/checker/expressions.go`.
+- **Approved Resolution**: Both `.len()` and `.capacity()` MUST return `usize` (`size_t` on Linux x86_64 LP64), unifying the type checker, TIR mappings, C11 emission, and language specification ([`type-system.md`](../language-spec/type-system.md)). Byte-oriented UTF-8 indexing/counting semantics apply (`usize` counts bytes, not Unicode scalar values).
 
-### Decision Item D4: Fat `&str` View Representation (`16B` vs `const char*`)
-- **Current C11 Backend**: Maps `&str` to `const char*` (literally restricted).
-- **Proposed Resolution**: Represent `&str` in C11 as `_won_str_t { const uint8_t* ptr; size_t len; }` (16B, align 8, `Copy`) while static string literals keep a static trailing `\0` in `.rodata` and C FFI `const char*` continues consuming `*const u8` (`.as_ptr()`) or explicit literal views inside `unsafe:`/`FFI`.
+### Decision D4: 16-Byte Fat `&str` String Views & Explicit C Interop — `APPROVED`
+- **Alternative Considered**: Retaining `const char*` as the general `&str` C11 representation.
+- **Approved Resolution**: On the Linux x86_64 LP64 target, `&str` is represented as a 16-byte `Copy` two-word descriptor (`align == 8`):
+  ```c
+  struct {
+      const uint8_t *ptr;
+      size_t len;
+  };
+  ```
+  - `&str` is NOT inherently a NUL-terminated C string.
+  - Passing an arbitrary `&str` silently to an ordinary C `const char*` parameter MUST NOT be allowed; C interoperability remains explicit via raw pointers (`*const u8`) / `.as_ptr()` and validated FFI contracts.
+  - Existing borrow provenance (`Prov(e)`, `Static` literals, NLL regions) remains strictly preserved.
 
-### Decision Item D5: Unannotated Struct Physical Layout Order (V1)
-- **Invariant**: Source declaration order is **always** preserved for construction evaluation and `DropGlue` destruction order ([`ownership-and-memory.md`](../language-spec/ownership-and-memory.md), [`drop/classify.go`](../../compiler/poc/internal/drop/classify.go)).
-- **Proposed Choice**: Allow C11 V1 backend to emit declaration-order fields initially for unannotated `struct` (`Option L1`) **or** alignment-descending reordering (`Option L2`), while keeping unannotated structs **non-C-ABI** across `OpForeignCall` boundaries in both cases ([`versioning-and-compatibility.md`](../language-spec/versioning-and-compatibility.md)). ISO C11 empty ZST structs/arrays elide ZST members cleanly or emit 1-byte dummy object placeholders so `-std=c11 -pedantic-errors` remains green.
+### Decision D5: L2 Struct Physical Layout Order — `APPROVED (L2 Selected)`
+- **Alternative Considered**: L1 (declaration-order physical fields for unannotated structs).
+- **Approved Resolution**: Unannotated WON structs adopt **L2: descending-alignment physical field ordering**:
+  1. Sort non-ZST fields by **descending target alignment**.
+  2. Break equal-alignment ties deterministically by **ascending original declaration index** (stable sort, zero Go map iteration).
+  3. Compute aligned byte offsets and final padded size using checked integer arithmetic.
+- **Non-Negotiable Separation**: Language-level field declaration order, left-to-right literal construction evaluation order, logical field indices/access, and declaration-order struct field destruction (`DropGlue`) remain completely independent of L2 physical offsets. Backends MUST map logical `StructFieldType.Index` / `ProjField` to physical fields via the target layout table and MUST NEVER reorder semantic `Drop` events to match L2 physical order.
+- **ZST Normalization**: Strict ISO C11 forbids empty structs and zero-length arrays; non-ZST composites elide ZST/`unit` fields physically, while standalone ZST composites lower to 1-byte `_won_zst_t` storage when addressable/materialized.
 
-### Decision Item D6: Tagged Union Enum Layout & Deferral of Niche Optimization
-- **Proposed Resolution**: Concrete payload enums lower to deterministic `{ uint{8,16,32}_t tag; union { ... } payload; }` using `VariantIdx` (`Option`: `0=Some, 1=None`; `Result`: `0=Ok, 1=Err`); unit-only enums emit compact integer tags only. Dropping switches on `tag` and destroys **only** the active variant payload. Null-pointer/bool niche optimizations remain **explicitly deferred** beyond V1.
+### Decision D6: Explicit Tagged Enum Representations (8/16/32/64-Bit Tags) & Optimization Deferrals — `APPROVED`
+- **Approved Resolution**: Concrete enums use explicit deterministic tagged representations without V1 niche compression:
+  - Supported unsigned discriminant integer types: `uint8_t`, `uint16_t`, `uint32_t`, and `uint64_t`.
+  - Deterministically select the **smallest** valid unsigned width capable of representing the enum's maximum discriminant value (per language discriminant rules), failing closed if any discriminant cannot be represented in unsigned 64-bit.
+  - Unit-only enums use the compact integer tag directly without an empty C `union`.
+  - Payload-carrying enums emit `{ <tag_c_type> tag; union { ... } payload; }` incorporating computed variant payload alignments and layouts, accessing/dropping **only** the active variant.
+  - Preserve `Option[T]` (`Some = 0`, `None = 1`) and `Result[T, E]` (`Ok = 0`, `Err = 1`).
+- **Explicitly Deferred Beyond V1**: Small-string optimization (SSO), enum niche optimization, `Option[&T]` pointer niches, and `Option[String]` layout compression.
 
-### Decision Item D7: `@repr(C)` & `@repr(packed)` Ratification Boundary
-- Per [ADR-011](ADR-011-ownership-and-borrow-checking-semantics.md), `@repr(C)` and `@repr(packed)` remain rejected (`WON-SEM-010`) and are **not** activated by Phase 2C.2.0. Their syntax/FFI validation should follow in a scoped follow-up milestone (`Phase 2C.2.3`) after core WON structs and `String` pass full ASan/GCC/Clang verification.
+### Decision D7: `@repr(C)` & `@repr(packed)` Deferral — `APPROVED`
+- Per [ADR-011](ADR-011-ownership-and-borrow-checking-semantics.md), both `@repr(C)` and `@repr(packed)` remain unsupported and fail-closed (`WON-SEM-010`).
+- Unannotated WON structs MUST NOT be treated as C ABI-compatible in FFI signatures merely because the C11 backend lowers them to C structs. Enabling C-ABI attributes requires a separate future specification and approval milestone (`Phase 2C.2.3`).
 
 ---
 
-## Proposed Decision Summary (Awaiting Approval)
+## Decision Summary
 
-**Adopt the simple, deterministic, leak-free V1 memory model specified in [`phase-2c.2-native-layout-and-resource-representation.md`](../compiler/phase-2c.2-native-layout-and-resource-representation.md): 24-byte `{ptr, len, cap}` `String` with matched C11 runtime allocator shims and static empty sentinel (`cap == 0`), 16-byte `{ptr, len}` fat `&str`, tagged-union enums without V1 niches, strict ZST elision for ISO C11 `-pedantic-errors`, and strict separation between internal WON layout and future `@repr(C)` FFI types.**
+**ADR-012 is `ACCEPTED` (November 28, 2026), ratifying D1–D7: libc-backed `_won_alloc`/`_won_realloc(ptr, old_cap, new_cap)`/`_won_free` wrappers aborting on OOM, non-null static empty `String` sentinel (`cap == 0`), `usize` `.len()`/`.capacity()`, 16-byte `{ptr, len}` fat `&str` with explicit C interop, L2 descending-alignment struct layout decoupled from declaration-order `Drop`, explicit 8/16/32/64-bit unsigned enum tags (with SSO and niches deferred), and continued deferral of `@repr(C)`/`@repr(packed)`.**
 
 ---
 
 ## Consequences
-- **Positive**: Preserves target independence of `internal/tir` (ADR-009), keeps ADR-011 ownership/drop semantics intact without lifetime syntax, makes `GlueString` and `GlueEnum`/`GlueStruct`/`GlueTuple`/`GlueArray` lowering unambiguous and ASan-verifiable under strict `-std=c11 -pedantic-errors`.
-- **Negative / Trade-Offs**: Deferring SSO and niche optimization leaves small stack overhead (24B `String`, `Option[&T]` 16B instead of 8B) in V1; transitioning `&str` from `const char*` to 16B fat struct updates C11 codegen mapping in Phase 2C.2.2.
-- **Impact on Pillars**:
-  - *Performance*: Zero GC, O(1) moves, exact heap allocation only when `cap > 0`.
-  - *Memory Safety*: No drop of uninitialized/moved fields or inactive enum arms; ZSTs and empty buffers maintain non-null/C11 validity.
-  - *C Interoperability*: Explicit FFI boundary prevents accidental ABI coupling to internal layouts.
-  - *AI-Native Design*: Predictable, local value semantics without hidden allocator magic or niche-dependent aliasing traps.
-  - *Simple Deployment*: Requires only ~60-100 lines of dependency-free C11 helper code linked directly into the emitted unit.
-
----
-
-## Approval Gate
-
-No code generation for `GlueString`, `GlueStruct`, `GlueEnum`, `GlueTuple`, `GlueArray`, or `@repr(...)` may be enabled in `compiler/poc/internal/codegen/c11` until KitiLab Project Owner explicitly ratifies Decisions **D1–D7** above.
+- **Positive**: Locks target ABI layout in the backend while keeping `internal/tir` target-independent (ADR-009), preserves ADR-011 ownership/destruction invariants cleanly, prevents C11 empty-struct/zero-array UB under `-pedantic-errors`, and unblocks staged implementation (`Phase 2C.2.1` aggregates + `&str`/`usize`; `Phase 2C.2.2` heap `String` allocator & `GlueString`).
+- **Negative / Trade-Offs**: Deferring SSO and niche optimizations adds 1 tag word + padding to `Option[&T]` / `Option[String]` in V1; L2 physical reordering requires every C11 field/drop emission to translate logical indices through `TargetLayout`.
+- **Approval vs Implementation Boundary**: Accepting ADR-012 authorizes staged `Phase 2C.2.1+` implementation; unimplemented constructs (such as heap `String` allocation and `GlueString` execution in `2C.2.1`) remain strictly gated behind `WON-GEN-002` until verified in code and CI.

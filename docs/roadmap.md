@@ -1,8 +1,8 @@
 # WON Development Roadmap
 
-> **Document Status**: `SPECIFIED` (Phase 0B–2C.1 `IMPLEMENTED`; Phase 2C.2.0 Layout Spec `SPECIFIED` / [ADR-012](decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) `PROPOSED`; Phase 2C.2.1+ Implementation Pending Owner Approval)  
+> **Document Status**: `SPECIFIED` (Phase 0B–2C.1 `IMPLEMENTED`; Phase 2C.2.0 Layout Spec `SPECIFIED` & [ADR-012](decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) `ACCEPTED` Nov 28, 2026; Phase 2C.2.1 Implementation Pending Verification)  
 > **Author**: KitiLab Engineering  
-> **Last Updated**: Phase 2C.2.0 (Native `String` & Aggregate Memory-Representation Specification)
+> **Last Updated**: Phase 2C.2.0 (ADR-012 Ratified)
 
 ---
 
@@ -126,9 +126,9 @@ The implementation roadmap adheres to strict technical dependency ordering acros
     - *Deliverables*: `internal/codegen/c11/{target,types,capabilities,emitter}.go`, [phase-2c.1-tir-c11-backend.md](compiler/phase-2c.1-tir-c11-backend.md), differential, GCC/Clang strict C11 resource-counter, CLI, and fuzz (`FuzzC11Emitter`) suites.
     - *Status*: `IMPLEMENTED` (Verified for C11 subset, return completeness, & opaque foreign resource Drop; `String` allocator contract, user `struct`/`enum`/`match`/`?`/`for` layout lowering, and monomorphization remain `SPECIFIED`/`PLANNED` under `WON-GEN-002`).
   - **2C.2.0 (Native `String` & Aggregate Representation Specification)**:
-    - *Objective*: Specify language-level vs target-ABI semantics, 24-byte `{ptr, len, cap}` `String`, 16-byte `{ptr, len}` `&str`, allocator shim/OOM policy, struct/tuple/array/tagged-enum/`Option`/`Result` layouts, ISO C11 ZST rules, active-variant & `?` partial cleanup, and generic TIR vs `TargetLayout` boundaries prior to codegen implementation.
-    - *Deliverables*: [phase-2c.2-native-layout-and-resource-representation.md](compiler/phase-2c.2-native-layout-and-resource-representation.md), [ADR-012](decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) (`PROPOSED`).
-    - *Status*: `SPECIFIED` (Design specification complete; native `String`/`ADT` implementation Phases `2C.2.1+` await Project Owner ratification of Decisions D1–D7 and retain strict `WON-GEN-002` guards).
+    - *Objective*: Specify language-level vs target-ABI semantics, 24-byte `{ptr, len, cap}` `String`, 16-byte `{ptr, len}` `&str`, allocator shim/OOM policy, struct L2 (`descending alignment + decl tie-break`) / tuple / array / tagged-enum (8/16/32/64-bit tags) / `Option`/`Result` layouts, ISO C11 ZST rules, active-variant & `?` partial cleanup, and generic TIR vs `TargetLayout` boundaries prior to codegen implementation.
+    - *Deliverables*: [phase-2c.2-native-layout-and-resource-representation.md](compiler/phase-2c.2-native-layout-and-resource-representation.md), [ADR-012](decisions/ADR-012-native-string-aggregate-layout-and-allocator.md) (`ACCEPTED`), [OWNER-APPROVAL-ADR-012-2026-11-28.md](decisions/OWNER-APPROVAL-ADR-012-2026-11-28.md).
+    - *Status*: `SPECIFIED` (Design specification & ADR-012 ratified Nov 28, 2026, authorizing staged Phases `2C.2.1`+; codegen remains `WON-GEN-002` until verified).
 - **Separate Future Milestone — General Trait Solver & Structured Concurrency Safety (`scope` / `Send` / `Sync`)**:
   - *Objective*: User `trait` coherence, generic `Copy` conditional bounds, user `impl Drop`, `?` `From`/`Into` conversion (`WON-ERR-002`), auto-traits `Send`/`Sync`, and structured-concurrency task capture enforcement (`WON-CON-001`, Phase 3).
   - *Status*: `PLANNED` (Explicitly separated from Phase 2B core borrow checker).
