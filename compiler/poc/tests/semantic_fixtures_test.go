@@ -174,6 +174,17 @@ func TestCLISemanticCheckAndCodegenGate(t *testing.T) {
 		t.Fatalf("hello_bin 运行失败: err=%v out=%s", err, string(runOut))
 	}
 
+	// 1c. 验证 Phase 2C.2.1 引入的 Option / Result / 模式匹配 / ? 运算符完整代码生成与执行
+	optBin := filepath.Join(t.TempDir(), "opt_bin")
+	if out, err := exec.Command(woncBin, "build", "-o", optBin, filepath.Join("..", "..", "..", "tests/language-spec/valid/enums/option_result_try.won")).CombinedOutput(); err != nil {
+		t.Fatalf("wonc build option_result_try.won 失败: %v\n%s", err, string(out))
+	}
+	cmdOpt := exec.Command(optBin)
+	_ = cmdOpt.Run()
+	if cmdOpt.ProcessState.ExitCode() != 7 {
+		t.Fatalf("opt_bin 运行退出码期望为 7 (process_pair 返回 Result::Ok(7)), 实际: %d", cmdOpt.ProcessState.ExitCode())
+	}
+
 	// 2. wonc check 在语义负例上返回非 0 并输出规范诊断码
 	for _, tc := range []struct {
 		rel  string
@@ -198,7 +209,6 @@ func TestCLISemanticCheckAndCodegenGate(t *testing.T) {
 	for _, rel := range []string{
 		"tests/language-spec/valid/types/struct_and_enum.won",
 		"tests/language-spec/valid/types/full_width_integers.won",
-		"tests/language-spec/valid/enums/option_result_try.won",
 	} {
 		absPath, _ := filepath.Abs(filepath.Join("..", "..", "..", rel))
 		absBin, _ := filepath.Abs(woncBin)

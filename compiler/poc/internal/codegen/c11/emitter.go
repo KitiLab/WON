@@ -40,10 +40,22 @@ func (e *Emitter) Emit(prog *tir.Program) (string, error) {
 }
 
 type emitCtx struct {
-	prog   *tir.Program
-	tt     *tir.TypeTable
-	sb     strings.Builder
-	indent int
+	prog         *tir.Program
+	tt           *tir.TypeTable
+	layout       *TargetLayout
+	sb           strings.Builder
+	indent       int
+	litDecls     []litDecl
+	litByContent map[string]string
+	needEmpty    bool
+	needZSTDummy bool
+	needBoundsU  bool
+	needBoundsS  bool
+}
+
+type litDecl struct {
+	name string
+	data string
 }
 
 func (c *emitCtx) writeLine(s string) {
@@ -58,8 +70,80 @@ func (c *emitCtx) writeLine(s string) {
 	c.sb.WriteByte('\n')
 }
 
+func (c *emitCtx) layoutOf(tid tir.TypeID) (*TypeLayout, error) {
+	return c.layout.LayoutOf(tid)
+}
+
+func (c *emitCtx) typeCName(tid tir.TypeID, pos TypePos) (string, error) {
+	ti := c.tt.Info(tid)
+	if pos == PosReturn && ti.Kind == tir.TypeUnit {
+		return "void", nil
+	}
+	if isU8SliceRef(c.tt, tid) {
+		return "const uint8_t*", nil
+	}
+	return MapType(c.tt, tid, pos)
+}
+
+func (c *emitCtx) registerStringLit(val string) string {
+	if val == "" {
+		c.needEmpty = true
+		return "_won_empty_bytes"
+	}
+	if name, ok := c.litByContent[val]; ok {
+		return name
+	}
+	name := fmt.Sprintf("_won_lit_%d", len(c.litDecls))
+	c.litByContent[val] = name
+	c.litDecls = append(c.litDecls, litDecl{name: name, data: val})
+	return name
+}
+
 func (c *emitCtx) emitProgram() error {
-	c.writeLine("/* 由 WON Phase 2C.1 TIR->C11 后端自动生成 - 严格遵循 ISO C11 标准 (Linux x86_64 LP64 ABI) */")
+	tl, err := BuildTargetLayout(DefaultLinuxX86_64(), c.tt)
+	if err != nil {
+		return err
+	}
+	c.layout = tl
+	c.litByContent = make(map[string]string)
+
+	// 预先为所有函数局部、寄存器与胶水类型计算布局，确保 typedef 顺序完整
+	for _, g := range c.prog.DropGlues {
+		if _, err := c.layoutOf(g.Type); err != nil {
+			return err
+		}
+	}
+	for _, fn := range c.prog.Functions {
+		if fn == nil {
+			continue
+		}
+		if c.tt.Info(fn.ReturnType).Kind != tir.TypeUnit {
+			if _, err := c.layoutOf(fn.ReturnType); err != nil {
+				return err
+			}
+		}
+		for _, pt := range fn.ParamTypes {
+			if _, err := c.layoutOf(pt); err != nil {
+				return err
+			}
+		}
+		for _, ld := range fn.Locals {
+			if !isU8SliceRef(c.tt, ld.Type) {
+				if _, err := c.layoutOf(ld.Type); err != nil {
+					return err
+				}
+			}
+		}
+		for _, vd := range fn.Values {
+			if c.tt.Info(vd.Type).Kind != tir.TypeUnit && !isU8SliceRef(c.tt, vd.Type) {
+				if _, err := c.layoutOf(vd.Type); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	c.writeLine("/* 由 WON Phase 2C.1 TIR->C11 (Phase 2C.2 扩展) 后端自动生成 - 严格遵循 ISO C11 标准 (Linux x86_64 LP64 ABI) */")
 	c.writeLine("#define _POSIX_C_SOURCE 200809L")
 	c.writeLine("#include <stdio.h>")
 	c.writeLine("#include <stdlib.h>")
@@ -73,41 +157,381 @@ func (c *emitCtx) emitProgram() error {
 	c.emitHeaderIncludes()
 	c.writeLine("")
 
-	// 按需生成内置辅助函数，避免 Clang -Werror=unused-function
-	if c.programUsesBuiltin(tir.BuiltinBytesEqual) {
-		c.writeLine("// --- WON 内置安全字节比较辅助函数 ---")
-		c.writeLine("static inline bool won_bytes_equal(const uint8_t* a, const uint8_t* b, unsigned long len) {")
-		c.writeLine("    return memcmp(a, b, len) == 0;")
-		c.writeLine("}")
-		c.writeLine("")
+	// 基础运行时类型定义 (ADR-012 D2/D4)
+	c.writeLine("typedef struct { uint8_t _zst; } _won_zst_t;")
+	c.writeLine("typedef struct { const uint8_t* ptr; size_t len; } _won_str_t;")
+	c.writeLine("typedef struct { uint8_t* ptr; size_t len; size_t cap; } _won_string_t;")
+	c.writeLine(`_Static_assert(sizeof(_won_str_t) == 16 && _Alignof(_won_str_t) == 8, "_won_str_t ABI mismatch");`)
+	c.writeLine(`_Static_assert(sizeof(_won_string_t) == 24 && _Alignof(_won_string_t) == 8, "_won_string_t ABI mismatch");`)
+	c.writeLine("")
+
+	// 发射确定性 L2 聚合与枚举 typedef 声明
+	c.emitAggregateTypedefs()
+
+	// 先将正文的辅助函数/原型/函数体写入子缓冲，按需在顶部插入字面量与辅助原语，防止 -Werror=unused-*
+	bodyBuf := &emitCtx{
+		prog:         c.prog,
+		tt:           c.tt,
+		layout:       c.layout,
+		litByContent: c.litByContent,
 	}
 
-	// 前向声明所有非 main 用户函数，支持任意互调与前向引用
+	if err := bodyBuf.emitDropGlues(); err != nil {
+		return err
+	}
+
+	if bodyBuf.programUsesBuiltin(tir.BuiltinBytesEqual) {
+		bodyBuf.writeLine("// --- WON 内置安全字节比较辅助函数 ---")
+		bodyBuf.writeLine("static inline bool won_bytes_equal(const uint8_t* a, const uint8_t* b, unsigned long len) {")
+		bodyBuf.writeLine("    return memcmp(a, b, len) == 0;")
+		bodyBuf.writeLine("}")
+		bodyBuf.writeLine("")
+	}
+
 	protoCount := 0
-	for _, fn := range c.prog.Functions {
+	for _, fn := range bodyBuf.prog.Functions {
 		if fn == nil || fn.Name == "main" {
 			continue
 		}
-		sig, _, err := c.buildFuncSignature(fn)
+		sig, _, err := bodyBuf.buildFuncSignature(fn)
 		if err != nil {
 			return err
 		}
-		c.writeLine(sig + ";")
+		bodyBuf.writeLine(sig + ";")
 		protoCount++
 	}
 	if protoCount > 0 {
-		c.writeLine("")
+		bodyBuf.writeLine("")
 	}
 
-	for _, fn := range c.prog.Functions {
+	for _, fn := range bodyBuf.prog.Functions {
 		if fn == nil {
 			continue
 		}
-		if err := c.emitFunction(fn); err != nil {
+		if err := bodyBuf.emitFunction(fn); err != nil {
 			return err
 		}
 	}
+
+	// 按需写入静态字节字面量、空串哨兵、ZST 哑元与越界检查辅助函数
+	if bodyBuf.needEmpty {
+		c.writeLine("static const uint8_t _won_empty_bytes[1] = {0};")
+	}
+	if bodyBuf.needZSTDummy {
+		c.writeLine("static _won_zst_t _won_zst_dummy = {0};")
+	}
+	for _, ld := range bodyBuf.litDecls {
+		c.emitStaticByteLiteral(ld)
+	}
+	if bodyBuf.needBoundsU {
+		c.writeLine("static inline size_t _won_chk_idx_u(uint64_t idx, size_t len) {")
+		c.writeLine("    if (idx >= len) { fprintf(stderr, \"WON index out of bounds\\n\"); abort(); }")
+		c.writeLine("    return (size_t)idx;")
+		c.writeLine("}")
+	}
+	if bodyBuf.needBoundsS {
+		c.writeLine("static inline size_t _won_chk_idx_s(int64_t idx, size_t len) {")
+		c.writeLine("    if (idx < 0 || ((uint64_t)idx) >= ((uint64_t)len)) { fprintf(stderr, \"WON index out of bounds\\n\"); abort(); }")
+		c.writeLine("    return (size_t)idx;")
+		c.writeLine("}")
+	}
+	if bodyBuf.needEmpty || len(bodyBuf.litDecls) > 0 || bodyBuf.needZSTDummy || bodyBuf.needBoundsU || bodyBuf.needBoundsS {
+		c.writeLine("")
+	}
+
+	c.sb.WriteString(bodyBuf.sb.String())
 	return nil
+}
+
+func (c *emitCtx) emitStaticByteLiteral(ld litDecl) {
+	b := []byte(ld.data)
+	parts := make([]string, len(b)+1)
+	for i, ch := range b {
+		parts[i] = fmt.Sprintf("0x%02x", ch)
+	}
+	parts[len(b)] = "0x00"
+	c.writeLine(fmt.Sprintf("static const uint8_t %s[%d] = { %s };", ld.name, len(b)+1, strings.Join(parts, ", ")))
+}
+
+func (c *emitCtx) containsOpaqueForeign(tid tir.TypeID, seen map[tir.TypeID]bool) bool {
+	if !c.tt.Valid(tid) || seen[tid] {
+		return false
+	}
+	seen[tid] = true
+	defer delete(seen, tid)
+	ti := c.tt.Info(tid)
+	switch ti.Kind {
+	case tir.TypeStruct:
+		if ti.IsOpaqueForeign {
+			return true
+		}
+		for _, f := range ti.Fields {
+			if c.containsOpaqueForeign(f.Type, seen) {
+				return true
+			}
+		}
+	case tir.TypeTuple:
+		for _, el := range ti.Elems {
+			if c.containsOpaqueForeign(el, seen) {
+				return true
+			}
+		}
+	case tir.TypeArray:
+		return c.containsOpaqueForeign(ti.Elem, seen)
+	case tir.TypeEnum:
+		for _, v := range ti.Variants {
+			for _, te := range v.TupleElems {
+				if c.containsOpaqueForeign(te, seen) {
+					return true
+				}
+			}
+			for _, sf := range v.StructFields {
+				if c.containsOpaqueForeign(sf.Type, seen) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (c *emitCtx) emitAggregateTypedefs() {
+	// 前置标签声明支撑自引用指针结构体 (如 *mut Node)
+	for _, tid := range c.layout.OrderedTypes {
+		lay := c.layout.Layouts[tid]
+		if lay == nil || !lay.NeedsTypedef || lay.IsZST || lay.IsStrView || lay.IsStringType || lay.IsUnitOnlyEnum {
+			continue
+		}
+		if lay.Kind == tir.TypeStruct || lay.Kind == tir.TypeTuple {
+			tag := strings.TrimSuffix(lay.CName, "_t")
+			c.writeLine(fmt.Sprintf("typedef struct %s %s;", tag, lay.CName))
+		}
+	}
+
+	emittedCount := 0
+	for _, tid := range c.layout.OrderedTypes {
+		lay := c.layout.Layouts[tid]
+		if lay == nil || !lay.NeedsTypedef || lay.IsStrView || lay.IsStringType {
+			continue
+		}
+		if lay.CName == "_won_zst_t" {
+			continue
+		}
+		hasOpaque := c.containsOpaqueForeign(tid, make(map[tir.TypeID]bool, 8))
+		switch lay.Kind {
+		case tir.TypeStruct, tir.TypeTuple:
+			if lay.IsZST {
+				continue
+			}
+			tag := strings.TrimSuffix(lay.CName, "_t")
+			c.writeLine(fmt.Sprintf("struct %s {", tag))
+			c.indent++
+			for _, pIdx := range lay.PhysicalFields {
+				fl := lay.Fields[pIdx]
+				fC, _ := c.typeCName(fl.Type, PosValue)
+				c.writeLine(fmt.Sprintf("%s %s;", fC, fl.CName))
+			}
+			c.indent--
+			c.writeLine("};")
+			if !hasOpaque {
+				c.writeLine(fmt.Sprintf(`_Static_assert(sizeof(%s) == %d && _Alignof(%s) == %d, "L2 aggregate layout mismatch");`,
+					lay.CName, lay.Size, lay.CName, lay.Align))
+			}
+			emittedCount++
+
+		case tir.TypeArray:
+			if lay.IsZST || lay.ArrayLen == 0 {
+				c.writeLine(fmt.Sprintf("typedef struct { uint8_t _zst; } %s;", lay.CName))
+			} else {
+				elemC, _ := c.typeCName(lay.ElemType, PosValue)
+				c.writeLine(fmt.Sprintf("typedef struct { %s elems[%d]; } %s;", elemC, lay.ArrayLen, lay.CName))
+				if !hasOpaque {
+					c.writeLine(fmt.Sprintf(`_Static_assert(sizeof(%s) == %d && _Alignof(%s) == %d, "array layout mismatch");`,
+						lay.CName, lay.Size, lay.CName, lay.Align))
+				}
+			}
+			emittedCount++
+
+		case tir.TypeEnum:
+			if lay.IsUninhabited {
+				c.writeLine(fmt.Sprintf("typedef struct { uint8_t _uninhabited; } %s;", lay.CName))
+			} else if lay.IsUnitOnlyEnum {
+				c.writeLine(fmt.Sprintf("typedef %s %s;", lay.TagCType, lay.CName))
+				c.writeLine(fmt.Sprintf(`_Static_assert(sizeof(%s) == %d && _Alignof(%s) == %d, "unit enum layout mismatch");`,
+					lay.CName, lay.Size, lay.CName, lay.Align))
+			} else {
+				c.writeLine("typedef struct {")
+				c.indent++
+				c.writeLine(fmt.Sprintf("%s tag;", lay.TagCType))
+				c.writeLine("union {")
+				c.indent++
+				for _, vl := range lay.Variants {
+					if !vl.HasPayload {
+						continue
+					}
+					c.writeLine("struct {")
+					c.indent++
+					for _, pIdx := range vl.PhysicalFields {
+						fl := vl.Fields[pIdx]
+						fC, _ := c.typeCName(fl.Type, PosValue)
+						c.writeLine(fmt.Sprintf("%s %s;", fC, fl.CName))
+					}
+					c.indent--
+					c.writeLine(fmt.Sprintf("} %s;", vl.CFieldName))
+				}
+				c.indent--
+				c.writeLine("} payload;")
+				c.indent--
+				c.writeLine(fmt.Sprintf("} %s;", lay.CName))
+				if !hasOpaque {
+					c.writeLine(fmt.Sprintf(`_Static_assert(sizeof(%s) == %d && _Alignof(%s) == %d, "enum layout mismatch");`,
+						lay.CName, lay.Size, lay.CName, lay.Align))
+				}
+			}
+			emittedCount++
+		}
+	}
+	if emittedCount > 0 {
+		c.writeLine("")
+	}
+}
+
+func (c *emitCtx) emitDropGlues() error {
+	if len(c.prog.DropGlues) == 0 {
+		return nil
+	}
+	glueMap := make(map[tir.DropGlueID]tir.DropGlueDesc, len(c.prog.DropGlues))
+	for _, g := range c.prog.DropGlues {
+		glueMap[g.ID] = g
+	}
+	for _, g := range c.prog.DropGlues {
+		cTyp, err := c.typeCName(g.Type, PosLocal)
+		if err != nil {
+			return err
+		}
+		c.writeLine(fmt.Sprintf("static inline void _won_drop_glue_%d(%s* v);", g.ID, cTyp))
+	}
+	c.writeLine("")
+
+	for _, g := range c.prog.DropGlues {
+		cTyp, err := c.typeCName(g.Type, PosLocal)
+		if err != nil {
+			return err
+		}
+		lay, err := c.layoutOf(g.Type)
+		if err != nil {
+			return err
+		}
+		c.writeLine(fmt.Sprintf("static inline void _won_drop_glue_%d(%s* v) {", g.ID, cTyp))
+		c.indent++
+		c.writeLine("if (v == NULL) return;")
+		switch g.Kind {
+		case tir.GlueForeignResource:
+			_, releaseC, okSym := splitForeignSymbol(g.ReleaseSymbol)
+			if !okSym {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("Drop 释放符号 '%s' 非法", g.ReleaseSymbol), tir.SourceSpan{}, "")
+			}
+			c.writeLine(fmt.Sprintf("%s(*v);", releaseC))
+
+		case tir.GlueStruct:
+			// 严格按照逻辑声明 Index 升序（0..N-1）逐字段析构，绝不依物理 L2 顺序
+			fields := append([]tir.DropGlueField(nil), g.Fields...)
+			sortDropFieldsByIndex(fields)
+			for _, f := range fields {
+				if f.GlueID == tir.InvalidDropGlue {
+					continue
+				}
+				if f.Index < 0 || f.Index >= len(lay.Fields) || lay.Fields[f.Index].Omitted {
+					continue
+				}
+				fl := lay.Fields[f.Index]
+				c.writeLine(fmt.Sprintf("_won_drop_glue_%d(&(v->%s));", f.GlueID, fl.CName))
+			}
+
+		case tir.GlueTuple:
+			elems := append([]tir.DropGlueElem(nil), g.TupleElems...)
+			sortDropElemsByIndex(elems)
+			for _, el := range elems {
+				if el.GlueID == tir.InvalidDropGlue {
+					continue
+				}
+				if el.Index < 0 || el.Index >= len(lay.Fields) || lay.Fields[el.Index].Omitted {
+					continue
+				}
+				fl := lay.Fields[el.Index]
+				c.writeLine(fmt.Sprintf("_won_drop_glue_%d(&(v->%s));", el.GlueID, fl.CName))
+			}
+
+		case tir.GlueArray:
+			if g.ElemGlueID != tir.InvalidDropGlue && !lay.IsZST && lay.ArrayLen > 0 {
+				c.writeLine(fmt.Sprintf("for (size_t _i = 0; _i < ((size_t)UINT64_C(%d)); ++_i) {", lay.ArrayLen))
+				c.indent++
+				c.writeLine(fmt.Sprintf("_won_drop_glue_%d(&(v->elems[_i]));", g.ElemGlueID))
+				c.indent--
+				c.writeLine("}")
+			}
+
+		case tir.GlueEnum:
+			if !lay.IsUninhabited && !lay.IsUnitOnlyEnum {
+				c.writeLine("switch (v->tag) {")
+				for _, gv := range g.Variants {
+					if gv.Index < 0 || gv.Index >= len(lay.Variants) {
+						continue
+					}
+					vl := lay.Variants[gv.Index]
+					if !vl.HasPayload {
+						continue
+					}
+					c.writeLine(fmt.Sprintf("case ((%s)UINT64_C(%d)): {", lay.TagCType, vl.Discriminant))
+					c.indent++
+					if vl.IsStructVariant {
+						fields := append([]tir.DropGlueField(nil), gv.StructFields...)
+						sortDropFieldsByIndex(fields)
+						for _, f := range fields {
+							if f.GlueID == tir.InvalidDropGlue || f.Index < 0 || f.Index >= len(vl.Fields) || vl.Fields[f.Index].Omitted {
+								continue
+							}
+							c.writeLine(fmt.Sprintf("_won_drop_glue_%d(&(v->payload.%s.%s));", f.GlueID, vl.CFieldName, vl.Fields[f.Index].CName))
+						}
+					} else {
+						elems := append([]tir.DropGlueElem(nil), gv.TupleElems...)
+						sortDropElemsByIndex(elems)
+						for _, el := range elems {
+							if el.GlueID == tir.InvalidDropGlue || el.Index < 0 || el.Index >= len(vl.Fields) || vl.Fields[el.Index].Omitted {
+								continue
+							}
+							c.writeLine(fmt.Sprintf("_won_drop_glue_%d(&(v->payload.%s.%s));", el.GlueID, vl.CFieldName, vl.Fields[el.Index].CName))
+						}
+					}
+					c.writeLine("break;")
+					c.indent--
+					c.writeLine("}")
+				}
+				c.writeLine("default: break;")
+				c.writeLine("}")
+			}
+		}
+		c.indent--
+		c.writeLine("}")
+		c.writeLine("")
+	}
+	return nil
+}
+
+func sortDropFieldsByIndex(fields []tir.DropGlueField) {
+	for i := 1; i < len(fields); i++ {
+		for j := i; j > 0 && fields[j].Index < fields[j-1].Index; j-- {
+			fields[j], fields[j-1] = fields[j-1], fields[j]
+		}
+	}
+}
+
+func sortDropElemsByIndex(elems []tir.DropGlueElem) {
+	for i := 1; i < len(elems); i++ {
+		for j := i; j > 0 && elems[j].Index < elems[j-1].Index; j-- {
+			elems[j], elems[j-1] = elems[j-1], elems[j]
+		}
+	}
 }
 
 func (c *emitCtx) emitHeaderIncludes() {
@@ -267,8 +691,10 @@ type fnEmitState struct {
 	foldNegConst    map[tir.ValueID]*big.Int // OpUnary(- constInt) -> 折叠后的精确常量值
 	skipConstVal    map[tir.ValueID]bool     // 被折叠消费的独立 OpConst，无需发射
 	arrayRepeatVal  map[tir.ValueID]tir.Instruction
+	inPlaceArrRep   map[tir.ValueID]bool
 	staticStrVal    map[tir.ValueID]string
 	hasStaticStrVal map[tir.ValueID]bool
+	downcastVariant map[tir.ValueID]int
 	declaredVal     map[tir.ValueID]bool
 	usedLocal       map[tir.LocalID]bool
 	localRead       map[tir.LocalID]bool
@@ -295,8 +721,10 @@ func (c *emitCtx) emitFunction(fn *tir.Function) error {
 		foldNegConst:    make(map[tir.ValueID]*big.Int),
 		skipConstVal:    make(map[tir.ValueID]bool),
 		arrayRepeatVal:  make(map[tir.ValueID]tir.Instruction),
+		inPlaceArrRep:   make(map[tir.ValueID]bool),
 		staticStrVal:    make(map[tir.ValueID]string),
 		hasStaticStrVal: make(map[tir.ValueID]bool),
+		downcastVariant: make(map[tir.ValueID]int),
 		declaredVal:     make(map[tir.ValueID]bool, len(fn.Values)),
 		usedLocal:       make(map[tir.LocalID]bool, len(fn.Locals)),
 		localRead:       make(map[tir.LocalID]bool, len(fn.Locals)),
@@ -317,9 +745,16 @@ func (c *emitCtx) emitFunction(fn *tir.Function) error {
 	c.writeLine(sig + " {")
 	c.indent++
 
-	// 1. 消除未引用形参的 -Werror=unused-parameter 告警
+	// 1. 消除未引用或 ZST 形参的 -Werror=unused-parameter 告警
 	for _, ld := range fn.Locals {
-		if ld.IsParam && !fs.usedLocal[ld.ID] {
+		if !ld.IsParam {
+			continue
+		}
+		isZST := false
+		if lay, err := c.layoutOf(ld.Type); err == nil && (lay.IsZST || lay.LogicalZeroSized) {
+			isZST = true
+		}
+		if !fs.usedLocal[ld.ID] || !fs.localRead[ld.ID] || isZST {
 			c.writeLine(fmt.Sprintf("(void)%s;", fs.localNames[ld.ID]))
 		}
 	}
@@ -346,41 +781,21 @@ func (c *emitCtx) emitFunction(fn *tir.Function) error {
 		c.writeLine(fmt.Sprintf("bool %s = %s;", dropFlagCVarName(df.ID), initStr))
 	}
 
-	// 4. 声明所有非 unit / 非阵列表达式占位临时寄存器变量
+	// 4. 声明所有非 unit 表达式占位临时寄存器变量
 	for _, vd := range fn.Values {
-		if fs.skipConstVal[vd.ID] {
+		if fs.skipConstVal[vd.ID] || fs.inPlaceArrRep[vd.ID] {
 			continue
 		}
-		if _, isArrRep := fs.arrayRepeatVal[vd.ID]; isArrRep {
+		if c.tt.Info(vd.Type).Kind == tir.TypeUnit {
 			continue
 		}
-		if c.tt.Info(vd.Type).Kind == tir.TypeUnit || isScalarArrayType(c.tt, vd.Type) {
-			continue
-		}
-		// 检查是否在可达块内被实际读取（含 OpValueAssign 目标，防止产生 -Werror=unused-but-set-variable）
+		// 检查是否在可达块内被实际读取（防止产生 -Werror=unused-but-set-variable）
 		if fs.valUses[vd.ID] == 0 {
 			continue
 		}
-		var cTyp string
-		if isU8SliceRef(c.tt, vd.Type) {
-			cTyp = "const uint8_t*"
-		} else if c.tt.Info(vd.Type).Kind == tir.TypeRef && isScalarArrayType(c.tt, c.tt.Info(vd.Type).Elem) {
-			arrTi := c.tt.Info(c.tt.Info(vd.Type).Elem)
-			elemC, err := MapType(c.tt, arrTi.Elem, PosValue)
-			if err != nil {
-				return err
-			}
-			if c.tt.Info(vd.Type).IsMut {
-				cTyp = elemC + "*"
-			} else {
-				cTyp = "const " + elemC + "*"
-			}
-		} else {
-			var err error
-			cTyp, err = MapType(c.tt, vd.Type, PosValue)
-			if err != nil {
-				return err
-			}
+		cTyp, err := c.typeCName(vd.Type, PosValue)
+		if err != nil {
+			return err
 		}
 		zeroInit, err := c.zeroInitExpr(vd.Type)
 		if err != nil {
@@ -439,11 +854,20 @@ func (c *emitCtx) zeroInitExpr(tid tir.TypeID) (string, error) {
 	case tir.TypeRawPtr:
 		return "NULL", nil
 	case tir.TypeRef:
-		return "NULL", nil
-	case tir.TypeStruct:
-		if ti.IsOpaqueForeign {
+		if c.tt.Info(ti.Elem).Kind == tir.TypeStr {
 			return "{0}", nil
 		}
+		if isU8SliceRef(c.tt, tid) {
+			return "NULL", nil
+		}
+		return "NULL", nil
+	case tir.TypeEnum:
+		if c.layout != nil {
+			if lay := c.layout.Layouts[tid]; lay != nil && lay.IsUnitOnlyEnum {
+				return "0", nil
+			}
+		}
+		return "{0}", nil
 	}
 	return "{0}", nil
 }
@@ -455,16 +879,7 @@ func (fs *fnEmitState) emitLocalDecl(ld tir.LocalDecl) error {
 		c.writeLine(fmt.Sprintf("const uint8_t* %s = NULL;", name))
 		return nil
 	}
-	if isScalarArrayType(c.tt, ld.Type) {
-		arrInfo := c.tt.Info(ld.Type)
-		elemC, err := MapType(c.tt, arrInfo.Elem, PosValue)
-		if err != nil {
-			return err
-		}
-		c.writeLine(fmt.Sprintf("%s %s[%d] = {0};", elemC, name, arrInfo.ArrayLen))
-		return nil
-	}
-	cTyp, err := MapType(c.tt, ld.Type, PosLocal)
+	cTyp, err := c.typeCName(ld.Type, PosLocal)
 	if err != nil {
 		return err
 	}
@@ -473,6 +888,9 @@ func (fs *fnEmitState) emitLocalDecl(ld tir.LocalDecl) error {
 		return err
 	}
 	c.writeLine(fmt.Sprintf("%s %s = %s;", cTyp, name, zeroInit))
+	if lay, err := c.layoutOf(ld.Type); err == nil && (lay.IsZST || lay.LogicalZeroSized) {
+		c.writeLine(fmt.Sprintf("(void)%s;", name))
+	}
 	return nil
 }
 
@@ -513,6 +931,22 @@ func (fs *fnEmitState) analyzeCFGAndUses() {
 		}
 	}
 
+	markPlaceDynIndices := func(p tir.Place) {
+		if p.Local != tir.InvalidLocal {
+			fs.usedLocal[p.Local] = true
+		}
+		for _, pr := range p.Projections {
+			if pr.Kind == tir.ProjDynIndex {
+				if pr.IndexValue != tir.InvalidValue {
+					fs.valUses[pr.IndexValue]++
+				} else if pr.IndexLocal != tir.InvalidLocal {
+					fs.usedLocal[pr.IndexLocal] = true
+					fs.localRead[pr.IndexLocal] = true
+				}
+			}
+		}
+	}
+
 	markOperand := func(op tir.Operand) {
 		switch op.Kind {
 		case tir.OperandValue:
@@ -522,6 +956,7 @@ func (fs *fnEmitState) analyzeCFGAndUses() {
 				fs.usedLocal[op.Place.Local] = true
 				fs.localRead[op.Place.Local] = true
 			}
+			markPlaceDynIndices(op.Place)
 		}
 	}
 
@@ -555,7 +990,8 @@ func (fs *fnEmitState) analyzeCFGAndUses() {
 		}
 	}
 
-	// Pass 2: 统计被真正读取的值与局部槽位（跳过内联 println 字面串及 memset 零数组常量元素）
+	// Pass 2: 统计被真正读取的值与局部槽位（跳过内联 println 字面串）
+	arrRepDirectInit := make(map[tir.ValueID]int)
 	for _, b := range fs.fn.Blocks {
 		if b == nil || !fs.reachable[b.ID] {
 			continue
@@ -564,13 +1000,28 @@ func (fs *fnEmitState) analyzeCFGAndUses() {
 			switch inst.Kind {
 			case tir.OpCopy, tir.OpMove, tir.OpLoad, tir.OpBorrow, tir.OpDrop, tir.OpCondDrop, tir.OpOwnershipTransfer:
 				if inst.Place.Local != tir.InvalidLocal {
+					fs.usedLocal[inst.Place.Local] = true
 					fs.localRead[inst.Place.Local] = true
 				}
-			case tir.OpUnary, tir.OpCast, tir.OpInit, tir.OpAssign, tir.OpStore, tir.OpExtract, tir.OpValueAssign:
+				markPlaceDynIndices(inst.Place)
+			case tir.OpUnary, tir.OpCast, tir.OpValueAssign:
+				markOperand(inst.Src)
+			case tir.OpInit, tir.OpAssign, tir.OpStore:
 				if len(inst.Place.Projections) > 0 && inst.Place.Local != tir.InvalidLocal {
 					fs.localRead[inst.Place.Local] = true
 				}
+				markPlaceDynIndices(inst.Place)
 				markOperand(inst.Src)
+				if inst.Kind == tir.OpInit && len(inst.Place.Projections) == 0 && inst.Src.Kind == tir.OperandValue {
+					if _, isRep := fs.arrayRepeatVal[inst.Src.Value]; isRep {
+						arrRepDirectInit[inst.Src.Value]++
+					}
+				}
+			case tir.OpExtract:
+				markOperand(inst.Src)
+				if inst.ExtractProj.Kind == tir.ProjDynIndex && inst.ExtractProj.IndexValue != tir.InvalidValue {
+					fs.valUses[inst.ExtractProj.IndexValue]++
+				}
 			case tir.OpBinary:
 				markOperand(inst.Left)
 				markOperand(inst.Right)
@@ -590,6 +1041,7 @@ func (fs *fnEmitState) analyzeCFGAndUses() {
 						fs.usedLocal[ap.Local] = true
 						fs.localRead[ap.Local] = true
 					}
+					markPlaceDynIndices(ap)
 				}
 			case tir.OpBuiltinCall:
 				for _, a := range inst.Args {
@@ -616,6 +1068,13 @@ func (fs *fnEmitState) analyzeCFGAndUses() {
 			if term.ReturnVal != nil {
 				markOperand(*term.ReturnVal)
 			}
+		}
+	}
+
+	// 单次直接初始化局部变量的 AggArrayRepeat 启用零拷贝原地展开（如 1MB 缓冲区 memset）
+	for vid, cnt := range arrRepDirectInit {
+		if cnt == 1 && fs.valUses[vid] == 1 {
+			fs.inPlaceArrRep[vid] = true
 		}
 	}
 
@@ -709,7 +1168,9 @@ func (fs *fnEmitState) emitInstruction(inst tir.Instruction) error {
 		if !fs.declaredVal[inst.Dest] {
 			return nil
 		}
-		c.writeLine(fmt.Sprintf("%s = %s;", valCTempName(inst.Dest), quoteCString(inst.Const.StrVal)))
+		litSym := c.registerStringLit(inst.Const.StrVal)
+		c.writeLine(fmt.Sprintf("%s = (_won_str_t){ .ptr = %s, .len = ((size_t)UINT64_C(%d)) };",
+			valCTempName(inst.Dest), litSym, len(inst.Const.StrVal)))
 		return nil
 
 	case tir.OpUnary:
@@ -780,22 +1241,29 @@ func (fs *fnEmitState) emitInstruction(inst tir.Instruction) error {
 		return nil
 
 	case tir.OpAggregateConstruct:
-		// AggArrayRepeat 由后续 OpInit / OpAssign 在目标栈数组槽位直接展开填充
-		if inst.AggKind == tir.AggArrayRepeat {
+		if inst.AggKind == tir.AggArrayRepeat && fs.inPlaceArrRep[inst.Dest] {
 			return nil
 		}
-		return newCapErr("WON-GEN-002", fmt.Sprintf("不支持的聚合构造 %s", inst.AggKind), inst.Span, "")
+		return fs.emitAggregateConstruct(inst)
 
 	case tir.OpCopy, tir.OpMove, tir.OpLoad:
 		if inst.Dest == tir.InvalidValue || !fs.declaredVal[inst.Dest] {
 			return nil
 		}
-		pExpr := fs.placeCExpr(inst.Place)
+		pExpr, isZST, isOmitted := fs.placeCExpr(inst.Place)
+		if isZST || isOmitted {
+			zTyp, err := c.typeCName(inst.Type, PosValue)
+			if err != nil {
+				return err
+			}
+			c.writeLine(fmt.Sprintf("%s = (%s){0};", valCTempName(inst.Dest), zTyp))
+			return nil
+		}
 		c.writeLine(fmt.Sprintf("%s = %s;", valCTempName(inst.Dest), pExpr))
 		return nil
 
 	case tir.OpInit, tir.OpAssign, tir.OpStore:
-		if isScalarArrayType(c.tt, inst.Type) {
+		if inst.Src.Kind == tir.OperandValue && fs.inPlaceArrRep[inst.Src.Value] {
 			if len(inst.Place.Projections) == 0 && !fs.localRead[inst.Place.Local] {
 				return nil
 			}
@@ -812,7 +1280,11 @@ func (fs *fnEmitState) emitInstruction(inst tir.Instruction) error {
 			c.writeLine(fmt.Sprintf("(void)(%s);", src))
 			return nil
 		}
-		pExpr := fs.placeCExpr(inst.Place)
+		pExpr, _, isOmitted := fs.placeCExpr(inst.Place)
+		if isOmitted {
+			c.writeLine(fmt.Sprintf("(void)(%s);", src))
+			return nil
+		}
 		c.writeLine(fmt.Sprintf("%s = %s;", pExpr, src))
 		return nil
 
@@ -821,34 +1293,36 @@ func (fs *fnEmitState) emitInstruction(inst tir.Instruction) error {
 			return nil
 		}
 		p := inst.Place
-		name := fs.localNames[p.Local]
-		// &[u8] .as_bytes() 别名在 C 侧直接表示为 const uint8_t*；&str 重借用亦保持 const char*
-		if len(p.Projections) == 1 && p.Projections[0].Kind == tir.ProjDeref &&
-			(fs.sliceAliases[p.Local] || (c.tt.Info(p.RootType).Kind == tir.TypeRef && c.tt.Info(c.tt.Info(p.RootType).Elem).Kind == tir.TypeStr)) {
-			c.writeLine(fmt.Sprintf("%s = %s;", valCTempName(inst.Dest), name))
+		// &[u8] .as_bytes() 别名与 &str 胖视图重借用：剥除尾部 ProjDeref 直接拷贝句柄/胖结构
+		if len(p.Projections) >= 1 && p.Projections[len(p.Projections)-1].Kind == tir.ProjDeref {
+			ti := c.tt.Info(inst.Type)
+			if fs.sliceAliases[p.Local] || (ti.Kind == tir.TypeRef && c.tt.Info(ti.Elem).Kind == tir.TypeStr) {
+				noDeref := p.Clone()
+				noDeref.Projections = noDeref.Projections[:len(noDeref.Projections)-1]
+				if len(noDeref.Projections) == 0 {
+					c.writeLine(fmt.Sprintf("%s = %s;", valCTempName(inst.Dest), fs.localNames[p.Local]))
+				} else {
+					baseExpr, _, _ := fs.placeCExpr(noDeref)
+					c.writeLine(fmt.Sprintf("%s = %s;", valCTempName(inst.Dest), baseExpr))
+				}
+				return nil
+			}
+		}
+		pExpr, _, isOmitted := fs.placeCExpr(p)
+		if isOmitted {
+			c.needZSTDummy = true
+			ptrC, err := c.typeCName(inst.Type, PosValue)
+			if err != nil {
+				return err
+			}
+			c.writeLine(fmt.Sprintf("%s = ((%s)(&(_won_zst_dummy)));", valCTempName(inst.Dest), ptrC))
 			return nil
 		}
-		// 栈定长数组名在 C 中自然退化为首元素指针，严禁对数组名取 `&arr` 产生 `T (*)[N]` 类型不匹配
-		if len(p.Projections) == 0 && isScalarArrayType(c.tt, p.ElemType) {
-			c.writeLine(fmt.Sprintf("%s = %s;", valCTempName(inst.Dest), name))
-			return nil
-		}
-		c.writeLine(fmt.Sprintf("%s = (&(%s));", valCTempName(inst.Dest), fs.placeCExpr(p)))
+		c.writeLine(fmt.Sprintf("%s = (&(%s));", valCTempName(inst.Dest), pExpr))
 		return nil
 
 	case tir.OpExtract:
-		if !fs.declaredVal[inst.Dest] {
-			return nil
-		}
-		src, err := fs.operandCExpr(inst.Src)
-		if err != nil {
-			return err
-		}
-		if inst.ExtractProj.Kind == tir.ProjDeref {
-			c.writeLine(fmt.Sprintf("%s = (*(%s));", valCTempName(inst.Dest), src))
-			return nil
-		}
-		return newCapErr("WON-GEN-002", fmt.Sprintf("成员抽取 (%v) 尚未实现", inst.ExtractProj.Kind), inst.Span, "")
+		return fs.emitExtract(inst)
 
 	case tir.OpCall:
 		return fs.emitCall(inst, inst.CalleeName)
@@ -862,7 +1336,8 @@ func (fs *fnEmitState) emitInstruction(inst tir.Instruction) error {
 	case tir.OpOwnershipTransfer:
 		// 若 @owned 移交承载原本的表达式寄存器目标，搬运句柄值供紧随的 OpForeignCall 使用；标志清理由 Drop 展开显式保证
 		if inst.Dest != tir.InvalidValue && fs.declaredVal[inst.Dest] {
-			c.writeLine(fmt.Sprintf("%s = %s;", valCTempName(inst.Dest), fs.placeCExpr(inst.Place)))
+			pExpr, _, _ := fs.placeCExpr(inst.Place)
+			c.writeLine(fmt.Sprintf("%s = %s;", valCTempName(inst.Dest), pExpr))
 		}
 		return nil
 
@@ -877,23 +1352,350 @@ func (fs *fnEmitState) emitInstruction(inst tir.Instruction) error {
 	}
 }
 
+func (fs *fnEmitState) emitAggregateConstruct(inst tir.Instruction) error {
+	c := fs.ctx
+	lay, err := c.layoutOf(inst.Type)
+	if err != nil {
+		return err
+	}
+	evalUnusedItems := func() error {
+		for _, it := range inst.AggItems {
+			s, err := fs.operandCExpr(it.Value)
+			if err != nil {
+				return err
+			}
+			c.writeLine(fmt.Sprintf("(void)(%s);", s))
+		}
+		return nil
+	}
+	if inst.Dest == tir.InvalidValue || !fs.declaredVal[inst.Dest] {
+		if lay.IsUninhabited {
+			c.writeLine("abort();")
+			return nil
+		}
+		return evalUnusedItems()
+	}
+
+	destVar := valCTempName(inst.Dest)
+	switch inst.AggKind {
+	case tir.AggStruct, tir.AggTuple:
+		c.writeLine(fmt.Sprintf("%s = (%s){0};", destVar, lay.CName))
+		for i, it := range inst.AggItems {
+			valExpr, err := fs.operandCExpr(it.Value)
+			if err != nil {
+				return err
+			}
+			fIdx := it.FieldIndex
+			if fIdx < 0 || fIdx >= len(lay.Fields) {
+				if it.FieldName != "" {
+					for fi, lf := range lay.Fields {
+						if lf.Name == it.FieldName {
+							fIdx = fi
+							break
+						}
+					}
+				} else if i < len(lay.Fields) {
+					fIdx = i
+				}
+			}
+			if fIdx < 0 || fIdx >= len(lay.Fields) || lay.Fields[fIdx].Omitted {
+				c.writeLine(fmt.Sprintf("(void)(%s);", valExpr))
+				continue
+			}
+			c.writeLine(fmt.Sprintf("%s.%s = %s;", destVar, lay.Fields[fIdx].CName, valExpr))
+		}
+		return nil
+
+	case tir.AggArray:
+		c.writeLine(fmt.Sprintf("%s = (%s){0};", destVar, lay.CName))
+		for i, it := range inst.AggItems {
+			valExpr, err := fs.operandCExpr(it.Value)
+			if err != nil {
+				return err
+			}
+			if lay.IsZST || i >= int(lay.ArrayLen) {
+				c.writeLine(fmt.Sprintf("(void)(%s);", valExpr))
+				continue
+			}
+			c.writeLine(fmt.Sprintf("%s.elems[%d] = %s;", destVar, i, valExpr))
+		}
+		return nil
+
+	case tir.AggArrayRepeat:
+		if len(inst.AggItems) != 1 {
+			return newCapErr("WON-GEN-002", "定长数组初始化缺少重复元素操作数", inst.Span, "")
+		}
+		elemOp := inst.AggItems[0].Value
+		if lay.IsZST || lay.ArrayLen == 0 {
+			c.writeLine(fmt.Sprintf("%s = (%s){0};", destVar, lay.CName))
+			if !fs.isZeroConstantOperand(elemOp) {
+				elemExpr, err := fs.operandCExpr(elemOp)
+				if err != nil {
+					return err
+				}
+				c.writeLine(fmt.Sprintf("(void)(%s);", elemExpr))
+			}
+			return nil
+		}
+		if fs.isZeroConstantOperand(elemOp) {
+			c.writeLine(fmt.Sprintf("memset(&(%s), 0, sizeof(%s));", destVar, destVar))
+			return nil
+		}
+		elemExpr, err := fs.operandCExpr(elemOp)
+		if err != nil {
+			return err
+		}
+		elemC, err := c.typeCName(lay.ElemType, PosValue)
+		if err != nil {
+			return err
+		}
+		c.writeLine("{")
+		c.indent++
+		c.writeLine(fmt.Sprintf("%s _won_rep_val = %s;", elemC, elemExpr))
+		c.writeLine(fmt.Sprintf("for (size_t _won_i = 0; _won_i < ((size_t)UINT64_C(%d)); ++_won_i) { %s.elems[_won_i] = _won_rep_val; }", lay.ArrayLen, destVar))
+		c.indent--
+		c.writeLine("}")
+		return nil
+
+	case tir.AggEnumVariant:
+		if lay.IsUninhabited || inst.VariantIdx < 0 || inst.VariantIdx >= len(lay.Variants) {
+			c.writeLine("abort();")
+			return evalUnusedItems()
+		}
+		vl := lay.Variants[inst.VariantIdx]
+		if lay.IsUnitOnlyEnum {
+			c.writeLine(fmt.Sprintf("%s = ((%s)UINT64_C(%d));", destVar, lay.CName, vl.Discriminant))
+			return evalUnusedItems()
+		}
+		c.writeLine(fmt.Sprintf("%s = (%s){0};", destVar, lay.CName))
+		c.writeLine(fmt.Sprintf("%s.tag = ((%s)UINT64_C(%d));", destVar, lay.TagCType, vl.Discriminant))
+		for i, it := range inst.AggItems {
+			valExpr, err := fs.operandCExpr(it.Value)
+			if err != nil {
+				return err
+			}
+			fIdx := it.FieldIndex
+			if fIdx < 0 || fIdx >= len(vl.Fields) {
+				if it.FieldName != "" {
+					for fi, lf := range vl.Fields {
+						if lf.Name == it.FieldName {
+							fIdx = fi
+							break
+						}
+					}
+				} else if i < len(vl.Fields) {
+					fIdx = i
+				}
+			}
+			if !vl.HasPayload || fIdx < 0 || fIdx >= len(vl.Fields) || vl.Fields[fIdx].Omitted {
+				c.writeLine(fmt.Sprintf("(void)(%s);", valExpr))
+				continue
+			}
+			c.writeLine(fmt.Sprintf("%s.payload.%s.%s = %s;", destVar, vl.CFieldName, vl.Fields[fIdx].CName, valExpr))
+		}
+		return nil
+	}
+	return newCapErr("WON-GEN-002", fmt.Sprintf("不支持的聚合构造 %s", inst.AggKind), inst.Span, "")
+}
+
+func (fs *fnEmitState) emitExtract(inst tir.Instruction) error {
+	c := fs.ctx
+	if inst.ExtractProj.Kind == tir.ProjDowncast {
+		fs.downcastVariant[inst.Dest] = inst.ExtractProj.VariantIndex
+	}
+	if !fs.declaredVal[inst.Dest] {
+		return nil
+	}
+	srcExpr, err := fs.operandCExpr(inst.Src)
+	if err != nil {
+		return err
+	}
+	destVar := valCTempName(inst.Dest)
+	srcBase := derefTypeIfRef(c.tt, inst.Src.Type)
+	srcRefDeref := srcBase != inst.Src.Type
+	srcValExpr := srcExpr
+	if srcRefDeref {
+		srcValExpr = fmt.Sprintf("(*(%s))", srcExpr)
+	}
+
+	switch inst.ExtractProj.Kind {
+	case tir.ProjDeref:
+		c.writeLine(fmt.Sprintf("%s = (*(%s));", destVar, srcExpr))
+		return nil
+
+	case tir.ProjDowncast:
+		c.writeLine(fmt.Sprintf("%s = %s;", destVar, srcValExpr))
+		return nil
+
+	case tir.ProjField, tir.ProjTupleField:
+		lay, err := c.layoutOf(srcBase)
+		if err != nil {
+			return err
+		}
+		var fl *FieldLayout
+		vIdx, isDowncast := fs.downcastVariant[inst.Src.Value]
+		if !isDowncast {
+			vIdx = -1
+		}
+		var fieldPrefix string
+		if lay.Kind == tir.TypeEnum && vIdx >= 0 && vIdx < len(lay.Variants) {
+			vl := lay.Variants[vIdx]
+			fl = findVariantFieldLayout(&vl, inst.ExtractProj)
+			fieldPrefix = fmt.Sprintf(".payload.%s", vl.CFieldName)
+		} else {
+			fl = findStructOrTupleFieldLayout(lay, inst.ExtractProj)
+		}
+		if fl == nil || fl.Omitted {
+			c.writeLine(fmt.Sprintf("(void)(%s);", srcValExpr))
+			c.writeLine(fmt.Sprintf("%s = (_won_zst_t){0};", destVar))
+			return nil
+		}
+		c.writeLine(fmt.Sprintf("%s = (%s)%s.%s;", destVar, srcValExpr, fieldPrefix, fl.CName))
+		return nil
+
+	case tir.ProjConstIndex:
+		lay, err := c.layoutOf(srcBase)
+		if err != nil {
+			return err
+		}
+		if lay.IsZST {
+			c.writeLine(fmt.Sprintf("(void)(%s);", srcValExpr))
+			c.writeLine(fmt.Sprintf("%s = (_won_zst_t){0};", destVar))
+			return nil
+		}
+		if inst.ExtractProj.ConstIndex < 0 || inst.ExtractProj.ConstIndex >= lay.ArrayLen {
+			c.needBoundsS = true
+			c.writeLine(fmt.Sprintf("%s = (%s).elems[_won_chk_idx_s(INT64_C(%d), ((size_t)UINT64_C(%d)))];",
+				destVar, srcValExpr, inst.ExtractProj.ConstIndex, lay.ArrayLen))
+			return nil
+		}
+		c.writeLine(fmt.Sprintf("%s = (%s).elems[UINT64_C(%d)];", destVar, srcValExpr, inst.ExtractProj.ConstIndex))
+		return nil
+
+	case tir.ProjDynIndex:
+		lay, err := c.layoutOf(srcBase)
+		if err != nil {
+			return err
+		}
+		idxExpr, err := fs.dynIndexCExpr(inst.ExtractProj, lay.ArrayLen)
+		if err != nil {
+			return err
+		}
+		if lay.IsZST {
+			c.writeLine(fmt.Sprintf("(void)(%s);", idxExpr))
+			c.writeLine(fmt.Sprintf("(void)(%s);", srcValExpr))
+			c.writeLine(fmt.Sprintf("%s = (_won_zst_t){0};", destVar))
+			return nil
+		}
+		c.writeLine(fmt.Sprintf("%s = (%s).elems[%s];", destVar, srcValExpr, idxExpr))
+		return nil
+
+	default:
+		return newCapErr("WON-GEN-002", fmt.Sprintf("成员抽取 (%v) 尚未实现", inst.ExtractProj.Kind), inst.Span, "")
+	}
+}
+
+func (fs *fnEmitState) dynIndexCExpr(proj tir.Projection, arrLen int64) (string, error) {
+	c := fs.ctx
+	var rawExpr string
+	var idxType tir.TypeID
+	if proj.IndexValue != tir.InvalidValue {
+		rawExpr = valCTempName(proj.IndexValue)
+		for _, vd := range fs.fn.Values {
+			if vd.ID == proj.IndexValue {
+				idxType = vd.Type
+				break
+			}
+		}
+	} else if proj.IndexLocal != tir.InvalidLocal {
+		rawExpr = fs.localNames[proj.IndexLocal]
+		idxType = fs.localMap[proj.IndexLocal].Type
+	} else {
+		return "", newCapErr("WON-GEN-002", "动态数组下标缺少索引源操作数", tir.SourceSpan{}, "")
+	}
+	ti := c.tt.Info(idxType)
+	if ti.Signed {
+		c.needBoundsS = true
+		return fmt.Sprintf("_won_chk_idx_s((int64_t)(%s), ((size_t)UINT64_C(%d)))", rawExpr, arrLen), nil
+	}
+	c.needBoundsU = true
+	return fmt.Sprintf("_won_chk_idx_u((uint64_t)(%s), ((size_t)UINT64_C(%d)))", rawExpr, arrLen), nil
+}
+
+func findStructOrTupleFieldLayout(lay *TypeLayout, proj tir.Projection) *FieldLayout {
+	if lay == nil {
+		return nil
+	}
+	if proj.FieldName != "" {
+		for i := range lay.Fields {
+			if lay.Fields[i].Name == proj.FieldName {
+				return &lay.Fields[i]
+			}
+		}
+	}
+	if proj.FieldIndex >= 0 && proj.FieldIndex < len(lay.Fields) {
+		return &lay.Fields[proj.FieldIndex]
+	}
+	return nil
+}
+
+func findVariantFieldLayout(vl *VariantLayout, proj tir.Projection) *FieldLayout {
+	if vl == nil {
+		return nil
+	}
+	if proj.FieldName != "" {
+		for i := range vl.Fields {
+			if vl.Fields[i].Name == proj.FieldName {
+				return &vl.Fields[i]
+			}
+		}
+	}
+	if proj.FieldIndex >= 0 && proj.FieldIndex < len(vl.Fields) {
+		return &vl.Fields[proj.FieldIndex]
+	}
+	return nil
+}
+
 func (fs *fnEmitState) emitArrayInit(inst tir.Instruction) error {
 	c := fs.ctx
 	agg, ok := fs.arrayRepeatVal[inst.Src.Value]
 	if !ok || len(agg.AggItems) != 1 {
 		return newCapErr("WON-GEN-002", "定长数组初始化缺少重复元素操作数", inst.Span, "")
 	}
-	targetName := fs.placeCExpr(inst.Place)
+	targetName, _, isOmitted := fs.placeCExpr(inst.Place)
 	elemOp := agg.AggItems[0].Value
+	if isOmitted {
+		if !fs.isZeroConstantOperand(elemOp) {
+			elemExpr, err := fs.operandCExpr(elemOp)
+			if err != nil {
+				return err
+			}
+			c.writeLine(fmt.Sprintf("(void)(%s);", elemExpr))
+		}
+		return nil
+	}
 	if fs.isZeroConstantOperand(elemOp) {
-		c.writeLine(fmt.Sprintf("memset(%s, 0, sizeof(%s));", targetName, targetName))
+		c.writeLine(fmt.Sprintf("memset(&(%s), 0, sizeof(%s));", targetName, targetName))
 		return nil
 	}
 	elemExpr, err := fs.operandCExpr(elemOp)
 	if err != nil {
 		return err
 	}
-	c.writeLine(fmt.Sprintf("for (size_t _won_i = 0; _won_i < ((size_t)UINT64_C(%d)); ++_won_i) { %s[_won_i] = %s; }", agg.RepeatLen, targetName, elemExpr))
+	lay, err := c.layoutOf(inst.Type)
+	if err != nil {
+		return err
+	}
+	elemC, err := c.typeCName(lay.ElemType, PosValue)
+	if err != nil {
+		return err
+	}
+	c.writeLine("{")
+	c.indent++
+	c.writeLine(fmt.Sprintf("%s _won_rep_val = %s;", elemC, elemExpr))
+	c.writeLine(fmt.Sprintf("for (size_t _won_i = 0; _won_i < ((size_t)UINT64_C(%d)); ++_won_i) { (%s).elems[_won_i] = _won_rep_val; }", agg.RepeatLen, targetName))
+	c.indent--
+	c.writeLine("}")
 	return nil
 }
 
@@ -1058,29 +1860,72 @@ func (fs *fnEmitState) emitBuiltinCall(inst tir.Instruction) error {
 		}
 		expr = fmt.Sprintf("won_bytes_equal(%s, %s, %s)", args[0], args[1], args[2])
 	case tir.BuiltinAsBytes:
-		expr = fmt.Sprintf("((const uint8_t*)(%s))", args[0])
+		argTi := c.tt.Info(inst.Args[0].Type)
+		if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeStr {
+			expr = fmt.Sprintf("((%s).ptr)", args[0])
+		} else {
+			expr = fmt.Sprintf("((const uint8_t*)(%s))", args[0])
+		}
 	case tir.BuiltinAsPtr:
 		argTi := c.tt.Info(inst.Args[0].Type)
-		if argTi.Kind == tir.TypeRef && isScalarArrayType(c.tt, argTi.Elem) {
-			elemC, err := MapType(c.tt, c.tt.Info(argTi.Elem).Elem, PosValue)
+		if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeStr {
+			expr = fmt.Sprintf("((%s).ptr)", args[0])
+		} else if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeArray {
+			arrLay, err := c.layoutOf(argTi.Elem)
 			if err != nil {
 				return err
 			}
-			expr = fmt.Sprintf("((const %s*)(%s))", elemC, args[0])
+			elemC, err := c.typeCName(arrLay.ElemType, PosValue)
+			if err != nil {
+				return err
+			}
+			if arrLay.IsZST || arrLay.ArrayLen == 0 {
+				c.needEmpty = true
+				expr = fmt.Sprintf("(((void)(%s), ((const %s*)_won_empty_bytes)))", args[0], elemC)
+			} else {
+				expr = fmt.Sprintf("((const %s*)((%s)->elems))", elemC, args[0])
+			}
 		} else {
 			expr = fmt.Sprintf("((const uint8_t*)(%s))", args[0])
 		}
 	case tir.BuiltinAsMutPtr:
 		argTi := c.tt.Info(inst.Args[0].Type)
-		elemC, err := MapType(c.tt, c.tt.Info(argTi.Elem).Elem, PosValue)
+		arrLay, err := c.layoutOf(argTi.Elem)
 		if err != nil {
 			return err
 		}
-		expr = fmt.Sprintf("((%s*)(%s))", elemC, args[0])
+		elemC, err := c.typeCName(arrLay.ElemType, PosValue)
+		if err != nil {
+			return err
+		}
+		if arrLay.IsZST || arrLay.ArrayLen == 0 {
+			c.needZSTDummy = true
+			expr = fmt.Sprintf("(((void)(%s), ((%s*)(&_won_zst_dummy))))", args[0], elemC)
+		} else {
+			expr = fmt.Sprintf("((%s*)((%s)->elems))", elemC, args[0])
+		}
 	case tir.BuiltinLen:
 		argTi := c.tt.Info(inst.Args[0].Type)
-		arrLen := c.tt.Info(argTi.Elem).ArrayLen
-		expr = fmt.Sprintf("UINT64_C(%d)", arrLen)
+		if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeStr {
+			expr = fmt.Sprintf("((%s).len)", args[0])
+		} else {
+			arrLen := c.tt.Info(argTi.Elem).ArrayLen
+			expr = fmt.Sprintf("(((void)(%s), ((size_t)UINT64_C(%d))))", args[0], arrLen)
+		}
+	case tir.BuiltinIsEmpty:
+		argTi := c.tt.Info(inst.Args[0].Type)
+		if argTi.Kind == tir.TypeRef && c.tt.Info(argTi.Elem).Kind == tir.TypeStr {
+			expr = fmt.Sprintf("(((%s).len) == 0)", args[0])
+		} else {
+			arrLen := c.tt.Info(argTi.Elem).ArrayLen
+			isZero := "false"
+			if arrLen == 0 {
+				isZero = "true"
+			}
+			expr = fmt.Sprintf("(((void)(%s), (%s)))", args[0], isZero)
+		}
+	case tir.BuiltinTryUnwrap:
+		return fs.emitTryUnwrapBuiltin(inst, args[0])
 	default:
 		return newCapErr("WON-GEN-002", fmt.Sprintf("内置调用 '%s' 尚未在当前 C11 后端实现", inst.CalleeName), inst.Span, "")
 	}
@@ -1090,6 +1935,59 @@ func (fs *fnEmitState) emitBuiltinCall(inst tir.Instruction) error {
 	} else {
 		c.writeLine(expr + ";")
 	}
+	return nil
+}
+
+func (fs *fnEmitState) emitTryUnwrapBuiltin(inst tir.Instruction, srcExpr string) error {
+	c := fs.ctx
+	srcLay, err := c.layoutOf(inst.Args[0].Type)
+	if err != nil {
+		return err
+	}
+	if inst.Dest == tir.InvalidValue || !fs.declaredVal[inst.Dest] {
+		c.writeLine(fmt.Sprintf("(void)(%s);", srcExpr))
+		return nil
+	}
+	destVar := valCTempName(inst.Dest)
+
+	if inst.CalleeName == "__try_propagate_err" {
+		retLay, err := c.layoutOf(inst.Type)
+		if err != nil {
+			return err
+		}
+		if len(retLay.Variants) < 2 || len(srcLay.Variants) < 2 {
+			return newCapErr("WON-GEN-002", "'?' 传播返回目标必须为 Option/Result 枚举", inst.Span, "")
+		}
+		retErr := retLay.Variants[1]
+		srcErr := srcLay.Variants[1]
+		if retLay.IsUnitOnlyEnum {
+			c.writeLine(fmt.Sprintf("(void)(%s);", srcExpr))
+			c.writeLine(fmt.Sprintf("%s = ((%s)UINT64_C(%d));", destVar, retLay.CName, retErr.Discriminant))
+			return nil
+		}
+		c.writeLine(fmt.Sprintf("%s = (%s){0};", destVar, retLay.CName))
+		c.writeLine(fmt.Sprintf("%s.tag = ((%s)UINT64_C(%d));", destVar, retLay.TagCType, retErr.Discriminant))
+		if retErr.HasPayload && srcErr.HasPayload && len(retErr.Fields) > 0 && len(srcErr.Fields) > 0 && !retErr.Fields[0].Omitted && !srcErr.Fields[0].Omitted {
+			c.writeLine(fmt.Sprintf("%s.payload.%s.%s = (%s).payload.%s.%s;",
+				destVar, retErr.CFieldName, retErr.Fields[0].CName,
+				srcExpr, srcErr.CFieldName, srcErr.Fields[0].CName))
+		} else {
+			c.writeLine(fmt.Sprintf("(void)(%s);", srcExpr))
+		}
+		return nil
+	}
+
+	// "__try_unwrap": 提取 Ok(T) / Some(T) 成功载荷 (VariantIdx = 0)
+	if len(srcLay.Variants) < 1 {
+		return newCapErr("WON-GEN-002", "'?' 解包操作数必须至少含 1 个变体", inst.Span, "")
+	}
+	okVar := srcLay.Variants[0]
+	if !okVar.HasPayload || len(okVar.Fields) == 0 || okVar.Fields[0].Omitted {
+		c.writeLine(fmt.Sprintf("(void)(%s);", srcExpr))
+		c.writeLine(fmt.Sprintf("%s = (_won_zst_t){0};", destVar))
+		return nil
+	}
+	c.writeLine(fmt.Sprintf("%s = (%s).payload.%s.%s;", destVar, srcExpr, okVar.CFieldName, okVar.Fields[0].CName))
 	return nil
 }
 
@@ -1113,8 +2011,8 @@ func (fs *fnEmitState) buildPrintlnExpr(argOps []tir.Operand, args []string) str
 		ti := c.tt.Info(argOp.Type)
 		switch {
 		case ti.Kind == tir.TypeRef && c.tt.Info(ti.Elem).Kind == tir.TypeStr:
-			format.WriteString("%s")
-			passArgs = append(passArgs, args[i])
+			format.WriteString("%.*s")
+			passArgs = append(passArgs, fmt.Sprintf("(int)((%s).len)", args[i]), fmt.Sprintf("(const char*)((%s).ptr)", args[i]))
 		case ti.Kind == tir.TypeBool:
 			format.WriteString("%s")
 			passArgs = append(passArgs, fmt.Sprintf("((%s) ? \"true\" : \"false\")", args[i]))
@@ -1146,34 +2044,29 @@ func (fs *fnEmitState) buildPrintlnExpr(argOps []tir.Operand, args []string) str
 }
 
 func (fs *fnEmitState) emitDrop(inst tir.Instruction) error {
-	g, ok := fs.glueMap[inst.GlueID]
-	if !ok || g.Kind != tir.GlueForeignResource {
-		return newCapErr("WON-GEN-002", fmt.Sprintf("Drop 指令引用未知或不支持胶水 g%d", inst.GlueID), inst.Span, "")
+	if _, ok := fs.glueMap[inst.GlueID]; !ok {
+		return newCapErr("WON-GEN-002", fmt.Sprintf("Drop 指令引用未知胶水 g%d", inst.GlueID), inst.Span, "")
 	}
-	_, releaseC, okSym := splitForeignSymbol(g.ReleaseSymbol)
-	if !okSym {
-		return newCapErr("WON-GEN-002", fmt.Sprintf("Drop 释放符号 '%s' 非法", g.ReleaseSymbol), inst.Span, "")
+	pExpr, _, isOmitted := fs.placeCExpr(inst.Place)
+	if isOmitted {
+		return nil
 	}
-	pExpr := fs.placeCExpr(inst.Place)
-	fs.ctx.writeLine(fmt.Sprintf("%s(%s);", releaseC, pExpr))
+	fs.ctx.writeLine(fmt.Sprintf("_won_drop_glue_%d(&(%s));", inst.GlueID, pExpr))
 	return nil
 }
 
 func (fs *fnEmitState) emitCondDrop(inst tir.Instruction) error {
-	g, ok := fs.glueMap[inst.GlueID]
-	if !ok || g.Kind != tir.GlueForeignResource {
-		return newCapErr("WON-GEN-002", fmt.Sprintf("CondDrop 指令引用未知或不支持胶水 g%d", inst.GlueID), inst.Span, "")
-	}
-	_, releaseC, okSym := splitForeignSymbol(g.ReleaseSymbol)
-	if !okSym {
-		return newCapErr("WON-GEN-002", fmt.Sprintf("CondDrop 释放符号 '%s' 非法", g.ReleaseSymbol), inst.Span, "")
+	if _, ok := fs.glueMap[inst.GlueID]; !ok {
+		return newCapErr("WON-GEN-002", fmt.Sprintf("CondDrop 指令引用未知胶水 g%d", inst.GlueID), inst.Span, "")
 	}
 	dfName := dropFlagCVarName(inst.FlagID)
-	pExpr := fs.placeCExpr(inst.Place)
+	pExpr, _, isOmitted := fs.placeCExpr(inst.Place)
 	c := fs.ctx
 	c.writeLine(fmt.Sprintf("if (%s) {", dfName))
 	c.indent++
-	c.writeLine(fmt.Sprintf("%s(%s);", releaseC, pExpr))
+	if !isOmitted {
+		c.writeLine(fmt.Sprintf("_won_drop_glue_%d(&(%s));", inst.GlueID, pExpr))
+	}
 	c.writeLine(fmt.Sprintf("%s = false;", dfName))
 	c.indent--
 	c.writeLine("}")
@@ -1195,6 +2088,9 @@ func (fs *fnEmitState) emitTerminator(term tir.Terminator) error {
 		c.writeLine(fmt.Sprintf("if (%s) goto won_bb_%d;", condStr, term.ThenBlock))
 		c.writeLine(fmt.Sprintf("goto won_bb_%d;", term.ElseBlock))
 		return nil
+
+	case tir.TermSwitch:
+		return fs.emitSwitchTerminator(term)
 
 	case tir.TermReturn:
 		if c.tt.Info(fs.fn.ReturnType).Kind == tir.TypeUnit {
@@ -1225,14 +2121,206 @@ func (fs *fnEmitState) emitTerminator(term tir.Terminator) error {
 	}
 }
 
-func (fs *fnEmitState) placeCExpr(p tir.Place) string {
-	expr := fs.localNames[p.Local]
-	for _, proj := range p.Projections {
-		if proj.Kind == tir.ProjDeref {
-			expr = fmt.Sprintf("(*(%s))", expr)
+func (fs *fnEmitState) emitSwitchTerminator(term tir.Terminator) error {
+	c := fs.ctx
+	condRaw, err := fs.operandCExpr(term.Cond)
+	if err != nil {
+		return err
+	}
+	condBaseType := derefTypeIfRef(c.tt, term.Cond.Type)
+	condExpr := condRaw
+	if condBaseType != term.Cond.Type {
+		condExpr = fmt.Sprintf("(*(%s))", condRaw)
+	}
+	ci := c.tt.Info(condBaseType)
+
+	if term.SwitchKind == tir.SwitchTry {
+		lay, err := c.layoutOf(condBaseType)
+		if err != nil || len(lay.Variants) < 2 {
+			return newCapErr("WON-GEN-002", "'?' 错误传播分发缺少合法枚举布局", term.Span, "")
+		}
+		tagExpr := condExpr
+		if !lay.IsUnitOnlyEnum {
+			tagExpr = fmt.Sprintf("(%s).tag", condExpr)
+		}
+		var okTarget, errTarget tir.BlockID = tir.InvalidBlock, tir.InvalidBlock
+		for _, sc := range term.Cases {
+			if sc.Kind == tir.CaseTryOk {
+				okTarget = sc.Target
+			} else if sc.Kind == tir.CaseTryErr {
+				errTarget = sc.Target
+			}
+		}
+		if okTarget == tir.InvalidBlock {
+			okTarget = term.DefaultBlk
+		}
+		if errTarget == tir.InvalidBlock {
+			errTarget = term.DefaultBlk
+		}
+		c.writeLine(fmt.Sprintf("if ((%s) == ((%s)UINT64_C(%d))) goto won_bb_%d;",
+			tagExpr, lay.TagCType, lay.Variants[0].Discriminant, okTarget))
+		if errTarget != tir.InvalidBlock {
+			c.writeLine(fmt.Sprintf("goto won_bb_%d;", errTarget))
+		} else {
+			c.writeLine("abort();")
+		}
+		return nil
+	}
+
+	var lay *TypeLayout
+	if ci.Kind == tir.TypeEnum {
+		lay, err = c.layoutOf(condBaseType)
+		if err != nil {
+			return err
 		}
 	}
-	return expr
+
+	fallbackEmitted := false
+	for _, sc := range term.Cases {
+		switch sc.Kind {
+		case tir.CaseEnumVariant:
+			if lay == nil || sc.VariantIndex < 0 || sc.VariantIndex >= len(lay.Variants) {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("Switch 枚举变体索引 %d 非法", sc.VariantIndex), term.Span, "")
+			}
+			tagExpr := condExpr
+			if !lay.IsUnitOnlyEnum {
+				tagExpr = fmt.Sprintf("(%s).tag", condExpr)
+			}
+			c.writeLine(fmt.Sprintf("if ((%s) == ((%s)UINT64_C(%d))) goto won_bb_%d;",
+				tagExpr, lay.TagCType, lay.Variants[sc.VariantIndex].Discriminant, sc.Target))
+
+		case tir.CaseInt:
+			var litStr string
+			switch ci.Kind {
+			case tir.TypeBool:
+				if sc.IntValue != 0 {
+					litStr = "true"
+				} else {
+					litStr = "false"
+				}
+			case tir.TypeChar:
+				litStr = fmt.Sprintf("((uint32_t)UINT32_C(%d))", uint32(sc.IntValue))
+			default:
+				litStr, err = fs.formatIntLiteral(big.NewInt(sc.IntValue), condBaseType)
+				if err != nil {
+					return err
+				}
+			}
+			c.writeLine(fmt.Sprintf("if ((%s) == (%s)) goto won_bb_%d;", condExpr, litStr, sc.Target))
+
+		case tir.CasePatternArm:
+			c.writeLine(fmt.Sprintf("(void)(%s);", condExpr))
+			c.writeLine(fmt.Sprintf("goto won_bb_%d;", sc.Target))
+			fallbackEmitted = true
+		}
+		if fallbackEmitted {
+			break
+		}
+	}
+	if !fallbackEmitted {
+		if term.DefaultBlk != tir.InvalidBlock {
+			c.writeLine(fmt.Sprintf("goto won_bb_%d;", term.DefaultBlk))
+		} else {
+			c.writeLine("abort();")
+		}
+	}
+	return nil
+}
+
+func (fs *fnEmitState) placeCExpr(p tir.Place) (expr string, isZST bool, isOmitted bool) {
+	c := fs.ctx
+	expr = fs.localNames[p.Local]
+	curType := p.RootType
+	activeVariant := -1
+	if fs.sliceAliases[p.Local] {
+		return expr, false, false
+	}
+
+	for _, proj := range p.Projections {
+		if proj.Kind != tir.ProjDeref && proj.Kind != tir.ProjDowncast {
+			base := derefTypeIfRef(c.tt, curType)
+			if base != curType {
+				curType = base
+				expr = fmt.Sprintf("(*(%s))", expr)
+			}
+		}
+		switch proj.Kind {
+		case tir.ProjDeref:
+			ti := c.tt.Info(curType)
+			if ti.Kind == tir.TypeRef || ti.Kind == tir.TypeRawPtr {
+				curType = ti.Elem
+			}
+			expr = fmt.Sprintf("(*(%s))", expr)
+			activeVariant = -1
+
+		case tir.ProjDowncast:
+			base := derefTypeIfRef(c.tt, curType)
+			if base != curType {
+				curType = base
+				expr = fmt.Sprintf("(*(%s))", expr)
+			}
+			activeVariant = proj.VariantIndex
+
+		case tir.ProjField, tir.ProjTupleField:
+			lay, err := c.layoutOf(curType)
+			if err != nil {
+				return expr, false, false
+			}
+			var fl *FieldLayout
+			fieldPrefix := ""
+			if lay.Kind == tir.TypeEnum && activeVariant >= 0 && activeVariant < len(lay.Variants) {
+				vl := lay.Variants[activeVariant]
+				fl = findVariantFieldLayout(&vl, proj)
+				fieldPrefix = fmt.Sprintf(".payload.%s", vl.CFieldName)
+			} else {
+				fl = findStructOrTupleFieldLayout(lay, proj)
+			}
+			activeVariant = -1
+			if fl == nil || fl.Omitted {
+				return expr, true, true
+			}
+			expr = fmt.Sprintf("((%s)%s.%s)", expr, fieldPrefix, fl.CName)
+			curType = fl.Type
+
+		case tir.ProjConstIndex:
+			lay, err := c.layoutOf(curType)
+			if err != nil {
+				return expr, false, false
+			}
+			activeVariant = -1
+			if lay.IsZST {
+				return expr, true, true
+			}
+			if proj.ConstIndex < 0 || proj.ConstIndex >= lay.ArrayLen {
+				c.needBoundsS = true
+				expr = fmt.Sprintf("((%s).elems[_won_chk_idx_s(INT64_C(%d), ((size_t)UINT64_C(%d)))])", expr, proj.ConstIndex, lay.ArrayLen)
+			} else {
+				expr = fmt.Sprintf("((%s).elems[UINT64_C(%d)])", expr, proj.ConstIndex)
+			}
+			curType = lay.ElemType
+
+		case tir.ProjDynIndex:
+			lay, err := c.layoutOf(curType)
+			if err != nil {
+				return expr, false, false
+			}
+			activeVariant = -1
+			idxExpr, err := fs.dynIndexCExpr(proj, lay.ArrayLen)
+			if err != nil {
+				return expr, false, false
+			}
+			if lay.IsZST {
+				return expr, true, true
+			}
+			expr = fmt.Sprintf("((%s).elems[%s])", expr, idxExpr)
+			curType = lay.ElemType
+		}
+	}
+
+	if lay, err := c.layoutOf(curType); err == nil && (lay.IsZST || lay.LogicalZeroSized) {
+		return expr, true, false
+	}
+	return expr, false, false
 }
 
 func (fs *fnEmitState) operandCExpr(op tir.Operand) (string, error) {
@@ -1242,7 +2330,15 @@ func (fs *fnEmitState) operandCExpr(op tir.Operand) (string, error) {
 	case tir.OperandConst:
 		return fs.constCExpr(op.Const, op.Type)
 	case tir.OperandPlace:
-		return fs.placeCExpr(op.Place), nil
+		expr, isZST, isOmitted := fs.placeCExpr(op.Place)
+		if isOmitted || isZST {
+			cTyp, err := fs.ctx.typeCName(op.Type, PosValue)
+			if err != nil {
+				return "(_won_zst_t){0}", nil
+			}
+			return fmt.Sprintf("(%s){0}", cTyp), nil
+		}
+		return expr, nil
 	default:
 		return "", fmt.Errorf("不支持的 TIR 操作数类型 (%d)", op.Kind)
 	}

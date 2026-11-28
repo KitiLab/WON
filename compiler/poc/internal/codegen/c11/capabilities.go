@@ -53,34 +53,15 @@ func ValidateProgram(prog *tir.Program, target Target) error {
 		}
 	}
 
-	// 1. 校验 DropGlue 目录：目前仅开放已完成契约验证与 C 符号解析的 GlueForeignResource
+	// 1. 校验 DropGlue 目录：支持经过验证的 FFI 句柄以及按声明序递归清理的结构体/元组/定长数组/枚举胶水；
+	// 严格拒止尚未开放的 String / CustomDrop / RegisteredResource 胶水。
 	glueMap := make(map[tir.DropGlueID]tir.DropGlueDesc, len(prog.DropGlues))
 	for _, g := range prog.DropGlues {
 		glueMap[g.ID] = g
-		if g.Kind != tir.GlueForeignResource {
-			return newCapErr(
-				"WON-GEN-002",
-				fmt.Sprintf("析构胶水 '%s' (%s, 类型 %s) 尚未在当前 C11 后端实现原生析构支持", g.CanonicalName, g.Kind, tt.Format(g.Type)),
-				firstSpan(prog),
-				"Phase 2C.1 优先验证经过完整 FFI 契约认证的外部不透明资源释放；String 与常规 ADT 析构需要独立布局与分配器契约。",
-			)
-		}
-		ns, cSym, ok := splitForeignSymbol(g.ReleaseSymbol)
-		if !ok || !isValidCIdentifier(cSym) || !validFFINS[ns] {
-			return newCapErr(
-				"WON-GEN-002",
-				fmt.Sprintf("外部资源析构胶水 '%s' 缺少有效 C 释放符号或未绑定合法头文件 (%q)", g.CanonicalName, g.ReleaseSymbol),
-				firstSpan(prog),
-				"受管外部资源必须通过已导入头文件与 FFI 契约目录明确提供可调用 C 释放符号。",
-			)
-		}
-		if _, err := MapType(tt, g.Type, PosLocal); err != nil {
-			return newCapErr(
-				"WON-GEN-002",
-				fmt.Sprintf("外部资源胶水 '%s' 目标类型 %s 暂不支持降低至 ISO C11: %v", g.CanonicalName, tt.Format(g.Type), err),
-				firstSpan(prog),
-				"",
-			)
+	}
+	for _, g := range prog.DropGlues {
+		if err := validateSupportedDropGlue(tt, g, glueMap, validFFINS, make(map[tir.DropGlueID]bool)); err != nil {
+			return err
 		}
 	}
 
@@ -139,13 +120,13 @@ func isU8SliceRef(tt *tir.TypeTable, tid tir.TypeID) bool {
 	return si.Kind == tir.TypeSlice && tt.Info(si.Elem).Kind == tir.TypeInt && !tt.Info(si.Elem).Signed && tt.Info(si.Elem).Bits == 8
 }
 
-func isScalarArrayType(tt *tir.TypeTable, tid tir.TypeID) bool {
-	ti := tt.Info(tid)
-	return ti.Kind == tir.TypeArray && ti.ArrayLen >= 0 && IsScalarOrChar(tt.Info(ti.Elem))
-}
-
 func validateFunctionCaps(prog *tir.Program, fn *tir.Function, glueMap map[tir.DropGlueID]tir.DropGlueDesc, validFFINS map[string]bool) error {
 	tt := prog.Types
+
+	// 校验函数名称必须为合法 C 标识符（拒止尚未支持代码生成的方法与关联函数，如 Point::new）
+	if !isValidCIdentifier(fn.Name) {
+		return newCapErr("WON-GEN-002", fmt.Sprintf("方法与关联函数 '%s' 尚未在当前 C11 后端实现代码生成", fn.Name), fn.Span, "")
+	}
 
 	// 检查泛型未单态化签名
 	if _, err := MapType(tt, fn.ReturnType, PosReturn); err != nil {
@@ -187,9 +168,6 @@ func validateFunctionCaps(prog *tir.Program, fn *tir.Function, glueMap map[tir.D
 		}
 		if isU8SliceRef(tt, ld.Type) {
 			return newCapErr("WON-GEN-002", fmt.Sprintf("局部变量 '%s' (&[u8]) 在当前 C11 后端仅允许由 .as_bytes() 初始化并仅用于 .as_ptr()", ld.Name), ld.Span, "")
-		}
-		if isScalarArrayType(tt, ld.Type) {
-			continue
 		}
 		if _, err := MapType(tt, ld.Type, PosLocal); err != nil {
 			return newCapErr("WON-GEN-002", fmt.Sprintf("局部变量 '%s' 类型 %s 不支持 C11 生成: %v", ld.Name, tt.Format(ld.Type), err), ld.Span, "")
@@ -355,7 +333,7 @@ func validateInstructionCaps(
 		}
 		if inst.BinaryOp == tir.BinEq || inst.BinaryOp == tir.BinNe {
 			if (lt.Kind == tir.TypeRef && tt.Info(lt.Elem).Kind == tir.TypeStr) ||
-				lt.Kind == tir.TypeUnit || lt.Kind == tir.TypeString || lt.Kind == tir.TypeEnum || lt.Kind == tir.TypeStruct {
+				lt.Kind == tir.TypeUnit || lt.Kind == tir.TypeString || lt.Kind == tir.TypeEnum || lt.Kind == tir.TypeStruct || lt.Kind == tir.TypeTuple || lt.Kind == tir.TypeArray {
 				if !(lt.Kind == tir.TypeStruct && lt.IsOpaqueForeign) {
 					return newCapErr("WON-GEN-002", fmt.Sprintf("类型 '%s' 的相等比较 '%s' 尚未在当前 C11 后端实现", tt.Format(inst.Left.Type), inst.BinaryOp), inst.Span, "")
 				}
@@ -370,28 +348,14 @@ func validateInstructionCaps(
 		if isU8SliceRef(tt, inst.Type) {
 			return nil
 		}
-		if tt.Info(inst.Type).Kind != tir.TypeUnit && !isScalarArrayType(tt, inst.Type) {
+		if tt.Info(inst.Type).Kind != tir.TypeUnit {
 			return checkNonReturnType(inst.Type, "汇合临时变量赋值")
 		}
 		return nil
 
 	case tir.OpInit, tir.OpAssign:
-		if len(inst.Place.Projections) > 0 {
-			for _, p := range inst.Place.Projections {
-				if p.Kind != tir.ProjDeref {
-					return newCapErr("WON-GEN-002", "成员字段或数组下标左值赋值尚未在 C11 后端实现", inst.Span, "")
-				}
-			}
-		}
-		if isScalarArrayType(tt, inst.Type) {
-			if inst.Src.Kind != tir.OperandValue {
-				return newCapErr("WON-GEN-002", "定长数组仅支持重复字面量初始化 [v; N]", inst.Span, "")
-			}
-			srcDef, ok := defInst[inst.Src.Value]
-			if !ok || srcDef.Kind != tir.OpAggregateConstruct || srcDef.AggKind != tir.AggArrayRepeat {
-				return newCapErr("WON-GEN-002", "定长数组仅支持重复字面量初始化 [v; N]", inst.Span, "")
-			}
-			return nil
+		if err := validatePlaceProjectionsCaps(tt, inst.Place, inst.Span); err != nil {
+			return err
 		}
 		if sliceAliasLocals[inst.Place.Local] {
 			return nil
@@ -399,58 +363,58 @@ func validateInstructionCaps(
 		return checkNonReturnType(inst.Type, "变量初始化或赋值")
 
 	case tir.OpLoad, tir.OpCopy, tir.OpMove:
-		if len(inst.Place.Projections) > 0 {
-			for _, p := range inst.Place.Projections {
-				if p.Kind != tir.ProjDeref {
-					return newCapErr("WON-GEN-002", "成员字段或数组下标读取尚未在 C11 后端实现", inst.Span, "")
-				}
-			}
+		if err := validatePlaceProjectionsCaps(tt, inst.Place, inst.Span); err != nil {
+			return err
 		}
 		if sliceAliasLocals[inst.Place.Local] && inst.Dest == tir.InvalidValue {
 			return nil
 		}
-		if isScalarArrayType(tt, inst.Type) {
-			return newCapErr("WON-GEN-002", fmt.Sprintf("定长数组类型 '%s' 不能按值复制或传递", tt.Format(inst.Type)), inst.Span, "")
-		}
 		return checkNonReturnType(inst.Type, "存储读取")
 
 	case tir.OpStore:
-		for _, p := range inst.Place.Projections {
-			if p.Kind != tir.ProjDeref {
-				return newCapErr("WON-GEN-002", "成员字段或数组下标写入尚未在 C11 后端实现", inst.Span, "")
-			}
+		if err := validatePlaceProjectionsCaps(tt, inst.Place, inst.Span); err != nil {
+			return err
 		}
 		return checkNonReturnType(inst.Type, "指针解引用存储")
 
 	case tir.OpBorrow:
-		if len(inst.Place.Projections) > 0 {
-			for _, p := range inst.Place.Projections {
-				if p.Kind != tir.ProjDeref {
-					return newCapErr("WON-GEN-002", "成员字段或数组元素引用借用尚未在 C11 后端实现", inst.Span, "")
-				}
-			}
+		if err := validatePlaceProjectionsCaps(tt, inst.Place, inst.Span); err != nil {
+			return err
 		}
 		ti := tt.Info(inst.Type)
 		if ti.Kind != tir.TypeRef {
 			return newCapErr("WON-GEN-002", "借用目标必须为引用类型", inst.Span, "")
 		}
-		elem := tt.Info(ti.Elem)
-		if isScalarArrayType(tt, ti.Elem) || isU8SliceRef(tt, inst.Type) || (elem.Kind == tir.TypeStr && !ti.IsMut) || IsScalarOrChar(elem) || (elem.Kind == tir.TypeStruct && elem.IsOpaqueForeign) || elem.Kind == tir.TypeRawPtr {
+		if isU8SliceRef(tt, inst.Type) {
 			return nil
 		}
-		return newCapErr("WON-GEN-002", fmt.Sprintf("引用类型 '%s' 尚不支持当前 C11 后端", tt.Format(inst.Type)), inst.Span, "")
+		return checkNonReturnType(inst.Type, "引用借用")
 
 	case tir.OpAggregateConstruct:
-		if inst.AggKind == tir.AggArrayRepeat && isScalarArrayType(tt, inst.Type) && inst.RepeatLen >= 0 {
-			return nil
+		switch inst.AggKind {
+		case tir.AggStruct, tir.AggTuple, tir.AggArray, tir.AggEnumVariant:
+			return checkNonReturnType(inst.Type, "聚合值构造")
+		case tir.AggArrayRepeat:
+			if inst.RepeatLen < 0 {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("定长数组重复构造长度 %d 非法", inst.RepeatLen), inst.Span, "")
+			}
+			return checkNonReturnType(inst.Type, "定长数组重复构造")
+		default:
+			return newCapErr("WON-GEN-002", fmt.Sprintf("聚合值构造 (%s) 尚未在当前 C11 后端实现", inst.AggKind), inst.Span, "")
 		}
-		return newCapErr("WON-GEN-002", fmt.Sprintf("聚合值构造 (%s) 尚未在当前 C11 后端实现", inst.AggKind), inst.Span, "")
 
 	case tir.OpExtract:
-		if inst.ExtractProj.Kind == tir.ProjDeref {
-			return checkNonReturnType(inst.Type, "指针解引用")
+		switch inst.ExtractProj.Kind {
+		case tir.ProjDeref, tir.ProjDowncast, tir.ProjField, tir.ProjTupleField, tir.ProjConstIndex:
+			return checkNonReturnType(inst.Type, "成员抽取")
+		case tir.ProjDynIndex:
+			if tt.Info(derefTypeIfRef(tt, inst.Src.Type)).Kind != tir.TypeArray || inst.ExtractProj.IndexValue == tir.InvalidValue {
+				return newCapErr("WON-GEN-002", "仅支持在定长数组上进行整型动态下标抽取", inst.Span, "")
+			}
+			return checkNonReturnType(inst.Type, "数组动态下标抽取")
+		default:
+			return newCapErr("WON-GEN-002", fmt.Sprintf("成员抽取 (%v) 尚未在当前 C11 后端实现", inst.ExtractProj.Kind), inst.Span, "")
 		}
-		return newCapErr("WON-GEN-002", fmt.Sprintf("成员抽取 (%v) 尚未在当前 C11 后端实现", inst.ExtractProj.Kind), inst.Span, "")
 
 	case tir.OpCall:
 		if tt.Info(inst.Type).Kind != tir.TypeUnit {
@@ -462,8 +426,16 @@ func validateInstructionCaps(
 
 	case tir.OpForeignCall:
 		if tt.Info(inst.Type).Kind != tir.TypeUnit {
+			if !isFFISafeType(tt, inst.Type, false) {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("FFI 调用 '%s::%s' 返回类型 '%s' 不允许跨 C ABI 边界传递", inst.CalleeNamespace, inst.CalleeName, tt.Format(inst.Type)), inst.Span, "ADR-012 禁止将 String、&str 或未注解原生 Struct/Enum/Tuple/Array 直接跨越 C FFI 边界。")
+			}
 			if _, err := MapType(tt, inst.Type, PosValue); err != nil {
 				return newCapErr("WON-GEN-002", fmt.Sprintf("FFI 调用 '%s::%s' 返回类型不支持 C11: %v", inst.CalleeNamespace, inst.CalleeName, err), inst.Span, "")
+			}
+		}
+		for i, a := range inst.Args {
+			if !isFFISafeType(tt, a.Type, true) {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("FFI 调用 '%s::%s' 参数 #%d 类型 '%s' 禁止隐式跨越 C ABI 边界", inst.CalleeNamespace, inst.CalleeName, i+1, tt.Format(a.Type)), inst.Span, "通用 '&str' 不保证以 NUL 结尾；请显式使用 '.as_ptr()' (*const u8) 或经验证的 FFI 句柄/标量类型。")
 			}
 		}
 		return nil
@@ -471,6 +443,14 @@ func validateInstructionCaps(
 	case tir.OpBuiltinCall:
 		switch inst.BuiltinKind {
 		case tir.BuiltinPrintln, tir.BuiltinBytesEqual:
+			return nil
+		case tir.BuiltinTryUnwrap:
+			if len(inst.Args) != 1 || tt.Info(inst.Args[0].Type).Kind != tir.TypeEnum {
+				return newCapErr("WON-GEN-002", "内置 '?' 解包操作符要求枚举 Result/Option 源操作数", inst.Span, "")
+			}
+			if tt.Info(inst.Type).Kind != tir.TypeUnit {
+				return checkNonReturnType(inst.Type, "'?' 解包结果")
+			}
 			return nil
 		case tir.BuiltinAsBytes:
 			if len(inst.Args) != 1 {
@@ -486,7 +466,7 @@ func validateInstructionCaps(
 				return newCapErr("WON-GEN-002", "内置 .as_ptr() 参数数量非法", inst.Span, "")
 			}
 			argTi := tt.Info(inst.Args[0].Type)
-			if argTi.Kind == tir.TypeRef && (tt.Info(argTi.Elem).Kind == tir.TypeStr || isScalarArrayType(tt, argTi.Elem) || isU8SliceRef(tt, inst.Args[0].Type)) {
+			if argTi.Kind == tir.TypeRef && (tt.Info(argTi.Elem).Kind == tir.TypeStr || isSupportedArrayType(tt, argTi.Elem) || isU8SliceRef(tt, inst.Args[0].Type)) {
 				return nil
 			}
 			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端暂不支持在 '%s' 上调用 .as_ptr()", tt.Format(inst.Args[0].Type)), inst.Span, "")
@@ -495,19 +475,19 @@ func validateInstructionCaps(
 				return newCapErr("WON-GEN-002", "内置 .as_mut_ptr() 参数数量非法", inst.Span, "")
 			}
 			argTi := tt.Info(inst.Args[0].Type)
-			if argTi.Kind == tir.TypeRef && argTi.IsMut && isScalarArrayType(tt, argTi.Elem) {
+			if argTi.Kind == tir.TypeRef && argTi.IsMut && isSupportedArrayType(tt, argTi.Elem) {
 				return nil
 			}
-			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端仅支持在可变局部标量数组上调用 .as_mut_ptr()，不支持 '%s'", tt.Format(inst.Args[0].Type)), inst.Span, "")
-		case tir.BuiltinLen:
+			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端仅支持在可变局部定长数组上调用 .as_mut_ptr()，不支持 '%s'", tt.Format(inst.Args[0].Type)), inst.Span, "")
+		case tir.BuiltinLen, tir.BuiltinIsEmpty:
 			if len(inst.Args) != 1 {
-				return newCapErr("WON-GEN-002", "内置 .len() 参数数量非法", inst.Span, "")
+				return newCapErr("WON-GEN-002", fmt.Sprintf("内置 .%s() 参数数量非法", inst.CalleeName), inst.Span, "")
 			}
 			argTi := tt.Info(inst.Args[0].Type)
-			if argTi.Kind == tir.TypeRef && isScalarArrayType(tt, argTi.Elem) {
+			if argTi.Kind == tir.TypeRef && ((tt.Info(argTi.Elem).Kind == tir.TypeStr && !argTi.IsMut) || isSupportedArrayType(tt, argTi.Elem)) {
 				return nil
 			}
-			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端仅支持定长标量数组 [T; N].len()，不支持 '%s'", tt.Format(inst.Args[0].Type)), inst.Span, "")
+			return newCapErr("WON-GEN-002", fmt.Sprintf("当前 C11 后端仅支持 '&str' 与定长数组 '[T; N]' 的 .%s()，不支持 '%s'", inst.CalleeName, tt.Format(inst.Args[0].Type)), inst.Span, "")
 		default:
 			return newCapErr("WON-GEN-002", fmt.Sprintf("内置函数或方法 '%s' 尚未在当前 C11 后端实现", inst.CalleeName), inst.Span, "")
 		}
@@ -517,14 +497,10 @@ func validateInstructionCaps(
 
 	case tir.OpDrop, tir.OpCondDrop:
 		g, ok := glueMap[inst.GlueID]
-		if !ok || g.Kind != tir.GlueForeignResource {
-			return newCapErr("WON-GEN-002", fmt.Sprintf("析构操作 g%d 尚未在当前 C11 后端实现", inst.GlueID), inst.Span, "")
+		if !ok {
+			return newCapErr("WON-GEN-002", fmt.Sprintf("析构操作 g%d 未在程序胶水目录中注册", inst.GlueID), inst.Span, "")
 		}
-		ns, cSym, ok := splitForeignSymbol(g.ReleaseSymbol)
-		if !ok || !isValidCIdentifier(cSym) || !validFFINS[ns] {
-			return newCapErr("WON-GEN-002", fmt.Sprintf("外部资源释放符号 '%s' 非法或缺少有效头文件绑定", g.ReleaseSymbol), inst.Span, "")
-		}
-		return nil
+		return validateSupportedDropGlue(tt, g, glueMap, validFFINS, make(map[tir.DropGlueID]bool))
 
 	default:
 		return newCapErr("WON-GEN-002", fmt.Sprintf("TIR 指令 '%s' 尚未在当前 C11 后端实现", inst.Kind), inst.Span, "")
@@ -546,8 +522,176 @@ func validateTerminatorCaps(tt *tir.TypeTable, fn *tir.Function, term tir.Termin
 		}
 		return nil
 	case tir.TermSwitch:
-		return newCapErr("WON-GEN-002", fmt.Sprintf("多路控制流 '%v' (match / for / ?) 尚未在当前 C11 后端实现", term.SwitchKind), term.Span, "")
+		if term.SwitchKind == tir.SwitchLoopIter {
+			return newCapErr("WON-GEN-002", "循环迭代器 'for' 尚未在当前 C11 后端实现", term.Span, "")
+		}
+		condBase := derefTypeIfRef(tt, term.Cond.Type)
+		ci := tt.Info(condBase)
+		switch term.SwitchKind {
+		case tir.SwitchTry:
+			if ci.Kind != tir.TypeEnum || len(ci.Variants) < 2 {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("'?' 错误传播操作符要求至少 2 个变体的枚举，实际为 '%s'", tt.Format(term.Cond.Type)), term.Span, "")
+			}
+			return nil
+		case tir.SwitchMatch, tir.SwitchGeneric:
+			if ci.Kind != tir.TypeEnum && ci.Kind != tir.TypeInt && ci.Kind != tir.TypeBool && ci.Kind != tir.TypeChar && ci.Kind != tir.TypeStruct && ci.Kind != tir.TypeTuple {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("match 目标类型 '%s' 尚未在当前 C11 后端实现", tt.Format(term.Cond.Type)), term.Span, "")
+			}
+			return nil
+		default:
+			return newCapErr("WON-GEN-002", fmt.Sprintf("多路控制流 '%v' 尚未在当前 C11 后端实现", term.SwitchKind), term.Span, "")
+		}
 	default:
 		return newCapErr("WON-GEN-002", fmt.Sprintf("未知控制流终结器 (TermKind=%d)", term.Kind), term.Span, "")
+	}
+}
+
+func validateSupportedDropGlue(tt *tir.TypeTable, g tir.DropGlueDesc, glueMap map[tir.DropGlueID]tir.DropGlueDesc, validFFINS map[string]bool, visiting map[tir.DropGlueID]bool) error {
+	if visiting[g.ID] {
+		return nil
+	}
+	visiting[g.ID] = true
+	defer delete(visiting, g.ID)
+
+	if _, err := MapType(tt, g.Type, PosLocal); err != nil {
+		return newCapErr("WON-GEN-002", fmt.Sprintf("析构胶水 '%s' 目标类型 %s 不支持降低至 ISO C11: %v", g.CanonicalName, tt.Format(g.Type), err), tir.SourceSpan{}, "")
+	}
+
+	switch g.Kind {
+	case tir.GlueForeignResource:
+		ns, cSym, ok := splitForeignSymbol(g.ReleaseSymbol)
+		if !ok || !isValidCIdentifier(cSym) || !validFFINS[ns] {
+			return newCapErr("WON-GEN-002", fmt.Sprintf("外部资源析构胶水 '%s' 缺少有效 C 释放符号或未绑定合法头文件 (%q)", g.CanonicalName, g.ReleaseSymbol), tir.SourceSpan{}, "受管外部资源必须通过已导入头文件与 FFI 契约目录明确提供可调用 C 释放符号。")
+		}
+		return nil
+	case tir.GlueStruct:
+		for _, f := range g.Fields {
+			if f.GlueID == tir.InvalidDropGlue {
+				continue
+			}
+			child, ok := glueMap[f.GlueID]
+			if !ok {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("结构体析构胶水 '%s' 引用缺失字段胶水 g%d", g.CanonicalName, f.GlueID), tir.SourceSpan{}, "")
+			}
+			if err := validateSupportedDropGlue(tt, child, glueMap, validFFINS, visiting); err != nil {
+				return err
+			}
+		}
+		return nil
+	case tir.GlueTuple:
+		for _, el := range g.TupleElems {
+			if el.GlueID == tir.InvalidDropGlue {
+				continue
+			}
+			child, ok := glueMap[el.GlueID]
+			if !ok {
+				return newCapErr("WON-GEN-002", fmt.Sprintf("元组析构胶水 '%s' 引用缺失元素胶水 g%d", g.CanonicalName, el.GlueID), tir.SourceSpan{}, "")
+			}
+			if err := validateSupportedDropGlue(tt, child, glueMap, validFFINS, visiting); err != nil {
+				return err
+			}
+		}
+		return nil
+	case tir.GlueArray:
+		if g.ElemGlueID == tir.InvalidDropGlue {
+			return nil
+		}
+		child, ok := glueMap[g.ElemGlueID]
+		if !ok {
+			return newCapErr("WON-GEN-002", fmt.Sprintf("数组析构胶水 '%s' 引用缺失元素胶水 g%d", g.CanonicalName, g.ElemGlueID), tir.SourceSpan{}, "")
+		}
+		return validateSupportedDropGlue(tt, child, glueMap, validFFINS, visiting)
+	case tir.GlueEnum:
+		for _, v := range g.Variants {
+			for _, el := range v.TupleElems {
+				if el.GlueID == tir.InvalidDropGlue {
+					continue
+				}
+				child, ok := glueMap[el.GlueID]
+				if !ok {
+					return newCapErr("WON-GEN-002", fmt.Sprintf("枚举析构胶水 '%s' 变体 '%s' 引用缺失元素胶水 g%d", g.CanonicalName, v.Name, el.GlueID), tir.SourceSpan{}, "")
+				}
+				if err := validateSupportedDropGlue(tt, child, glueMap, validFFINS, visiting); err != nil {
+					return err
+				}
+			}
+			for _, f := range v.StructFields {
+				if f.GlueID == tir.InvalidDropGlue {
+					continue
+				}
+				child, ok := glueMap[f.GlueID]
+				if !ok {
+					return newCapErr("WON-GEN-002", fmt.Sprintf("枚举析构胶水 '%s' 变体 '%s' 引用缺失字段胶水 g%d", g.CanonicalName, v.Name, f.GlueID), tir.SourceSpan{}, "")
+				}
+				if err := validateSupportedDropGlue(tt, child, glueMap, validFFINS, visiting); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	default:
+		return newCapErr("WON-GEN-002", fmt.Sprintf("析构胶水 '%s' (%s, 类型 %s) 尚未在当前 C11 后端实现原生析构支持", g.CanonicalName, g.Kind, tt.Format(g.Type)), tir.SourceSpan{}, "String 堆释放 (_won_free) 与自定义 impl Drop 析构留待后续阶段启用。")
+	}
+}
+
+func validatePlaceProjectionsCaps(tt *tir.TypeTable, place tir.Place, span tir.SourceSpan) error {
+	curType := place.RootType
+	for _, p := range place.Projections {
+		curBase := derefTypeIfRef(tt, curType)
+		switch p.Kind {
+		case tir.ProjDeref, tir.ProjField, tir.ProjTupleField, tir.ProjDowncast, tir.ProjConstIndex:
+			// 受支持的位置投影链
+		case tir.ProjDynIndex:
+			if tt.Info(curBase).Kind != tir.TypeArray || (p.IndexValue == tir.InvalidValue && p.IndexLocal == tir.InvalidLocal) {
+				return newCapErr("WON-GEN-002", "动态数组下标仅支持带有边界检查的定长数组 '[T; N][idx]'", span, "")
+			}
+		default:
+			return newCapErr("WON-GEN-002", fmt.Sprintf("不支持的存储位置投影 (%v)", p.Kind), span, "")
+		}
+		if p.Kind != tir.ProjDowncast && p.ElemType != tir.InvalidType {
+			curType = p.ElemType
+		}
+	}
+	return nil
+}
+
+func isSupportedArrayType(tt *tir.TypeTable, tid tir.TypeID) bool {
+	ti := tt.Info(tid)
+	return ti.Kind == tir.TypeArray && ti.ArrayLen >= 0 && !hasUnsupportedNativeFeature(tt, tid, make(map[tir.TypeID]bool, 8))
+}
+
+func derefTypeIfRef(tt *tir.TypeTable, tid tir.TypeID) tir.TypeID {
+	for i := 0; i < 8; i++ {
+		ti := tt.Info(tid)
+		if ti.Kind == tir.TypeRef && tt.Info(ti.Elem).Kind != tir.TypeStr && tt.Info(ti.Elem).Kind != tir.TypeSlice {
+			tid = ti.Elem
+			continue
+		}
+		break
+	}
+	return tid
+}
+
+func isFFISafeType(tt *tir.TypeTable, tid tir.TypeID, isArg bool) bool {
+	ti := tt.Info(tid)
+	if IsScalarOrChar(ti) {
+		return true
+	}
+	switch ti.Kind {
+	case tir.TypeRawPtr:
+		return true
+	case tir.TypeStruct:
+		return ti.IsOpaqueForeign && ti.ForeignNamespace != ""
+	case tir.TypeRef:
+		ei := tt.Info(ti.Elem)
+		if ei.Kind == tir.TypeStr {
+			return false
+		}
+		if ei.Kind == tir.TypeSlice && isArg {
+			return tt.Info(ei.Elem).Kind == tir.TypeInt && !tt.Info(ei.Elem).Signed && tt.Info(ei.Elem).Bits == 8
+		}
+		return IsScalarOrChar(ei) || (ei.Kind == tir.TypeStruct && ei.IsOpaqueForeign) || ei.Kind == tir.TypeUnit || isSupportedArrayType(tt, ti.Elem)
+	default:
+		return false
 	}
 }

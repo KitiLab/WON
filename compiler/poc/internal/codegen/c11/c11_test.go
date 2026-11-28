@@ -89,7 +89,7 @@ func TestC11MapTypeFailClosedAndTargetGate(t *testing.T) {
 		{tt.Float(64), c11.PosReturn, "double"},
 		{tt.Bool(), c11.PosLocal, "bool"},
 		{tt.Char(), c11.PosLocal, "uint32_t"},
-		{tStrView, c11.PosParam, "const char*"},
+		{tStrView, c11.PosParam, "_won_str_t"},
 		{tt.RawPtr(true, tUnit), c11.PosParam, "void*"},
 		{tt.RawPtr(false, tUnit), c11.PosParam, "const void*"},
 	}
@@ -97,6 +97,12 @@ func TestC11MapTypeFailClosedAndTargetGate(t *testing.T) {
 		got, err := c11.MapType(tt, tc.id, tc.pos)
 		if err != nil || got != tc.c {
 			t.Fatalf("MapType(%s, %d) = (%q, %v), want (%q, nil)", tt.Format(tc.id), tc.pos, got, err, tc.c)
+		}
+	}
+	for _, pos := range []c11.TypePos{c11.PosLocal, c11.PosParam, c11.PosReturn} {
+		arrC, err := c11.MapType(tt, tArr, pos)
+		if err != nil || !strings.HasPrefix(arrC, "_won_arr_") {
+			t.Fatalf("MapType([u8; 16], %d) = (%q, %v), want _won_arr_*", pos, arrC, err)
 		}
 	}
 
@@ -109,8 +115,6 @@ func TestC11MapTypeFailClosedAndTargetGate(t *testing.T) {
 		{tUnit, c11.PosParam},
 		{tI128, c11.PosLocal},
 		{tString, c11.PosLocal},
-		{tArr, c11.PosParam},
-		{tArr, c11.PosReturn},
 	}
 	for _, tc := range invalid {
 		if got, err := c11.MapType(tt, tc.id, tc.pos); err == nil {
@@ -143,10 +147,9 @@ func TestC11CapabilitiesRejectUnsupportedWithWONGEN002(t *testing.T) {
 		{"MainTakesParam", "fn main(x: i32) -> i32:\n    return x\n"},
 		{"FloatModulo", "fn main() -> i32:\n    let x: f64 = 5.0 % 2.0\n    return 0\n"},
 		{"StrEquality", "fn main() -> i32:\n    let eq = \"a\" == \"b\"\n    return 0\n"},
-		{"StrLen", "fn main() -> i32:\n    let s = \"abc\"\n    let l = s.len()\n    return 0\n"},
 		{"StringLocal", "fn main() -> i32:\n    let s = String::from(\"x\")\n    return 0\n"},
-		{"StructVar", "struct S:\n    v: i32\nfn main() -> i32:\n    let s = S { v: 1 }\n    return s.v\n"},
-		{"EnumMatch", "enum E:\n    A\n    B(i32)\nfn main() -> i32:\n    let e = E::B(1)\n    return match e:\n        E::A => 0\n        E::B(x) => x\n"},
+		{"StructWithString", "struct S:\n    s: String\nfn main() -> i32:\n    let x = S { s: String::from(\"a\") }\n    return 0\n"},
+		{"EnumWithString", "enum E:\n    A(String)\n    B\nfn main() -> i32:\n    let x = E::A(String::from(\"a\"))\n    return 0\n"},
 		{"ForLoop", "fn main() -> i32:\n    for i in 0..3:\n        return 0\n    return 0\n"},
 		{"UnitLiteralReturn", "fn main() -> unit:\n    return ()\n"},
 		{"CastOp", "fn main() -> i32:\n    let x: i64 = 1\n    return x as i32\n"},
