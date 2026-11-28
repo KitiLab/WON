@@ -2387,6 +2387,7 @@ func (fs *fnEmitState) emitPrintlnStmt(argOps []tir.Operand, args []string) erro
 		curArgs = curArgs[:0]
 	}
 
+	var dropsToRun []string
 	for i, argOp := range argOps {
 		// 无嵌入 NUL 字符的纯静态字符串字面量可直接合并至 C printf 格式串
 		if argOp.Kind == tir.OperandConst && argOp.Const.Kind == tir.ConstString && !strings.ContainsRune(argOp.Const.StrVal, 0) {
@@ -2417,6 +2418,11 @@ func (fs *fnEmitState) emitPrintlnStmt(argOps []tir.Operand, args []string) erro
 			}
 			c.writeLine(fmt.Sprintf("_won_write_bytes(%s, %s);", ptrExpr, lenExpr))
 			c.needWriteBytes = true
+			if ti.Kind == tir.TypeString && argOp.Kind != tir.OperandConst {
+				// 按值传入拥有型 String：println 消费并在整句打印完毕后安全析构，防止堆泄漏
+				dropsToRun = append(dropsToRun, fmt.Sprintf("_won_drop_string(&(%s));", args[i]))
+				c.needDropString = true
+			}
 			continue
 		}
 
@@ -2448,6 +2454,9 @@ func (fs *fnEmitState) emitPrintlnStmt(argOps []tir.Operand, args []string) erro
 
 	// 最终刷出尾部格式串并附带整句唯一换行符
 	flushPrintf(true)
+	for _, dropStmt := range dropsToRun {
+		c.writeLine(dropStmt)
+	}
 	return nil
 }
 

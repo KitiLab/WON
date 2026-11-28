@@ -31,7 +31,7 @@ func runStringTestWithASanUBSan(t *testing.T, src string, wantOutput string) {
 		t.Fatalf("未获得预期输出 %q，实际:\n%s", wantOutput, gccOut)
 	}
 
-	// 运行 ASan + UBSan 净室检查
+	// 运行 ASan + UBSan 净室检查（优先使用 gcc，若 gcc 缺少 sanitizer 运行时库则回退 clang）
 	tmp := t.TempDir()
 	cFile := filepath.Join(tmp, "asan_check.c")
 	binFile := filepath.Join(tmp, "asan_check")
@@ -39,14 +39,17 @@ func runStringTestWithASanUBSan(t *testing.T, src string, wantOutput string) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("gcc", "-std=c11", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g", cFile, "-o", binFile)
-	if out, err := cmd.CombinedOutput(); err == nil {
-		runCmd := exec.Command(binFile)
-		runOut, rerr := runCmd.CombinedOutput()
-		if rerr != nil {
-			t.Fatalf("ASan+UBSan 运行时检测到内存错误: %v\n输出:\n%s\nC源码:\n%s", rerr, string(runOut), cCode)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		cmd = exec.Command("clang", "-std=c11", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g", cFile, "-o", binFile)
+		if out2, err2 := cmd.CombinedOutput(); err2 != nil {
+			t.Logf("跳过 ASan+UBSan 编译: gcc=%v (%s), clang=%v (%s)", err, string(out), err2, string(out2))
+			return
 		}
-	} else {
-		t.Logf("跳过 ASan+UBSan 编译: %v: %s", err, string(out))
+	}
+	runCmd := exec.Command(binFile)
+	runOut, rerr := runCmd.CombinedOutput()
+	if rerr != nil {
+		t.Fatalf("ASan+UBSan 运行时检测到内存错误: %v\n输出:\n%s\nC源码:\n%s", rerr, string(runOut), cCode)
 	}
 }
 
